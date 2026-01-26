@@ -1,0 +1,794 @@
+#!/usr/bin/env bash
+# =============================================================================
+#  wt - Worktree Manager for Claude Code Workflow
+#  Cross-platform: Arch Linux / macOS
+# =============================================================================
+
+set -euo pipefail
+
+# -----------------------------------------------------------------------------
+#  Configuration
+# -----------------------------------------------------------------------------
+WT_BASE_DIR="${WT_BASE_DIR:-$HOME/worktrees}"
+WT_STATUS_DIR="${WT_STATUS_DIR:-$HOME/.local/state/wt}"
+WT_CONFIG_DIR="${WT_CONFIG_DIR:-$HOME/.config/wt}"
+WT_BIN_DIR="$(dirname "$(readlink -f "$0")")"
+
+# Ensure directories exist
+mkdir -p "$WT_BASE_DIR" "$WT_STATUS_DIR" "$WT_CONFIG_DIR"
+
+# -----------------------------------------------------------------------------
+#  Cross-Platform Helpers
+# -----------------------------------------------------------------------------
+notify() {
+    local title="$1"
+    local message="$2"
+    local urgency="${3:-normal}"  # low, normal, critical
+
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        osascript -e "display notification \"$message\" with title \"$title\""
+    else
+        notify-send -u "$urgency" "$title" "$message"
+    fi
+}
+
+clipboard_copy() {
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        pbcopy
+    else
+        if command -v wl-copy &>/dev/null; then
+            wl-copy
+        else
+            xclip -selection clipboard
+        fi
+    fi
+}
+
+# Check for required commands
+check_deps() {
+    local missing=()
+    for cmd in git tmux fzf; do
+        if ! command -v "$cmd" &>/dev/null; then
+            missing+=("$cmd")
+        fi
+    done
+
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        echo "Missing required commands: ${missing[*]}"
+        echo "Install with:"
+        if [[ "$OSTYPE" == "darwin"* ]]; then
+            echo "  brew install ${missing[*]}"
+        else
+            echo "  pacman -S ${missing[*]}  # or yay for AUR packages"
+        fi
+        exit 1
+    fi
+}
+
+# -----------------------------------------------------------------------------
+#  Status Tracking
+# -----------------------------------------------------------------------------
+get_status_file() {
+    local session_name="$1"
+    echo "$WT_STATUS_DIR/${session_name}.status"
+}
+
+set_status() {
+    local session_name="$1"
+    local status="$2"  # idle, working, input, error
+    local message="${3:-}"
+
+    local status_file
+    status_file=$(get_status_file "$session_name")
+
+    cat > "$status_file" <<EOF
+status=$status
+message=$message
+timestamp=$(date +%s)
+EOF
+}
+
+get_status() {
+    local session_name="$1"
+    local status_file
+    status_file=$(get_status_file "$session_name")
+
+    if [[ -f "$status_file" ]]; then
+        source "$status_file"
+        echo "$status"
+    else
+        echo "unknown"
+    fi
+}
+
+get_status_icon() {
+    local status="$1"
+    case "$status" in
+        working) echo -e "\033[32m●\033[0m" ;;  # green
+        idle)    echo -e "\033[34m○\033[0m" ;;  # blue
+        input)   echo -e "\033[33m⊘\033[0m" ;;  # yellow
+        error)   echo -e "\033[31m✗\033[0m" ;;  # red
+        *)       echo -e "\033[90m?\033[0m" ;;  # gray
+    esac
+}
+
+# -----------------------------------------------------------------------------
+#  Worktree Operations
+# -----------------------------------------------------------------------------
+# Get the bare repo path for a given repo
+get_bare_repo() {
+    local repo_path="$1"
+
+    # If it's already a bare repo or worktree, find the main .git
+    local git_dir
+    git_dir=$(git -C "$repo_path" rev-parse --git-dir 2>/dev/null)
+
+    if [[ "$git_dir" == *".git/worktrees/"* ]]; then
+        # This is a worktree, get the common dir
+        git -C "$repo_path" rev-parse --git-common-dir
+    else
+        echo "$git_dir"
+    fi
+}
+
+# List all worktrees across all repos
+list_worktrees() {
+    local format="${1:-full}"
+
+    # Find all git worktrees in the worktrees directory
+    if [[ ! -d "$WT_BASE_DIR" ]]; then
+        return
+    fi
+
+    while IFS= read -r -d '' wt_path; do
+        if [[ -d "$wt_path/.git" ]] || [[ -f "$wt_path/.git" ]]; then
+            local branch repo_name session_name status
+            branch=$(git -C "$wt_path" branch --show-current 2>/dev/null || echo "detached")
+            repo_name=$(basename "$(dirname "$wt_path")")
+            session_name="${repo_name}-${branch//\//-}"
+            status=$(get_status "$session_name")
+
+            case "$format" in
+                full)
+                    local icon
+                    icon=$(get_status_icon "$status")
+                    printf "%s %-20s %-25s %s\n" "$icon" "$repo_name" "$branch" "$wt_path"
+                    ;;
+                simple)
+                    echo "$session_name:$wt_path:$status"
+                    ;;
+                session)
+                    echo "$session_name"
+                    ;;
+            esac
+        fi
+    done < <(find "$WT_BASE_DIR" -maxdepth 2 -type d -print0 2>/dev/null)
+}
+
+# Create a new worktree and tmux session
+create_worktree() {
+    local repo_path="$1"
+    local branch="$2"
+    local start_claude="${3:-false}"
+    local task="${4:-}"
+
+    # Resolve to absolute path
+    repo_path=$(cd "$repo_path" && pwd)
+    local repo_name
+    repo_name=$(basename "$repo_path")
+
+    # Sanitize branch name for directory/session name
+    local safe_branch="${branch//\//-}"
+    local wt_path="$WT_BASE_DIR/$repo_name/$safe_branch"
+    local session_name="${repo_name}-${safe_branch}"
+
+    # Check if worktree already exists
+    if [[ -d "$wt_path" ]]; then
+        echo "Worktree already exists at $wt_path"
+        echo "Switching to existing session..."
+        switch_to "$session_name"
+        return
+    fi
+
+    echo "Creating worktree for $repo_name @ $branch..."
+
+    # Create the worktree
+    mkdir -p "$(dirname "$wt_path")"
+
+    # Check if branch exists
+    if git -C "$repo_path" show-ref --verify --quiet "refs/heads/$branch" 2>/dev/null; then
+        git -C "$repo_path" worktree add "$wt_path" "$branch"
+    else
+        # Branch doesn't exist, create it
+        echo "Branch '$branch' doesn't exist. Creating from current HEAD..."
+        git -C "$repo_path" worktree add -b "$branch" "$wt_path"
+    fi
+
+    # Create tmux session
+    echo "Creating tmux session: $session_name"
+
+    if tmux has-session -t "$session_name" 2>/dev/null; then
+        echo "Session already exists, attaching..."
+    else
+        # Create session with nvim in first window
+        tmux new-session -d -s "$session_name" -c "$wt_path" -n nvim
+
+        # Start nvim (claudecode.nvim will auto-start WebSocket server)
+        tmux send-keys -t "$session_name:nvim" "nvim" Enter
+
+        # Create claude window
+        tmux new-window -t "$session_name" -n claude -c "$wt_path"
+
+        # Create shell window
+        tmux new-window -t "$session_name" -n shell -c "$wt_path"
+
+        # Go back to nvim window
+        tmux select-window -t "$session_name:nvim"
+
+        # Set initial status
+        set_status "$session_name" "idle" "Ready"
+
+        # Wait for nvim/claudecode.nvim to start WebSocket server
+        echo "Waiting for Neovim IDE server to start..."
+        sleep 2
+
+        # Start claude with --ide to auto-connect to Neovim
+        if [[ "$start_claude" == "true" ]]; then
+            if [[ -n "$task" ]]; then
+                tmux send-keys -t "$session_name:claude" "$WT_BIN_DIR/claude-ide \"$task\"" Enter
+            else
+                tmux send-keys -t "$session_name:claude" "$WT_BIN_DIR/claude-ide" Enter
+            fi
+            set_status "$session_name" "working" "${task:-Interactive session}"
+        else
+            # Even without a task, prepare claude with --ide for when user wants it
+            tmux send-keys -t "$session_name:claude" "$WT_BIN_DIR/claude-ide" Enter
+        fi
+    fi
+
+    # Switch to the session
+    switch_to "$session_name"
+
+    notify "Worktree Created" "$repo_name @ $branch"
+}
+
+# Switch to a worktree session
+switch_to() {
+    local session_name="$1"
+
+    if ! tmux has-session -t "$session_name" 2>/dev/null; then
+        echo "Session '$session_name' does not exist"
+        return 1
+    fi
+
+    if [[ -n "${TMUX:-}" ]]; then
+        tmux switch-client -t "$session_name"
+    else
+        tmux attach-session -t "$session_name"
+    fi
+}
+
+# Delete a worktree and its session
+delete_worktree() {
+    local session_name="$1"
+    local force="${2:-false}"
+
+    # Find the worktree path
+    local wt_info
+    wt_info=$(list_worktrees simple | grep "^${session_name}:" || true)
+
+    if [[ -z "$wt_info" ]]; then
+        echo "Worktree session '$session_name' not found"
+        return 1
+    fi
+
+    local wt_path
+    wt_path=$(echo "$wt_info" | cut -d: -f2)
+
+    if [[ "$force" != "true" ]]; then
+        read -p "Delete worktree at $wt_path and session $session_name? [y/N] " confirm
+        if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+            echo "Cancelled"
+            return
+        fi
+    fi
+
+    # Kill tmux session
+    if tmux has-session -t "$session_name" 2>/dev/null; then
+        tmux kill-session -t "$session_name"
+    fi
+
+    # Remove worktree
+    if [[ -d "$wt_path" ]]; then
+        local repo_git_dir
+        repo_git_dir=$(git -C "$wt_path" rev-parse --git-common-dir 2>/dev/null || true)
+
+        if [[ -n "$repo_git_dir" ]]; then
+            git -C "$(dirname "$repo_git_dir")" worktree remove "$wt_path" --force
+        else
+            rm -rf "$wt_path"
+        fi
+    fi
+
+    # Remove status file
+    rm -f "$(get_status_file "$session_name")"
+
+    echo "Deleted: $session_name"
+    notify "Worktree Deleted" "$session_name"
+}
+
+# -----------------------------------------------------------------------------
+#  Interactive Repo/Branch Pickers (fzf-based)
+# -----------------------------------------------------------------------------
+
+# Find git repos in common locations
+find_git_repos() {
+    local search_dirs=(
+        "$HOME/gt"
+        "$HOME/code"
+        "$HOME/projects"
+        "$HOME/src"
+        "$HOME/dev"
+        "$HOME/work"
+        "$HOME/repos"
+    )
+
+    for dir in "${search_dirs[@]}"; do
+        if [[ -d "$dir/.git" ]] || [[ -f "$dir/.git" ]]; then
+            # The directory itself is a repo (or worktree)
+            echo "$dir"
+        elif [[ -d "$dir" ]]; then
+            # Find .git entries (directories or files for worktrees) up to 3 levels deep
+            find "$dir" -maxdepth 3 -name ".git" 2>/dev/null | while read -r git_entry; do
+                dirname "$git_entry"
+            done
+        fi
+    done
+}
+
+# Interactive repo picker
+pick_repo() {
+    check_deps
+
+    local repos
+    repos=$(find_git_repos | sort -u)
+
+    if [[ -z "$repos" ]]; then
+        echo "No git repos found in common locations" >&2
+        echo "Enter repo path manually:" >&2
+        read -r repo_path </dev/tty
+        echo "$repo_path"
+        return
+    fi
+
+    echo "$repos" | fzf \
+        --header="Select repository" \
+        --preview='
+            echo "=== Branches ==="
+            git -C {} branch --list | head -10
+            echo ""
+            echo "=== Recent commits ==="
+            git -C {} log --oneline -5 2>/dev/null
+        ' \
+        --preview-window=right:50% </dev/tty
+}
+
+# Interactive branch picker (shows existing + option to create new)
+pick_branch() {
+    local repo_path="$1"
+    check_deps
+
+    # Get all branches (local and remote)
+    local branches
+    branches=$(git -C "$repo_path" branch -a --format='%(refname:short)' 2>/dev/null | \
+               sed 's|origin/||' | sort -u | grep -v '^HEAD$')
+
+    # Add "create new" option at top
+    local selection
+    selection=$(echo -e "[+ Create new branch]\n$branches" | fzf \
+        --header="Select branch or create new" \
+        --preview='
+            branch="{}"
+            if [[ "$branch" == "[+ Create new branch]" ]]; then
+                echo "Type a new branch name after selecting this option"
+            else
+                repo_path="'"$repo_path"'"
+                echo "=== Branch: $branch ==="
+                git -C "$repo_path" log --oneline "$branch" -10 2>/dev/null || \
+                git -C "$repo_path" log --oneline "origin/$branch" -10 2>/dev/null || \
+                echo "Branch not yet created locally"
+            fi
+        ' \
+        --preview-window=right:50% </dev/tty)
+
+    if [[ "$selection" == "[+ Create new branch]" ]]; then
+        echo "" >&2
+        echo "Enter new branch name:" >&2
+        read -r new_branch </dev/tty
+
+        # Ask for base branch
+        echo "Base branch (default: current HEAD):" >&2
+        local base_branch
+        base_branch=$(git -C "$repo_path" branch --format='%(refname:short)' 2>/dev/null | \
+                      fzf --header="Select base branch (ESC for current HEAD)" </dev/tty || echo "")
+
+        if [[ -n "$base_branch" ]]; then
+            echo "${new_branch}:${base_branch}"
+        else
+            echo "$new_branch"
+        fi
+    else
+        echo "$selection"
+    fi
+}
+
+# Interactive new worktree creation
+interactive_new() {
+    local repo_path="${1:-}"
+    local branch="${2:-}"
+
+    # Step 1: Pick repo if not provided
+    if [[ -z "$repo_path" ]]; then
+        echo ""
+        echo "Available repositories:"
+        echo "───────────────────────"
+
+        local repos=()
+        local i=1
+
+        # Check main locations
+        for dir in "$HOME/gt" "$HOME/code" "$HOME/projects" "$HOME/src"; do
+            if [[ -d "$dir/.git" ]] || [[ -f "$dir/.git" ]]; then
+                repos+=("$dir")
+                echo "  [$i] $dir"
+                ((i++))
+            fi
+        done
+
+        if [[ ${#repos[@]} -eq 0 ]]; then
+            echo "  No repos found in common locations."
+            echo ""
+            echo -n "  Enter repo path: "
+            read -r repo_path </dev/tty
+        else
+            echo ""
+            echo -n "  Select [1-$((i-1))] or enter path: "
+            read -r selection </dev/tty
+
+            if [[ "$selection" =~ ^[0-9]+$ ]] && [[ $selection -ge 1 ]] && [[ $selection -lt $i ]]; then
+                repo_path="${repos[$((selection-1))]}"
+            else
+                repo_path="$selection"
+            fi
+        fi
+
+        if [[ -z "$repo_path" ]]; then
+            echo "No repo selected."
+            return 1
+        fi
+    fi
+
+    # Resolve to absolute path
+    repo_path=$(cd "$repo_path" 2>/dev/null && pwd) || {
+        echo "Invalid repo path: $repo_path"
+        return 1
+    }
+
+    # Step 2: Pick branch if not provided
+    if [[ -z "$branch" ]]; then
+        echo ""
+        echo "Branches in $repo_path:"
+        echo "───────────────────────"
+
+        local branches=()
+        local i=1
+        while IFS= read -r b; do
+            branches+=("$b")
+            echo "  [$i] $b"
+            ((i++))
+        done < <(git -C "$repo_path" branch --format='%(refname:short)' 2>/dev/null | head -10)
+
+        echo "  [n] Create new branch"
+        echo ""
+        echo -n "  Select or enter new branch name: "
+        read -r selection </dev/tty
+
+        if [[ "$selection" == "n" ]]; then
+            echo -n "  New branch name: "
+            read -r branch </dev/tty
+        elif [[ "$selection" =~ ^[0-9]+$ ]] && [[ $selection -ge 1 ]] && [[ $selection -lt $i ]]; then
+            branch="${branches[$((selection-1))]}"
+        else
+            branch="$selection"
+        fi
+
+        if [[ -z "$branch" ]]; then
+            echo "No branch selected."
+            return 1
+        fi
+    fi
+
+    echo ""
+    echo "Creating worktree: $repo_path @ $branch"
+    create_worktree "$repo_path" "$branch" false ""
+}
+
+# -----------------------------------------------------------------------------
+#  Interactive Worktree Picker (fzf-based)
+# -----------------------------------------------------------------------------
+pick_worktree() {
+    check_deps
+
+    local selection
+    selection=$(list_worktrees full | fzf \
+        --ansi \
+        --header="Select worktree (Enter to switch, Ctrl-D to delete)" \
+        --preview='
+            session=$(echo {} | awk "{print \$2\"-\"\$3}" | sed "s|/|-|g")
+            wt_path=$(echo {} | awk "{print \$4}")
+            echo "=== Session: $session ==="
+            echo ""
+            if [ -d "$wt_path" ]; then
+                echo "=== Recent commits ==="
+                git -C "$wt_path" log --oneline -5 2>/dev/null || echo "No commits"
+                echo ""
+                echo "=== Status ==="
+                git -C "$wt_path" status -s 2>/dev/null | head -20 || echo "Clean"
+            fi
+        ' \
+        --preview-window=right:50% \
+        --bind='ctrl-d:execute(wt delete $(echo {} | awk "{print \$2\"-\"\$3}" | sed "s|/|-|g") --force)+reload(wt list)' \
+        || true)
+
+    if [[ -n "$selection" ]]; then
+        local repo_name branch
+        repo_name=$(echo "$selection" | awk '{print $2}')
+        branch=$(echo "$selection" | awk '{print $3}')
+        local session_name="${repo_name}-${branch//\//-}"
+        switch_to "$session_name"
+    fi
+}
+
+# -----------------------------------------------------------------------------
+#  Dashboard (Full TUI)
+# -----------------------------------------------------------------------------
+dashboard() {
+    check_deps
+
+    # Check if gum is available for nicer UI
+    local use_gum=false
+    if command -v gum &>/dev/null; then
+        use_gum=true
+    fi
+
+    while true; do
+        clear
+
+        echo ""
+        if [[ "$use_gum" == "true" ]]; then
+            gum style --border double --padding "0 2" --border-foreground 212 \
+                "WORKTREE COMMAND CENTER"
+        else
+            echo "╔══════════════════════════════════════════════════════════════════╗"
+            echo "║              WORKTREE COMMAND CENTER                             ║"
+            echo "╚══════════════════════════════════════════════════════════════════╝"
+        fi
+        echo ""
+
+        # Aggregate stats
+        local total=0 working=0 idle=0 input_needed=0
+        while IFS=: read -r name path status; do
+            ((total++)) || true
+            case "$status" in
+                working) ((working++)) || true ;;
+                idle) ((idle++)) || true ;;
+                input) ((input_needed++)) || true ;;
+            esac
+        done < <(list_worktrees simple)
+
+        echo "  Status: $(get_status_icon working) $working working  $(get_status_icon idle) $idle idle  $(get_status_icon input) $input_needed need input"
+        echo ""
+        echo "  ─────────────────────────────────────────────────────────────────"
+        echo ""
+
+        # List worktrees
+        if [[ $total -eq 0 ]]; then
+            echo "  No worktrees found. Create one with: wt new <repo> <branch>"
+        else
+            echo "   #  Repository            Branch"
+            echo "  ─── ──────────────────── ─────────────────────────"
+            local i=1
+            while IFS=: read -r session_name wt_path status; do
+                local icon repo_name branch
+                icon=$(get_status_icon "$status")
+                repo_name=$(basename "$(dirname "$wt_path")")
+                branch=$(basename "$wt_path")
+                printf "  %s%-2d %-20s %-25s\n" "$icon" "$i" "$repo_name" "$branch"
+                ((i++))
+            done < <(list_worktrees simple)
+        fi
+
+        echo ""
+        echo "  ─────────────────────────────────────────────────────────────────"
+        echo ""
+        echo "  Commands:"
+        echo "    [1-9] Switch to worktree    [n] New worktree"
+        echo "    [d]   Delete worktree       [r] Refresh"
+        echo "    [q]   Quit"
+        echo ""
+
+        read -rsn1 key
+
+        case "$key" in
+            [1-9])
+                local session
+                session=$(list_worktrees session | sed -n "${key}p")
+                if [[ -n "$session" ]]; then
+                    switch_to "$session"
+                    return
+                fi
+                ;;
+            n|N)
+                # Run interactive new, catch errors
+                if interactive_new; then
+                    return
+                else
+                    echo ""
+                    echo "  Press any key to continue..."
+                    read -rsn1
+                fi
+                ;;
+            d|D)
+                echo ""
+                read -p "  Session name to delete: " del_session
+                if [[ -n "$del_session" ]]; then
+                    delete_worktree "$del_session"
+                fi
+                ;;
+            r|R)
+                continue
+                ;;
+            q|Q)
+                return
+                ;;
+        esac
+    done
+}
+
+# -----------------------------------------------------------------------------
+#  Claude Integration
+# -----------------------------------------------------------------------------
+start_claude() {
+    local session_name="$1"
+    local task="$2"
+
+    if ! tmux has-session -t "$session_name" 2>/dev/null; then
+        echo "Session '$session_name' does not exist"
+        return 1
+    fi
+
+    # Send claude command with --ide to connect to Neovim
+    if [[ -n "$task" ]]; then
+        tmux send-keys -t "$session_name:claude" "$WT_BIN_DIR/claude-ide \"$task\"" Enter
+    else
+        tmux send-keys -t "$session_name:claude" "$WT_BIN_DIR/claude-ide" Enter
+    fi
+    set_status "$session_name" "working" "${task:-Interactive session}"
+
+    notify "Claude Started" "$session_name: ${task:-Interactive session}"
+}
+
+# -----------------------------------------------------------------------------
+#  Main CLI
+# -----------------------------------------------------------------------------
+usage() {
+    cat <<EOF
+wt - Worktree Manager for Claude Code Workflow
+
+Usage: wt <command> [options]
+
+Commands:
+  list, ls              List all worktrees
+  new [repo] [branch]   Create new worktree (interactive if args omitted)
+  pick, p               Interactive worktree picker (fzf)
+  switch, s <session>   Switch to a worktree session
+  delete, rm <session>  Delete a worktree and session
+  dashboard, d          Open full dashboard TUI
+
+  claude <session> <task>   Start Claude on a task in a session
+  status <session>          Get status of a session
+  set-status <session> <status> [message]   Set session status
+
+Options:
+  --start-claude        Start Claude after creating worktree
+  --task <task>         Task description for Claude
+  --force               Skip confirmation prompts
+
+Examples:
+  wt new                    # Interactive: pick repo, then branch
+  wt new ~/gt               # Interactive: pick branch for this repo
+  wt new ~/gt feature-x     # Direct: create feature-x in ~/gt
+  wt pick
+  wt dashboard
+
+Environment:
+  WT_BASE_DIR     Base directory for worktrees (default: ~/worktrees)
+  WT_STATUS_DIR   Status file directory (default: ~/.local/state/wt)
+EOF
+}
+
+main() {
+    local cmd="${1:-dashboard}"
+    shift || true
+
+    case "$cmd" in
+        list|ls)
+            list_worktrees full
+            ;;
+        new)
+            local repo="${1:-}"
+            local branch="${2:-}"
+            local start_claude=false
+            local task=""
+
+            # Skip repo/branch args if they look like flags
+            if [[ "$repo" == --* ]]; then
+                repo=""
+                branch=""
+            elif [[ "$branch" == --* ]]; then
+                branch=""
+                shift 1 || true
+            else
+                shift 2 || true
+            fi
+
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --start-claude) start_claude=true; shift ;;
+                    --task) task="$2"; shift 2 ;;
+                    *) shift ;;
+                esac
+            done
+
+            # Use interactive mode if repo or branch not provided
+            if [[ -z "$repo" || -z "$branch" ]]; then
+                interactive_new "$repo" "$branch"
+            else
+                create_worktree "$repo" "$branch" "$start_claude" "$task"
+            fi
+            ;;
+        pick|p)
+            pick_worktree
+            ;;
+        switch|s)
+            switch_to "${1:-}"
+            ;;
+        delete|rm)
+            local force=false
+            [[ "${2:-}" == "--force" ]] && force=true
+            delete_worktree "${1:-}" "$force"
+            ;;
+        dashboard|d|"")
+            dashboard
+            ;;
+        claude)
+            start_claude "${1:-}" "${2:-}"
+            ;;
+        status)
+            get_status "${1:-}"
+            ;;
+        set-status)
+            set_status "${1:-}" "${2:-}" "${3:-}"
+            ;;
+        help|--help|-h)
+            usage
+            ;;
+        *)
+            echo "Unknown command: $cmd"
+            usage
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"

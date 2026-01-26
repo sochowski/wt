@@ -1,0 +1,182 @@
+#!/usr/bin/env bash
+# =============================================================================
+#  wt-hook - Claude Code Hook Handler for Worktree Status Tracking
+#  Called by Claude Code hooks to update worktree status automatically
+# =============================================================================
+
+set -euo pipefail
+
+WT_STATUS_DIR="${WT_STATUS_DIR:-$HOME/.local/state/wt}"
+WT_BASE_DIR="${WT_BASE_DIR:-$HOME/worktrees}"
+
+# Ensure status directory exists
+mkdir -p "$WT_STATUS_DIR"
+
+# -----------------------------------------------------------------------------
+#  Determine Session Name from CWD
+# -----------------------------------------------------------------------------
+get_session_name() {
+    local cwd="${1:-$(pwd)}"
+
+    # Check if we're in a worktree under WT_BASE_DIR
+    if [[ "$cwd" == "$WT_BASE_DIR"/* ]]; then
+        # Extract repo/branch from path like ~/worktrees/repo/branch
+        local rel_path="${cwd#$WT_BASE_DIR/}"
+        local repo_name="${rel_path%%/*}"
+        local branch_name="${rel_path#*/}"
+        branch_name="${branch_name%%/*}"  # Get first component after repo
+
+        if [[ -n "$repo_name" && -n "$branch_name" ]]; then
+            echo "${repo_name}-${branch_name}"
+            return 0
+        fi
+    fi
+
+    # Fallback: try to get from git branch
+    if git rev-parse --is-inside-work-tree &>/dev/null; then
+        local repo_name
+        repo_name=$(basename "$(git rev-parse --show-toplevel)")
+        local branch
+        branch=$(git branch --show-current 2>/dev/null || echo "detached")
+        branch="${branch//\//-}"  # Sanitize slashes
+        echo "${repo_name}-${branch}"
+        return 0
+    fi
+
+    return 1
+}
+
+# -----------------------------------------------------------------------------
+#  Status Functions
+# -----------------------------------------------------------------------------
+set_status() {
+    local session_name="$1"
+    local status="$2"
+    local message="${3:-}"
+
+    local status_file="$WT_STATUS_DIR/${session_name}.status"
+
+    cat > "$status_file" <<EOF
+status=$status
+message=$message
+timestamp=$(date +%s)
+EOF
+}
+
+# -----------------------------------------------------------------------------
+#  Notification (Cross-Platform)
+# -----------------------------------------------------------------------------
+notify() {
+    local title="$1"
+    local message="$2"
+    local urgency="${3:-normal}"
+
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        osascript -e "display notification \"$message\" with title \"$title\"" 2>/dev/null || true
+    else
+        notify-send -u "$urgency" "$title" "$message" 2>/dev/null || true
+    fi
+}
+
+# -----------------------------------------------------------------------------
+#  Hook Handlers
+# -----------------------------------------------------------------------------
+# Read JSON from stdin (Claude passes context this way)
+read_stdin() {
+    local input=""
+    if read -t 0.1 -r line; then
+        input="$line"
+        while read -t 0.1 -r line; do
+            input+="$line"
+        done
+    fi
+    echo "$input"
+}
+
+handle_session_start() {
+    local session_name
+    if session_name=$(get_session_name); then
+        set_status "$session_name" "working" "Claude started"
+    fi
+}
+
+handle_stop() {
+    local session_name
+    if session_name=$(get_session_name); then
+        set_status "$session_name" "idle" "Claude finished"
+    fi
+}
+
+handle_notification() {
+    local notification_type="${1:-}"
+    local session_name
+
+    if ! session_name=$(get_session_name); then
+        return
+    fi
+
+    case "$notification_type" in
+        idle_prompt|permission_prompt)
+            set_status "$session_name" "input" "Waiting for input"
+            notify "Claude Needs Input" "$session_name: Waiting for your response" "normal"
+            ;;
+        *)
+            # Other notifications don't change status
+            ;;
+    esac
+}
+
+handle_tool_use() {
+    local tool_name="${1:-}"
+    local session_name
+
+    if ! session_name=$(get_session_name); then
+        return
+    fi
+
+    # When Claude uses tools, it's actively working
+    set_status "$session_name" "working" "Using $tool_name"
+}
+
+handle_error() {
+    local session_name
+    if session_name=$(get_session_name); then
+        set_status "$session_name" "error" "Claude encountered an error"
+        notify "Claude Error" "$session_name: Something went wrong" "critical"
+    fi
+}
+
+# -----------------------------------------------------------------------------
+#  Main
+# -----------------------------------------------------------------------------
+main() {
+    local hook_type="${1:-}"
+    local extra="${2:-}"
+
+    # Read stdin (Claude passes JSON context)
+    local stdin_data
+    stdin_data=$(read_stdin)
+
+    case "$hook_type" in
+        session-start)
+            handle_session_start
+            ;;
+        stop)
+            handle_stop
+            ;;
+        notification)
+            handle_notification "$extra"
+            ;;
+        pre-tool|post-tool)
+            handle_tool_use "$extra"
+            ;;
+        error)
+            handle_error
+            ;;
+        *)
+            # Unknown hook type, ignore
+            ;;
+    esac
+}
+
+main "$@"

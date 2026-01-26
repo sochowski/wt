@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# =============================================================================
+#  wt-tmux-status - Tmux status bar segment showing worktree status
+#  Add to tmux status-right: #($HOME/bin/wt-tmux-status)
+#  Cross-platform: Arch Linux / macOS
+# =============================================================================
+
+WT_STATUS_DIR="${WT_STATUS_DIR:-$HOME/.local/state/wt}"
+
+# Count statuses
+working=0
+idle=0
+input=0
+error=0
+
+if [[ -d "$WT_STATUS_DIR" ]]; then
+    for status_file in "$WT_STATUS_DIR"/*.status; do
+        [[ -f "$status_file" ]] || continue
+
+        status=""
+        source "$status_file" 2>/dev/null || continue
+
+        case "$status" in
+            working) ((working++)) ;;
+            idle)    ((idle++)) ;;
+            input)   ((input++)) ;;
+            error)   ((error++)) ;;
+        esac
+    done
+fi
+
+# Build output string (using terminal palette colours)
+output=""
+
+# Only show non-zero counts
+[[ $working -gt 0 ]] && output+="#[fg=colour2]●${working}#[fg=default] "
+[[ $idle -gt 0 ]]    && output+="#[fg=colour4]○${idle}#[fg=default] "
+[[ $input -gt 0 ]]   && output+="#[fg=colour3]⊘${input}#[fg=default] "
+[[ $error -gt 0 ]]   && output+="#[fg=colour1]✗${error}#[fg=default] "
+
+# Trim trailing space
+output="${output% }"
+
+# If nothing tracked, show empty or placeholder
+if [[ -z "$output" ]]; then
+    echo ""
+else
+    echo "$output"
+fi
