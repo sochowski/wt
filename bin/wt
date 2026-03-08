@@ -383,20 +383,21 @@ create_worktree() {
             apply_allowed_tools "$wt_path"
         fi
 
-        # Create session with agent as first window
-        tmux new-session -d -s "$session_name" -c "$wt_path" -n agent
+        # Create session with main window (nvim left, agent right)
+        tmux new-session -d -s "$session_name" -c "$wt_path" -n main
 
-        # Create nvim window
-        tmux new-window -t "$session_name" -n nvim -c "$wt_path"
+        # Start nvim in the left pane
+        tmux send-keys -t "$session_name:main" "nvim" Enter
 
-        # Start nvim (claudecode.nvim will auto-start WebSocket server)
-        tmux send-keys -t "$session_name:nvim" "nvim" Enter
+        # Split right for agent pane
+        tmux split-window -h -t "$session_name:main" -c "$wt_path"
 
         # Create shell window
         tmux new-window -t "$session_name" -n shell -c "$wt_path"
 
-        # Select agent window
-        tmux select-window -t "$session_name:agent"
+        # Select agent pane (right pane of main window)
+        tmux select-window -t "$session_name:main"
+        tmux select-pane -t "$session_name:main.1"
 
         local agent_display
         agent_display=$(agent_label "$agent")
@@ -433,14 +434,14 @@ EOF2
         # Start agent via wt-agent-launch
         if [[ "$start_agent" == "true" ]]; then
             if [[ -n "$task" ]]; then
-                tmux send-keys -t "$session_name:agent" "$WT_BIN_DIR/wt-agent-launch \"$task\"" Enter
+                tmux send-keys -t "$session_name:main.1" "$WT_BIN_DIR/wt-agent-launch \"$task\"" Enter
             else
-                tmux send-keys -t "$session_name:agent" "$WT_BIN_DIR/wt-agent-launch" Enter
+                tmux send-keys -t "$session_name:main.1" "$WT_BIN_DIR/wt-agent-launch" Enter
             fi
             set_status "$session_name" "working" "${task:-Interactive session}"
         else
             # Start agent for when user wants it
-            tmux send-keys -t "$session_name:agent" "$WT_BIN_DIR/wt-agent-launch" Enter
+            tmux send-keys -t "$session_name:main.1" "$WT_BIN_DIR/wt-agent-launch" Enter
         fi
     fi
 
@@ -795,7 +796,7 @@ pick_worktree() {
         --delimiter=: \
         --with-nth=2 \
         --header="Select worktree (Enter=switch, Ctrl-D=delete, ?=preview)" \
-        --preview="tmux capture-pane -t {1}:agent -p -e 2>/dev/null || tmux capture-pane -t {1}:claude -p -e 2>/dev/null || echo '(no agent pane)'" \
+        --preview="tmux capture-pane -t {1}:main.1 -p -e 2>/dev/null || tmux capture-pane -t {1}:agent -p -e 2>/dev/null || echo '(no agent pane)'" \
         --preview-window=right:60% \
         --bind="ctrl-d:execute(wt delete {1} --force)+reload($WT_BIN_DIR/wt pick-list)" \
         || true)
@@ -1043,9 +1044,9 @@ start_agent() {
 
     # Send agent launch command
     if [[ -n "$task" ]]; then
-        tmux send-keys -t "$session_name:agent" "$WT_BIN_DIR/wt-agent-launch \"$task\"" Enter
+        tmux send-keys -t "$session_name:main.1" "$WT_BIN_DIR/wt-agent-launch \"$task\"" Enter
     else
-        tmux send-keys -t "$session_name:agent" "$WT_BIN_DIR/wt-agent-launch" Enter
+        tmux send-keys -t "$session_name:main.1" "$WT_BIN_DIR/wt-agent-launch" Enter
     fi
     set_status "$session_name" "working" "${task:-Interactive session}"
 

@@ -198,19 +198,19 @@ test_create_worktree() {
     # Check session has 3 windows
     local win_count
     win_count=$(tmux list-windows -t "$TEST_SESSION" 2>/dev/null | wc -l | tr -d ' ')
-    if [[ "$win_count" -eq 3 ]]; then
-        pass "session has 3 windows"
+    if [[ "$win_count" -eq 2 ]]; then
+        pass "session has 2 windows"
     else
-        fail "session has $win_count windows (expected 3)"
+        fail "session has $win_count windows (expected 2)"
     fi
 
     # Check window names
     local windows
     windows=$(tmux list-windows -t "$TEST_SESSION" -F "#{window_name}" 2>/dev/null | tr '\n' ',')
-    if echo "$windows" | grep -q "nvim" && echo "$windows" | grep -q "agent" && echo "$windows" | grep -q "shell"; then
-        pass "windows named correctly: nvim, agent, shell"
+    if echo "$windows" | grep -q "main" && echo "$windows" | grep -q "shell"; then
+        pass "windows named correctly: main, shell"
     else
-        fail "unexpected window names: $windows (expected nvim, agent, shell)"
+        fail "unexpected window names: $windows (expected main, shell)"
     fi
 }
 
