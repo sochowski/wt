@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  wt installer - Sets up symlinks and merges config
+#  Supports: Claude, Codex, Gemini
 #  Run: ./install.sh
 # =============================================================================
 
@@ -10,9 +11,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN_DIR="$HOME/bin"
 CONFIG_DIR="$HOME/.config/wt"
 CLAUDE_SETTINGS="$HOME/.claude/settings.json"
+GEMINI_SETTINGS="$HOME/.gemini/settings.json"
+CODEX_CONFIG="$HOME/.codex/config.toml"
 
-echo "Installing wt - Worktree Manager for Claude Code"
-echo "================================================="
+echo "Installing wt - Worktree Manager for Multi-Agent CLI"
+echo "====================================================="
 echo ""
 
 # -----------------------------------------------------------------------------
@@ -62,26 +65,67 @@ ln -s "$SCRIPT_DIR/config/tmux-wt.conf" "$target"
 echo "  tmux-wt.conf -> $target"
 
 # -----------------------------------------------------------------------------
-#  Merge Claude hooks
+#  Merge Agent Hooks
 # -----------------------------------------------------------------------------
-echo "Configuring Claude Code hooks..."
+echo "Configuring agent hooks..."
 
 if command -v jq &>/dev/null; then
-    # Use jq for proper JSON merge
-    if [[ -f "$CLAUDE_SETTINGS" ]]; then
-        # Merge hooks into existing settings
-        jq -s '.[0] * .[1]' "$CLAUDE_SETTINGS" "$SCRIPT_DIR/config/claude-hooks.json" > "$CLAUDE_SETTINGS.tmp"
-        mv "$CLAUDE_SETTINGS.tmp" "$CLAUDE_SETTINGS"
-        echo "  Merged hooks into existing $CLAUDE_SETTINGS"
+    # --- Claude ---
+    if command -v claude &>/dev/null; then
+        mkdir -p "$HOME/.claude"
+        if [[ -f "$CLAUDE_SETTINGS" ]]; then
+            jq -s '.[0] * .[1]' "$CLAUDE_SETTINGS" "$SCRIPT_DIR/config/claude-hooks.json" > "$CLAUDE_SETTINGS.tmp"
+            mv "$CLAUDE_SETTINGS.tmp" "$CLAUDE_SETTINGS"
+            echo "  Claude: merged hooks into $CLAUDE_SETTINGS"
+        else
+            cp "$SCRIPT_DIR/config/claude-hooks.json" "$CLAUDE_SETTINGS"
+            echo "  Claude: created $CLAUDE_SETTINGS"
+        fi
     else
-        # Create new settings file
-        cp "$SCRIPT_DIR/config/claude-hooks.json" "$CLAUDE_SETTINGS"
-        echo "  Created $CLAUDE_SETTINGS"
+        echo "  Claude: not installed, skipping hooks"
+    fi
+
+    # --- Gemini ---
+    if command -v gemini &>/dev/null; then
+        mkdir -p "$HOME/.gemini"
+        if [[ -f "$GEMINI_SETTINGS" ]]; then
+            jq -s '.[0] * .[1]' "$GEMINI_SETTINGS" "$SCRIPT_DIR/config/hooks-gemini.json" > "$GEMINI_SETTINGS.tmp"
+            mv "$GEMINI_SETTINGS.tmp" "$GEMINI_SETTINGS"
+            echo "  Gemini: merged hooks into $GEMINI_SETTINGS"
+        else
+            cp "$SCRIPT_DIR/config/hooks-gemini.json" "$GEMINI_SETTINGS"
+            echo "  Gemini: created $GEMINI_SETTINGS"
+        fi
+    else
+        echo "  Gemini: not installed, skipping hooks"
+    fi
+
+    # --- Codex ---
+    if command -v codex &>/dev/null; then
+        mkdir -p "$HOME/.codex"
+        if [[ -f "$CODEX_CONFIG" ]]; then
+            if ! grep -q 'wt-hook' "$CODEX_CONFIG" 2>/dev/null; then
+                cat >> "$CODEX_CONFIG" <<'TOML'
+
+[notify]
+command = "$HOME/bin/wt-hook stop"
+TOML
+                echo "  Codex: added notify hook to $CODEX_CONFIG"
+            else
+                echo "  Codex: hooks already configured"
+            fi
+        else
+            cat > "$CODEX_CONFIG" <<'TOML'
+[notify]
+command = "$HOME/bin/wt-hook stop"
+TOML
+            echo "  Codex: created $CODEX_CONFIG"
+        fi
+    else
+        echo "  Codex: not installed, skipping hooks"
     fi
 else
-    echo "  Warning: jq not found. Please manually merge config/claude-hooks.json"
-    echo "  into $CLAUDE_SETTINGS"
-    echo ""
+    echo "  Warning: jq not found. Please manually merge hook configs."
     echo "  Install jq with:"
     if [[ "$OSTYPE" == "darwin"* ]]; then
         echo "    brew install jq"
@@ -135,7 +179,7 @@ echo "  Reload tmux config with: tmux source-file ~/.tmux.conf"
 #  Done
 # -----------------------------------------------------------------------------
 echo ""
-echo "================================================="
+echo "====================================================="
 echo "Installation complete!"
 echo ""
 echo "Quick start:"

@@ -1,0 +1,152 @@
+#!/usr/bin/env bash
+# =============================================================================
+#  wt-agent-launch - Multi-agent launcher for worktree sessions
+#  Reads @wt-agent from current tmux session to pick the right CLI
+#  For Claude: auto-connects to the right Neovim via IDE lock files
+#  For Codex/Gemini: launches the binary directly
+# =============================================================================
+
+set -euo pipefail
+
+# Determine which agent to launch
+AGENT="${WT_DEFAULT_AGENT:-claude}"
+if [[ -n "${TMUX:-}" ]]; then
+    local_session=$(tmux display-message -p '#{session_name}' 2>/dev/null || true)
+    if [[ -n "$local_session" ]]; then
+        tmux_agent=$(tmux show-option -qv -t "$local_session" @wt-agent 2>/dev/null || true)
+        if [[ -n "$tmux_agent" ]]; then
+            AGENT="$tmux_agent"
+        fi
+    fi
+fi
+
+case "$AGENT" in
+    claude)
+        # Claude gets IDE integration via lock-file matching
+        CLAUDE_IDE_DIR="${HOME}/.claude/ide"
+        CLAUDE_IDE_HIDDEN="${HOME}/.claude/ide/.hidden"
+        CWD="$(pwd)"
+
+        find_matching_ide() {
+            if [[ ! -d "$CLAUDE_IDE_DIR" ]]; then
+                return 1
+            fi
+
+            local best_match=""
+            local best_match_len=0
+
+            for lock_file in "$CLAUDE_IDE_DIR"/*.lock; do
+                [[ -f "$lock_file" ]] || continue
+
+                local workspace
+                workspace=$(grep -o '"workspaceFolders":\[[^]]*\]' "$lock_file" 2>/dev/null | \
+                            grep -o '"/[^"]*"' | tr -d '"' | head -1)
+
+                if [[ -n "$workspace" ]]; then
+                    if [[ "$CWD" == "$workspace"* ]]; then
+                        local pid
+                        pid=$(grep -o '"pid":[0-9]*' "$lock_file" | grep -o '[0-9]*')
+                        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+                            local workspace_len=${#workspace}
+                            if [[ $workspace_len -gt $best_match_len ]]; then
+                                best_match="$lock_file"
+                                best_match_len=$workspace_len
+                            fi
+                        fi
+                    fi
+                fi
+            done
+
+            if [[ -n "$best_match" ]]; then
+                echo "$best_match"
+                return 0
+            fi
+            return 1
+        }
+
+        cleanup_stale_locks() {
+            if [[ ! -d "$CLAUDE_IDE_DIR" ]]; then
+                return
+            fi
+
+            for lock_file in "$CLAUDE_IDE_DIR"/*.lock; do
+                [[ -f "$lock_file" ]] || continue
+
+                local pid
+                pid=$(grep -o '"pid":[0-9]*' "$lock_file" | grep -o '[0-9]*')
+
+                if [[ -n "$pid" ]] && ! kill -0 "$pid" 2>/dev/null; then
+                    rm -f "$lock_file"
+                fi
+            done
+        }
+
+        hide_other_locks() {
+            local keep_lock="$1"
+            mkdir -p "$CLAUDE_IDE_HIDDEN"
+
+            for lock_file in "$CLAUDE_IDE_DIR"/*.lock; do
+                [[ -f "$lock_file" ]] || continue
+                if [[ "$lock_file" != "$keep_lock" ]]; then
+                    mv "$lock_file" "$CLAUDE_IDE_HIDDEN/"
+                fi
+            done
+        }
+
+        restore_hidden_locks() {
+            if [[ -d "$CLAUDE_IDE_HIDDEN" ]]; then
+                for lock_file in "$CLAUDE_IDE_HIDDEN"/*.lock; do
+                    [[ -f "$lock_file" ]] || continue
+                    mv "$lock_file" "$CLAUDE_IDE_DIR/"
+                done
+                rmdir "$CLAUDE_IDE_HIDDEN" 2>/dev/null || true
+            fi
+        }
+
+        cleanup() {
+            restore_hidden_locks
+        }
+
+        # Clean up stale locks first
+        cleanup_stale_locks
+        restore_hidden_locks
+
+        # Find matching IDE for current directory
+        matching_lock=$(find_matching_ide || true)
+
+        # Count lock files
+        lock_count=0
+        if [[ -d "$CLAUDE_IDE_DIR" ]]; then
+            lock_count=$(find "$CLAUDE_IDE_DIR" -maxdepth 1 -name "*.lock" -type f 2>/dev/null | wc -l)
+        fi
+
+        if [[ $lock_count -eq 0 ]]; then
+            exec claude "$@"
+        elif [[ $lock_count -eq 1 ]]; then
+            exec claude --ide "$@"
+        elif [[ -n "$matching_lock" ]]; then
+            trap cleanup EXIT INT TERM
+            hide_other_locks "$matching_lock"
+            claude --ide "$@"
+            exit_code=$?
+            restore_hidden_locks
+            trap - EXIT INT TERM
+            exit $exit_code
+        else
+            exec claude --ide "$@"
+        fi
+        ;;
+
+    codex)
+        exec codex "$@"
+        ;;
+
+    gemini)
+        exec gemini "$@"
+        ;;
+
+    *)
+        # Unknown agent — try to exec it directly
+        exec "$AGENT" "$@"
+        ;;
+esac

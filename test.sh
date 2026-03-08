@@ -207,10 +207,10 @@ test_create_worktree() {
     # Check window names
     local windows
     windows=$(tmux list-windows -t "$TEST_SESSION" -F "#{window_name}" 2>/dev/null | tr '\n' ',')
-    if echo "$windows" | grep -q "nvim" && echo "$windows" | grep -q "claude" && echo "$windows" | grep -q "shell"; then
-        pass "windows named correctly: nvim, claude, shell"
+    if echo "$windows" | grep -q "nvim" && echo "$windows" | grep -q "agent" && echo "$windows" | grep -q "shell"; then
+        pass "windows named correctly: nvim, agent, shell"
     else
-        fail "unexpected window names: $windows"
+        fail "unexpected window names: $windows (expected nvim, agent, shell)"
     fi
 }
 
@@ -227,7 +227,7 @@ test_status_file() {
     fi
 
     # Check required fields
-    for field in status message timestamp repo branch wt_path; do
+    for field in status message timestamp repo branch wt_path agent; do
         if grep -q "^${field}=" "$status_file"; then
             pass "field present: $field=$(grep "^${field}=" "$status_file" | cut -d= -f2-)"
         else
@@ -249,7 +249,7 @@ test_tmux_options() {
         return
     fi
 
-    for opt in @wt-status @wt-icon @wt-message @wt-repo @wt-branch @wt-wt-path @wt-master; do
+    for opt in @wt-status @wt-icon @wt-message @wt-repo @wt-branch @wt-wt-path @wt-agent @wt-master; do
         local val
         val=$(tmux show-option -qv -t "$TEST_SESSION" "$opt" 2>/dev/null)
         if [[ -n "$val" || "$opt" == "@wt-wt-path" || "$opt" == "@wt-master" ]]; then
@@ -419,7 +419,7 @@ test_master_session() {
     tmux kill-session -t wt-master 2>/dev/null || true
 
     # Create master (in background, don't switch to it)
-    tmux new-session -d -s wt-master -c "$HOME" -n claude 2>/dev/null
+    tmux new-session -d -s wt-master -c "$HOME" -n agent 2>/dev/null
     tmux new-window -t wt-master -n shell -c "$HOME" 2>/dev/null
     tmux set-option -qt wt-master @wt-master "1" 2>/dev/null
     tmux set-option -qt wt-master @wt-icon "◆" 2>/dev/null
@@ -631,6 +631,59 @@ test_claude_hooks_json() {
     done
 }
 
+test_gemini_hooks_json() {
+    section "Gemini Hooks Config"
+
+    local hooks_file="$(dirname "$WT_BIN_DIR")/config/hooks-gemini.json"
+
+    if [[ -f "$hooks_file" ]]; then
+        pass "hooks-gemini.json exists"
+    else
+        fail "hooks-gemini.json not found"
+        return
+    fi
+
+    # Validate JSON
+    if jq empty "$hooks_file" 2>/dev/null; then
+        pass "valid JSON"
+    else
+        fail "invalid JSON"
+    fi
+
+    # Check required hook types (Gemini uses different names)
+    for hook_type in BeforeTool Notification SessionEnd; do
+        if jq -e ".hooks.$hook_type" "$hooks_file" >/dev/null 2>&1; then
+            pass "hook type present: $hook_type"
+        else
+            fail "hook type missing: $hook_type"
+        fi
+    done
+}
+
+test_agent_profiles() {
+    section "Agent Profiles"
+
+    # Extract and test agent_binary function
+    local claude_bin codex_bin gemini_bin
+    claude_bin=$(bash -c "$(sed -n '/^agent_binary()/,/^}/p' "$WT_BIN_DIR/wt"); agent_binary claude")
+    codex_bin=$(bash -c "$(sed -n '/^agent_binary()/,/^}/p' "$WT_BIN_DIR/wt"); agent_binary codex")
+    gemini_bin=$(bash -c "$(sed -n '/^agent_binary()/,/^}/p' "$WT_BIN_DIR/wt"); agent_binary gemini")
+
+    [[ "$claude_bin" == "claude" ]] && pass "agent_binary claude = claude" || fail "agent_binary claude = $claude_bin"
+    [[ "$codex_bin" == "codex" ]] && pass "agent_binary codex = codex" || fail "agent_binary codex = $codex_bin"
+    [[ "$gemini_bin" == "gemini" ]] && pass "agent_binary gemini = gemini" || fail "agent_binary gemini = $gemini_bin"
+
+    # Test agent_label
+    local claude_label codex_label gemini_label
+    claude_label=$(bash -c "$(sed -n '/^agent_label()/,/^}/p' "$WT_BIN_DIR/wt"); agent_label claude")
+    codex_label=$(bash -c "$(sed -n '/^agent_label()/,/^}/p' "$WT_BIN_DIR/wt"); agent_label codex")
+    gemini_label=$(bash -c "$(sed -n '/^agent_label()/,/^}/p' "$WT_BIN_DIR/wt"); agent_label gemini")
+
+    [[ "$claude_label" == "Claude" ]] && pass "agent_label claude = Claude" || fail "agent_label claude = $claude_label"
+    [[ "$codex_label" == "Codex" ]] && pass "agent_label codex = Codex" || fail "agent_label codex = $codex_label"
+    [[ "$gemini_label" == "Gemini" ]] && pass "agent_label gemini = Gemini" || fail "agent_label gemini = $gemini_label"
+}
+
 test_install_script() {
     section "Install Script"
 
@@ -643,7 +696,7 @@ test_install_script() {
     fi
 
     # Check symlinks exist
-    for script in wt wt-hook wt-tmux-status claude-ide; do
+    for script in wt wt-hook wt-tmux-status wt-agent-launch claude-ide; do
         if [[ -L "$HOME/bin/$script" ]]; then
             local target
             target=$(readlink "$HOME/bin/$script")
@@ -677,6 +730,8 @@ main() {
     test_script_syntax
     test_tmux_conf_syntax
     test_claude_hooks_json
+    test_gemini_hooks_json
+    test_agent_profiles
     test_install_script
     test_find_git_repos
     test_create_worktree

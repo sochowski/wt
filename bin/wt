@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  wt - Worktree Manager for Claude Code Workflow
+#  wt - Worktree Manager for Multi-Agent CLI Workflow
+#  Supports: Claude, Codex, Gemini
 #  Cross-platform: Arch Linux / macOS
 # =============================================================================
 
@@ -14,9 +15,41 @@ WT_STATUS_DIR="${WT_STATUS_DIR:-$HOME/.local/state/wt}"
 WT_CONFIG_DIR="${WT_CONFIG_DIR:-$HOME/.config/wt}"
 WT_LOG_FILE="${WT_LOG_FILE:-$HOME/.local/state/wt/wt.log}"
 WT_BIN_DIR="$(dirname "$(readlink -f "$0")")"
+WT_DEFAULT_AGENT="${WT_DEFAULT_AGENT:-claude}"
 
 # Ensure directories exist
 mkdir -p "$WT_BASE_DIR" "$WT_STATUS_DIR" "$WT_CONFIG_DIR"
+
+# -----------------------------------------------------------------------------
+#  Agent Profiles
+# -----------------------------------------------------------------------------
+agent_binary() {
+    case "$1" in
+        claude) echo "claude" ;;
+        codex)  echo "codex" ;;
+        gemini) echo "gemini" ;;
+        *)      echo "$1" ;;
+    esac
+}
+
+agent_label() {
+    case "$1" in
+        claude) echo "Claude" ;;
+        codex)  echo "Codex" ;;
+        gemini) echo "Gemini" ;;
+        *)      echo "$1" ;;
+    esac
+}
+
+available_agents() {
+    for agent in claude codex gemini; do
+        local bin
+        bin=$(agent_binary "$agent")
+        if command -v "$bin" &>/dev/null; then
+            echo "$agent"
+        fi
+    done
+}
 
 # -----------------------------------------------------------------------------
 #  Logging
@@ -93,7 +126,7 @@ set_status() {
     status_file=$(get_status_file "$session_name")
 
     # Preserve existing metadata fields if file exists
-    local pr="" repo="" branch="" wt_path=""
+    local pr="" repo="" branch="" wt_path="" agent=""
     if [[ -f "$status_file" ]]; then
         source "$status_file" 2>/dev/null || true
     fi
@@ -106,6 +139,7 @@ repo=$repo
 branch=$branch
 wt_path=$wt_path
 pr=$pr
+agent=$agent
 EOF
 
     # Write tmux user options for live display
@@ -177,44 +211,76 @@ get_bare_repo() {
 # List all worktrees across all repos
 list_worktrees() {
     local format="${1:-full}"
+    local seen_sessions=""
 
-    # Find all git worktrees in the worktrees directory
-    if [[ ! -d "$WT_BASE_DIR" ]]; then
-        return
+    # Scan worktrees directory
+    if [[ -d "$WT_BASE_DIR" ]]; then
+        while IFS= read -r -d '' wt_path; do
+            if [[ -d "$wt_path/.git" ]] || [[ -f "$wt_path/.git" ]]; then
+                local branch repo_name session_name status
+                branch=$(git -C "$wt_path" branch --show-current 2>/dev/null || echo "detached")
+                repo_name=$(basename "$(dirname "$wt_path")")
+                session_name="${repo_name}-${branch//\//-}"
+                status=$(get_status "$session_name")
+                seen_sessions="${seen_sessions}:${session_name}:"
+
+                case "$format" in
+                    full)
+                        local icon
+                        icon=$(get_status_icon_ansi "$status")
+                        printf "%s %-20s %-25s %s\n" "$icon" "$repo_name" "$branch" "$wt_path"
+                        ;;
+                    simple)
+                        echo "$session_name:$wt_path:$status"
+                        ;;
+                    session)
+                        echo "$session_name"
+                        ;;
+                esac
+            fi
+        done < <(find "$WT_BASE_DIR" -maxdepth 2 -type d -print0 2>/dev/null)
     fi
 
-    while IFS= read -r -d '' wt_path; do
-        if [[ -d "$wt_path/.git" ]] || [[ -f "$wt_path/.git" ]]; then
-            local branch repo_name session_name status
-            branch=$(git -C "$wt_path" branch --show-current 2>/dev/null || echo "detached")
-            repo_name=$(basename "$(dirname "$wt_path")")
-            session_name="${repo_name}-${branch//\//-}"
-            status=$(get_status "$session_name")
+    # Also include sessions tracked via status files (covers adopted/primary worktrees)
+    for status_file in "$WT_STATUS_DIR"/*.status; do
+        [[ -f "$status_file" ]] || continue
+        local session_name
+        session_name=$(basename "$status_file" .status)
 
-            case "$format" in
-                full)
-                    local icon
-                    icon=$(get_status_icon_ansi "$status")
-                    printf "%s %-20s %-25s %s\n" "$icon" "$repo_name" "$branch" "$wt_path"
-                    ;;
-                simple)
-                    echo "$session_name:$wt_path:$status"
-                    ;;
-                session)
-                    echo "$session_name"
-                    ;;
-            esac
-        fi
-    done < <(find "$WT_BASE_DIR" -maxdepth 2 -type d -print0 2>/dev/null)
+        # Skip already-seen and master
+        [[ "$seen_sessions" == *":${session_name}:"* ]] && continue
+        [[ "$session_name" == "wt-master" ]] && continue
+
+        # Only include if tmux session exists
+        tmux has-session -t "$session_name" 2>/dev/null || continue
+
+        local status="" repo="" branch="" wt_path=""
+        source "$status_file" 2>/dev/null || continue
+
+        case "$format" in
+            full)
+                local icon
+                icon=$(get_status_icon_ansi "${status:-unknown}")
+                printf "%s %-20s %-25s %s\n" "$icon" "${repo:-?}" "${branch:-?}" "${wt_path:-?}"
+                ;;
+            simple)
+                echo "$session_name:${wt_path:-?}:${status:-unknown}"
+                ;;
+            session)
+                echo "$session_name"
+                ;;
+        esac
+    done
 }
 
 # Create a new worktree and tmux session
 create_worktree() {
     local repo_path="$1"
     local branch="$2"
-    local start_claude="${3:-false}"
+    local start_agent="${3:-false}"
     local task="${4:-}"
     local base_branch="${5:-}"
+    local agent="${6:-$WT_DEFAULT_AGENT}"
 
     # Resolve to absolute path
     repo_path=$(cd "$repo_path" && pwd)
@@ -271,20 +337,32 @@ create_worktree() {
     if tmux has-session -t "$session_name" 2>/dev/null; then
         echo "Session already exists, attaching..."
     else
-        # Create session with nvim in first window
-        tmux new-session -d -s "$session_name" -c "$wt_path" -n nvim
+        # Copy MCP profile if no .mcp.json exists in the worktree
+        if [[ ! -f "$wt_path/.mcp.json" ]]; then
+            local mcp_profile="$WT_CONFIG_DIR/mcp-profiles/default.json"
+            if [[ -f "$mcp_profile" ]]; then
+                cp "$mcp_profile" "$wt_path/.mcp.json"
+                log "Copied MCP profile: default → $wt_path/.mcp.json"
+            fi
+        fi
+
+        # Create session with agent as first window
+        tmux new-session -d -s "$session_name" -c "$wt_path" -n agent
+
+        # Create nvim window
+        tmux new-window -t "$session_name" -n nvim -c "$wt_path"
 
         # Start nvim (claudecode.nvim will auto-start WebSocket server)
         tmux send-keys -t "$session_name:nvim" "nvim" Enter
 
-        # Create claude window
-        tmux new-window -t "$session_name" -n claude -c "$wt_path"
-
         # Create shell window
         tmux new-window -t "$session_name" -n shell -c "$wt_path"
 
-        # Go back to nvim window
-        tmux select-window -t "$session_name:nvim"
+        # Select agent window
+        tmux select-window -t "$session_name:agent"
+
+        local agent_display
+        agent_display=$(agent_label "$agent")
 
         # Write initial status file with full metadata
         local status_file
@@ -297,6 +375,7 @@ repo=$repo_name
 branch=$branch
 wt_path=$wt_path
 pr=
+agent=$agent
 EOF2
 
         # Set tmux session options (status + metadata)
@@ -308,22 +387,23 @@ EOF2
         tmux set-option -qt "$session_name" @wt-wt-path "$wt_path"
         tmux set-option -qt "$session_name" @wt-pr      ""
         tmux set-option -qt "$session_name" @wt-master  "0"
+        tmux set-option -qt "$session_name" @wt-agent   "$agent"
 
         # Wait for nvim/claudecode.nvim to start WebSocket server
         echo "Waiting for Neovim IDE server to start..."
         sleep 2
 
-        # Start claude with --ide to auto-connect to Neovim
-        if [[ "$start_claude" == "true" ]]; then
+        # Start agent via wt-agent-launch
+        if [[ "$start_agent" == "true" ]]; then
             if [[ -n "$task" ]]; then
-                tmux send-keys -t "$session_name:claude" "$WT_BIN_DIR/claude-ide \"$task\"" Enter
+                tmux send-keys -t "$session_name:agent" "$WT_BIN_DIR/wt-agent-launch \"$task\"" Enter
             else
-                tmux send-keys -t "$session_name:claude" "$WT_BIN_DIR/claude-ide" Enter
+                tmux send-keys -t "$session_name:agent" "$WT_BIN_DIR/wt-agent-launch" Enter
             fi
             set_status "$session_name" "working" "${task:-Interactive session}"
         else
-            # Even without a task, prepare claude with --ide for when user wants it
-            tmux send-keys -t "$session_name:claude" "$WT_BIN_DIR/claude-ide" Enter
+            # Start agent for when user wants it
+            tmux send-keys -t "$session_name:agent" "$WT_BIN_DIR/wt-agent-launch" Enter
         fi
     fi
 
@@ -601,25 +681,86 @@ interactive_new() {
 
     log "branch=$branch repo_path=$repo_path default_branch=$default_branch"
 
+    # Step 4: Pick agent
+    local agent="$WT_DEFAULT_AGENT"
+    local agents=()
+    while IFS= read -r a; do
+        agents+=("$a")
+    done < <(available_agents)
+
+    if [[ ${#agents[@]} -gt 1 ]]; then
+        local i=1
+        echo ""
+        echo "Agent:"
+        echo "──────"
+        for a in "${agents[@]}"; do
+            local label
+            label=$(agent_label "$a")
+            if [[ "$a" == "$WT_DEFAULT_AGENT" ]]; then
+                printf "  [%d] %s (default)\n" "$i" "$label"
+            else
+                printf "  [%d] %s\n" "$i" "$label"
+            fi
+            ((i++))
+        done
+        echo ""
+        echo -n "Select [1-$((i-1))]: "
+        read -r selection </dev/tty
+        log "agent selection='$selection'"
+
+        if [[ -n "$selection" && "$selection" =~ ^[0-9]+$ ]] && [[ $selection -ge 1 ]] && [[ $selection -lt $i ]]; then
+            agent="${agents[$((selection-1))]}"
+        fi
+    elif [[ ${#agents[@]} -eq 1 ]]; then
+        agent="${agents[0]}"
+    fi
+
+    local agent_display
+    agent_display=$(agent_label "$agent")
+
     echo ""
-    echo "Creating worktree: $repo_name @ $branch (from origin/$default_branch)"
-    create_worktree "$repo_path" "$branch" false "" "$default_branch"
+    echo "Creating worktree: $repo_name @ $branch (from origin/$default_branch) [$agent_display]"
+    create_worktree "$repo_path" "$branch" false "" "$default_branch" "$agent"
 }
 
 # -----------------------------------------------------------------------------
 #  Interactive Worktree Picker (fzf-based)
 # -----------------------------------------------------------------------------
+# Build rich pick list: session_name:display_string
+pick_list() {
+    while IFS=: read -r session_name wt_path sess_status; do
+        local status_file="$WT_STATUS_DIR/${session_name}.status"
+        local agent="" message="" repo="" branch=""
+        if [[ -f "$status_file" ]]; then
+            source "$status_file" 2>/dev/null || true
+        fi
+        local icon
+        icon=$(get_status_icon "${sess_status:-unknown}")
+        local label
+        label=$(agent_label "${agent:-claude}")
+        echo "${session_name}:${icon} ${sess_status:-?}  ${label}  ${repo:-?}@${branch:-?}  ${message:-}"
+    done < <(list_worktrees simple)
+}
+
 pick_worktree() {
     check_deps
 
+    local items
+    items=$(pick_list)
+
+    if [[ -z "$items" ]]; then
+        echo "No worktrees found."
+        return
+    fi
+
     local selection
-    selection=$(list_worktrees simple | fzf \
+    selection=$(echo "$items" | fzf \
         --delimiter=: \
-        --with-nth=1 \
-        --header="Select worktree (Enter to switch, Ctrl-D to delete)" \
-        --preview="tmux capture-pane -t {1}:claude -p -e 2>/dev/null || echo '(no claude pane)'" \
+        --with-nth=2 \
+        --header="Select worktree (Enter=switch, Ctrl-D=delete, ?=preview)" \
+        --preview="tmux capture-pane -t {1}:agent -p -e 2>/dev/null || tmux capture-pane -t {1}:claude -p -e 2>/dev/null || echo '(no agent pane)'" \
         --preview-window=right:60% \
-        --bind='ctrl-d:execute(wt delete $(echo {} | cut -d: -f1) --force)+reload(wt list simple)' \
+        --bind="ctrl-d:execute(wt delete {1} --force)+reload($WT_BIN_DIR/wt pick-list)" \
         || true)
 
     if [[ -n "$selection" ]]; then
@@ -640,7 +781,7 @@ sync_tmux() {
 
         if tmux has-session -t "$session_name" 2>/dev/null; then
             # Source the status file to get all fields
-            local status="" message="" repo="" branch="" wt_path="" pr=""
+            local status="" message="" repo="" branch="" wt_path="" pr="" agent=""
             source "$status_file" 2>/dev/null || continue
 
             local icon
@@ -653,6 +794,7 @@ sync_tmux() {
             tmux set-option -qt "$session_name" @wt-branch  "${branch:-}"
             tmux set-option -qt "$session_name" @wt-wt-path "${wt_path:-}"
             tmux set-option -qt "$session_name" @wt-pr      "${pr:-}"
+            tmux set-option -qt "$session_name" @wt-agent   "${agent:-claude}"
             tmux set-option -qt "$session_name" @wt-master  "0"
         fi
     done
@@ -677,22 +819,48 @@ sync_tmux() {
 #  Master Session
 # -----------------------------------------------------------------------------
 master() {
+    local agent="${1:-$WT_DEFAULT_AGENT}"
+    local force="${2:-false}"
     local session="wt-master"
 
     if tmux has-session -t "$session" 2>/dev/null; then
-        echo "Master session already exists, switching..."
-        switch_to "$session"
-        return
+        if [[ "$force" == "true" ]]; then
+            echo "Replacing existing master session..."
+            # Switch away first so killing doesn't disconnect the client
+            local other
+            other=$(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -v "^${session}$" | head -1 || true)
+            if [[ -n "$other" && -n "${TMUX:-}" ]]; then
+                tmux switch-client -t "$other" 2>/dev/null || true
+            fi
+            tmux kill-session -t "$session"
+        else
+            echo "Master session already exists, switching..."
+            switch_to "$session"
+            return
+        fi
     fi
 
-    echo "Creating master session..."
+    local bin
+    bin=$(agent_binary "$agent")
+    local label
+    label=$(agent_label "$agent")
 
-    tmux new-session -d -s "$session" -c "$HOME" -n claude
+    echo "Creating master session ($label)..."
+
+    # Set up master working directory with MCP profile
+    local master_dir="$WT_BASE_DIR/.master"
+    mkdir -p "$master_dir"
+    local mcp_profile="$WT_CONFIG_DIR/mcp-profiles/master.json"
+    if [[ -f "$mcp_profile" ]]; then
+        cp "$mcp_profile" "$master_dir/.mcp.json"
+    fi
+
+    tmux new-session -d -s "$session" -c "$master_dir" -n agent
     tmux new-window -t "$session" -n shell -c "$HOME"
-    tmux select-window -t "$session:claude"
+    tmux select-window -t "$session:agent"
 
-    # Start Claude without --ide (master has no nvim)
-    tmux send-keys -t "$session:claude" "claude" Enter
+    # Start agent without --ide (master has no nvim)
+    tmux send-keys -t "$session:agent" "$bin" Enter
 
     # Set tmux metadata
     tmux set-option -qt "$session" @wt-master  "1"
@@ -702,9 +870,10 @@ master() {
     tmux set-option -qt "$session" @wt-repo    ""
     tmux set-option -qt "$session" @wt-branch  ""
     tmux set-option -qt "$session" @wt-pr      ""
+    tmux set-option -qt "$session" @wt-agent   "$agent"
 
     switch_to "$session"
-    notify "Master Session" "wt-master created"
+    notify "Master Session" "wt-master created ($label)"
 }
 
 # -----------------------------------------------------------------------------
@@ -814,9 +983,9 @@ delete_pick() {
 }
 
 # -----------------------------------------------------------------------------
-#  Claude Integration
+#  Agent Integration
 # -----------------------------------------------------------------------------
-start_claude() {
+start_agent() {
     local session_name="$1"
     local task="$2"
 
@@ -825,15 +994,20 @@ start_claude() {
         return 1
     fi
 
-    # Send claude command with --ide to connect to Neovim
+    local agent
+    agent=$(tmux show-option -qv -t "$session_name" @wt-agent 2>/dev/null || echo "$WT_DEFAULT_AGENT")
+    local label
+    label=$(agent_label "$agent")
+
+    # Send agent launch command
     if [[ -n "$task" ]]; then
-        tmux send-keys -t "$session_name:claude" "$WT_BIN_DIR/claude-ide \"$task\"" Enter
+        tmux send-keys -t "$session_name:agent" "$WT_BIN_DIR/wt-agent-launch \"$task\"" Enter
     else
-        tmux send-keys -t "$session_name:claude" "$WT_BIN_DIR/claude-ide" Enter
+        tmux send-keys -t "$session_name:agent" "$WT_BIN_DIR/wt-agent-launch" Enter
     fi
     set_status "$session_name" "working" "${task:-Interactive session}"
 
-    notify "Claude Started" "$session_name: ${task:-Interactive session}"
+    notify "$label Started" "$session_name: ${task:-Interactive session}"
 }
 
 # -----------------------------------------------------------------------------
@@ -841,47 +1015,66 @@ start_claude() {
 # -----------------------------------------------------------------------------
 usage() {
     cat <<EOF
-wt - Worktree Manager for Claude Code Workflow
+wt - Worktree Manager for Multi-Agent CLI Workflow
 
 Usage: wt <command> [options]
 
-Commands:
-  list, ls              List all worktrees
-  new [repo] [branch]   Create new worktree (interactive if args omitted)
-  pick, p               Interactive worktree picker (fzf)
-  switch, s <session>   Switch to a worktree session
-  delete, rm <session>  Delete a worktree and session
-  delete-pick           Interactive delete picker (fzf)
+Session Management:
+  new [repo] [branch]     Create new worktree (interactive if no args)
+  pick, p                 Interactive session picker (fzf, ?=preview)
+  switch, s <session>     Switch to a session
+  list, ls                List all sessions with status
+  delete, rm <session>    Delete a session and its worktree
+  delete-pick             Interactive delete picker (fzf)
 
-  master                Create/attach master orchestrator session
-  pr <number>           Find worktree by PR number and switch to it
-  pr-pick               Interactive PR picker (fzf + gh)
+Master Session:
+  master                  Create/attach master orchestrator session
+  master --force          Replace existing master session
+  master --agent <name>   Master with specific agent
 
-  claude <session> <task>   Start Claude on a task in a session
-  status <session>          Get status of a session
-  set-status <session> <status> [message]   Set session status
-  sync-tmux                 Sync status files to tmux session options
+PR Integration:
+  pr <number>             Find session by PR number and switch to it
+  pr-pick                 Interactive PR picker (fzf + gh)
 
-Options:
-  --start-claude        Start Claude after creating worktree
-  --task <task>         Task description for Claude
+Agent Control:
+  agent <session> [task]  Start agent on a task in a session
+  claude <session> [task] Alias for 'agent'
+
+Status:
+  status <session>                        Get session status
+  set-status <session> <status> [msg]     Set session status
+  sync-tmux                               Restore tmux options from status files
+
+Options for 'new':
+  --agent <name>        Agent: claude, codex, gemini (default: \$WT_DEFAULT_AGENT)
+  --start-agent         Start agent immediately after creating session
+  --task <task>         Task description for agent
   --force               Skip confirmation prompts
 
-Tmux keybindings (after sourcing tmux-wt.conf):
-  prefix + w            Action menu (new, delete, PR, master)
-  prefix + W            Session switcher (choose-tree with status)
-  prefix + M            Jump to master session
+Tmux Keybindings:
+  prefix + w    Action menu (new, switch, delete, PR, master)
+  prefix + W    Session switcher (choose-tree with status icons)
+  prefix + M    Jump to master session
+
+MCP Profiles:
+  Sessions get MCP servers from ~/.config/wt/mcp-profiles/default.json
+  Master gets MCP servers from ~/.config/wt/mcp-profiles/master.json
+  Existing .mcp.json in a repo is preserved (not overwritten)
 
 Examples:
-  wt new                    # Interactive: pick repo, then branch
-  wt new ~/gt feature-x     # Direct: create feature-x in ~/gt
-  wt pick                   # fzf worktree picker
-  wt master                 # Create/attach master session
-  wt pr 42                  # Find worktree for PR #42
+  wt new                               Interactive: pick repo, branch, agent
+  wt new ~/code feature-x              Create feature-x worktree
+  wt new ~/code feature-x --agent codex  Use Codex instead of Claude
+  wt pick                              Switch sessions (? to preview agent)
+  wt master                            Create/attach master session
+  wt master --force                    Replace master session
+  wt pr 42                             Find session for PR #42
+  wt ls                                List all sessions
 
 Environment:
-  WT_BASE_DIR     Base directory for worktrees (default: ~/worktrees)
-  WT_STATUS_DIR   Status file directory (default: ~/.local/state/wt)
+  WT_BASE_DIR        Base directory for worktrees (default: ~/worktrees)
+  WT_STATUS_DIR      Status file directory (default: ~/.local/state/wt)
+  WT_DEFAULT_AGENT   Default agent CLI (default: claude)
 EOF
 }
 
@@ -895,7 +1088,7 @@ main() {
         default)
             if [[ -n "${TMUX:-}" ]]; then
                 # Inside tmux: show the action menu
-                tmux display-menu -T " Worktrees " -x C -y S \
+                tmux display-menu -T " Worktrees " -x C -y C \
                     "New worktree"       n "display-popup -E -w 80% -h 80% '$HOME/bin/wt new'" \
                     "Switch (pick)"      s "display-popup -E -w 100% -h 100% '$HOME/bin/wt pick'" \
                     "Delete..."          d "display-popup -E -w 60% -h 40% '$HOME/bin/wt delete-pick'" \
@@ -903,7 +1096,7 @@ main() {
                     "PR lookup..."       p "display-popup -E -w 60% -h 40% '$HOME/bin/wt pr-pick'" \
                     "" \
                     "Master session"     m "switch-client -t wt-master" \
-                    "New master..."      M "display-popup -E -w 70% -h 50% '$HOME/bin/wt master'" \
+                    "New master..."      M "display-popup -E -w 70% -h 50% '$HOME/bin/wt master --force'" \
                     "" \
                     "Sync status"        r "run-shell '$HOME/bin/wt sync-tmux'" \
                     "" \
@@ -923,8 +1116,9 @@ main() {
         new)
             local repo="${1:-}"
             local branch="${2:-}"
-            local start_claude=false
+            local start_agent=false
             local task=""
+            local agent="$WT_DEFAULT_AGENT"
 
             # Skip repo/branch args if they look like flags
             if [[ "$repo" == --* ]]; then
@@ -939,8 +1133,9 @@ main() {
 
             while [[ $# -gt 0 ]]; do
                 case "$1" in
-                    --start-claude) start_claude=true; shift ;;
+                    --start-agent|--start-claude) start_agent=true; shift ;;
                     --task) task="$2"; shift 2 ;;
+                    --agent) agent="$2"; shift 2 ;;
                     *) shift ;;
                 esac
             done
@@ -949,11 +1144,14 @@ main() {
             if [[ -z "$repo" || -z "$branch" ]]; then
                 interactive_new "$repo" "$branch"
             else
-                create_worktree "$repo" "$branch" "$start_claude" "$task"
+                create_worktree "$repo" "$branch" "$start_agent" "$task" "" "$agent"
             fi
             ;;
         pick|p)
             pick_worktree
+            ;;
+        pick-list)
+            pick_list
             ;;
         switch|s)
             switch_to "${1:-}"
@@ -967,7 +1165,16 @@ main() {
             delete_pick
             ;;
         master)
-            master
+            local agent="$WT_DEFAULT_AGENT"
+            local force=false
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --agent) agent="$2"; shift 2 ;;
+                    --force) force=true; shift ;;
+                    *) shift ;;
+                esac
+            done
+            master "$agent" "$force"
             ;;
         pr)
             pr_lookup "${1:-}"
@@ -978,8 +1185,8 @@ main() {
         sync-tmux)
             sync_tmux
             ;;
-        claude)
-            start_claude "${1:-}" "${2:-}"
+        agent|claude)
+            start_agent "${1:-}" "${2:-}"
             ;;
         status)
             get_status "${1:-}"

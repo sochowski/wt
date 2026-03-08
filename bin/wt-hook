@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  wt-hook - Claude Code Hook Handler for Worktree Status Tracking
-#  Called by Claude Code hooks to update worktree status automatically
+#  wt-hook - Agent Hook Handler for Worktree Status Tracking
+#  Called by agent hooks (Claude, Codex, Gemini) to update status automatically
 # =============================================================================
 
 set -euo pipefail
@@ -67,7 +67,7 @@ set_status() {
     local status_file="$WT_STATUS_DIR/${session_name}.status"
 
     # Preserve existing metadata fields if file exists
-    local pr="" repo="" branch="" wt_path=""
+    local pr="" repo="" branch="" wt_path="" agent=""
     if [[ -f "$status_file" ]]; then
         source "$status_file" 2>/dev/null || true
     fi
@@ -81,6 +81,7 @@ repo=$repo
 branch=$branch
 wt_path=$wt_path
 pr=$pr
+agent=$agent
 EOF
 
     # Write tmux user options for live display
@@ -111,9 +112,32 @@ notify() {
 }
 
 # -----------------------------------------------------------------------------
+#  Agent Label
+# -----------------------------------------------------------------------------
+get_agent_label() {
+    local session_name="${1:-}"
+    local agent=""
+
+    # Try to read from status file
+    if [[ -n "$session_name" ]]; then
+        local status_file="$WT_STATUS_DIR/${session_name}.status"
+        if [[ -f "$status_file" ]]; then
+            agent=$(grep '^agent=' "$status_file" 2>/dev/null | cut -d= -f2 || true)
+        fi
+    fi
+
+    case "${agent:-claude}" in
+        claude) echo "Claude" ;;
+        codex)  echo "Codex" ;;
+        gemini) echo "Gemini" ;;
+        *)      echo "${agent:-Agent}" ;;
+    esac
+}
+
+# -----------------------------------------------------------------------------
 #  Hook Handlers
 # -----------------------------------------------------------------------------
-# Read JSON from stdin (Claude passes context this way)
+# Read JSON from stdin (agent passes context this way)
 read_stdin() {
     local input=""
     if read -t 0.1 -r line; then
@@ -128,14 +152,18 @@ read_stdin() {
 handle_session_start() {
     local session_name
     if session_name=$(get_session_name); then
-        set_status "$session_name" "working" "Claude started"
+        local label
+        label=$(get_agent_label "$session_name")
+        set_status "$session_name" "working" "$label started"
     fi
 }
 
 handle_stop() {
     local session_name
     if session_name=$(get_session_name); then
-        set_status "$session_name" "idle" "Claude finished"
+        local label
+        label=$(get_agent_label "$session_name")
+        set_status "$session_name" "idle" "$label finished"
     fi
 }
 
@@ -147,10 +175,13 @@ handle_notification() {
         return
     fi
 
+    local label
+    label=$(get_agent_label "$session_name")
+
     case "$notification_type" in
         idle_prompt|permission_prompt)
             set_status "$session_name" "input" "Waiting for input"
-            notify "Claude Needs Input" "$session_name: Waiting for your response" "normal"
+            notify "$label Needs Input" "$session_name: Waiting for your response" "normal"
             ;;
         *)
             # Other notifications don't change status
@@ -166,15 +197,17 @@ handle_tool_use() {
         return
     fi
 
-    # When Claude uses tools, it's actively working
+    # When agent uses tools, it's actively working
     set_status "$session_name" "working" "Using $tool_name"
 }
 
 handle_error() {
     local session_name
     if session_name=$(get_session_name); then
-        set_status "$session_name" "error" "Claude encountered an error"
-        notify "Claude Error" "$session_name: Something went wrong" "critical"
+        local label
+        label=$(get_agent_label "$session_name")
+        set_status "$session_name" "error" "$label encountered an error"
+        notify "$label Error" "$session_name: Something went wrong" "critical"
     fi
 }
 
