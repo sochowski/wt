@@ -43,7 +43,7 @@ if [[ -n "$master_status" ]]; then
 fi
 
 # Only show non-zero counts
-[[ $working -gt 0 ]] && output+="#[fg=colour2]●${working}#[fg=default] "
+[[ $working -gt 0 ]] && output+="#[fg=colour8]●${working}#[fg=default] "
 [[ $idle -gt 0 ]]    && output+="#[fg=colour4]○${idle}#[fg=default] "
 [[ $input -gt 0 ]]   && output+="#[fg=colour3]⊘${input}#[fg=default] "
 [[ $error -gt 0 ]]   && output+="#[fg=colour1]✗${error}#[fg=default] "
