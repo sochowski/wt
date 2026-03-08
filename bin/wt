@@ -109,6 +109,38 @@ check_deps() {
     fi
 }
 
+# Apply allowed tools from ~/.config/wt/claude-allowed-tools.json
+# Merges into <dir>/.claude/settings.local.json (preserving existing keys)
+apply_allowed_tools() {
+    local target_dir="$1"
+    local tools_file="$WT_CONFIG_DIR/claude-allowed-tools.json"
+
+    [[ -f "$tools_file" ]] || return 0
+
+    local settings_dir="$target_dir/.claude"
+    local settings_file="$settings_dir/settings.local.json"
+    mkdir -p "$settings_dir"
+
+    if [[ -f "$settings_file" ]]; then
+        # Merge: add/replace permissions.allow, preserve everything else
+        python3 -c "
+import json, sys
+with open(sys.argv[1]) as f: settings = json.load(f)
+with open(sys.argv[2]) as f: tools = json.load(f)
+settings.setdefault('permissions', {})['allow'] = tools
+with open(sys.argv[1], 'w') as f: json.dump(settings, f, indent=2); f.write('\n')
+" "$settings_file" "$tools_file"
+    else
+        # Create new settings file with just permissions.allow
+        python3 -c "
+import json, sys
+with open(sys.argv[1]) as f: tools = json.load(f)
+with open(sys.argv[2], 'w') as f: json.dump({'permissions': {'allow': tools}}, f, indent=2); f.write('\n')
+" "$tools_file" "$settings_file"
+    fi
+    log "Applied allowed tools → $settings_file"
+}
+
 # -----------------------------------------------------------------------------
 #  Status Tracking
 # -----------------------------------------------------------------------------
@@ -344,6 +376,11 @@ create_worktree() {
                 cp "$mcp_profile" "$wt_path/.mcp.json"
                 log "Copied MCP profile: default → $wt_path/.mcp.json"
             fi
+        fi
+
+        # Apply default-allowed tools for Claude sessions
+        if [[ "$agent" == "claude" ]]; then
+            apply_allowed_tools "$wt_path"
         fi
 
         # Create session with agent as first window
@@ -855,6 +892,11 @@ master() {
         cp "$mcp_profile" "$master_dir/.mcp.json"
     fi
 
+    # Apply default-allowed tools for Claude master sessions
+    if [[ "$agent" == "claude" ]]; then
+        apply_allowed_tools "$master_dir"
+    fi
+
     tmux new-session -d -s "$session" -c "$master_dir" -n agent
     tmux new-window -t "$session" -n shell -c "$HOME"
     tmux select-window -t "$session:agent"
@@ -1060,6 +1102,11 @@ MCP Profiles:
   Sessions get MCP servers from ~/.config/wt/mcp-profiles/default.json
   Master gets MCP servers from ~/.config/wt/mcp-profiles/master.json
   Existing .mcp.json in a repo is preserved (not overwritten)
+
+Tool Permissions (Claude only):
+  Configure default-allowed tools in ~/.config/wt/claude-allowed-tools.json
+  Format: JSON array of tool rules, e.g. ["Read", "Bash(npm run *)"]
+  Applied to .claude/settings.local.json in each new worktree/master session
 
 Examples:
   wt new                               Interactive: pick repo, branch, agent
