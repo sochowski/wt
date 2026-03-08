@@ -101,6 +101,82 @@ cat > ~/.config/wt/mcp-profiles/master.json << 'EOF'
 EOF
 ```
 
+## Example Setup
+
+Here's how one setup looks in practice — a master orchestrator that handles customer support triage and dispatches coding tasks to child worktree sessions.
+
+### MCP profiles
+
+Remove all MCP servers from `~/.claude.json` (global config) so sessions only get what their profile provides:
+
+```bash
+# Clear global MCPs (keeps all other settings intact)
+jq '.mcpServers = {}' ~/.claude.json > ~/.claude.json.tmp && mv ~/.claude.json.tmp ~/.claude.json
+```
+
+Child sessions get a code-tools MCP for code review and search:
+
+```json
+// ~/.config/wt/mcp-profiles/default.json
+{
+  "mcpServers": {
+    "code-tools": {
+      "type": "http",
+      "url": "https://your-mcp-server.example.com/code-tools/mcp"
+    }
+  }
+}
+```
+
+Master gets code-tools plus a customer support MCP:
+
+```json
+// ~/.config/wt/mcp-profiles/master.json
+{
+  "mcpServers": {
+    "code-tools": {
+      "type": "http",
+      "url": "https://your-mcp-server.example.com/code-tools/mcp"
+    },
+    "support": {
+      "type": "http",
+      "url": "https://your-mcp-server.example.com/support/mcp"
+    }
+  }
+}
+```
+
+### Master CLAUDE.md
+
+The master session runs from `~/worktrees/.master/`. Place a `CLAUDE.md` there to give it context:
+
+```markdown
+# Master Orchestrator Session
+
+You are the master orchestrator. Your jobs: manage worktree sessions and
+handle customer support via the support MCP. Be concise.
+
+## Dispatching Work
+
+Create a worktree and send a task to the agent:
+  wt new <repo> <branch> --start-agent --task "<task description>"
+
+Workflow:
+1. When work should be dispatched, ask the user what the task should be
+2. Confirm the repo, branch name, and task description
+3. Only dispatch after explicit approval
+```
+
+### Workflow
+
+1. Open master: `wt master`
+2. Master checks support queue via MCP, surfaces issues
+3. You decide what needs a code fix: "create a session to fix the timeout bug in auth"
+4. Master confirms: repo, branch name, task description
+5. You approve, master runs: `wt new ~/workspace/myapp fix-auth-timeout --start-agent --task "Fix the 30s timeout..."`
+6. Child session starts autonomously with full context
+7. You monitor via `wt pick` or `prefix+W`
+
 ## Architecture
 
 ```
