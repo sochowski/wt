@@ -613,31 +613,18 @@ pick_worktree() {
     check_deps
 
     local selection
-    selection=$(list_worktrees full | fzf \
-        --ansi \
+    selection=$(list_worktrees simple | fzf \
+        --delimiter=: \
+        --with-nth=1 \
         --header="Select worktree (Enter to switch, Ctrl-D to delete)" \
-        --preview='
-            session=$(echo {} | awk "{print \$2\"-\"\$3}" | sed "s|/|-|g")
-            wt_path=$(echo {} | awk "{print \$4}")
-            echo "=== Session: $session ==="
-            echo ""
-            if [ -d "$wt_path" ]; then
-                echo "=== Recent commits ==="
-                git -C "$wt_path" log --oneline -5 2>/dev/null || echo "No commits"
-                echo ""
-                echo "=== Status ==="
-                git -C "$wt_path" status -s 2>/dev/null | head -20 || echo "Clean"
-            fi
-        ' \
-        --preview-window=right:50% \
-        --bind='ctrl-d:execute(wt delete $(echo {} | awk "{print \$2\"-\"\$3}" | sed "s|/|-|g") --force)+reload(wt list)' \
+        --preview="tmux capture-pane -t {1}:claude -p -e 2>/dev/null || echo '(no claude pane)'" \
+        --preview-window=right:60% \
+        --bind='ctrl-d:execute(wt delete $(echo {} | cut -d: -f1) --force)+reload(wt list simple)' \
         || true)
 
     if [[ -n "$selection" ]]; then
-        local repo_name branch
-        repo_name=$(echo "$selection" | awk '{print $2}')
-        branch=$(echo "$selection" | awk '{print $3}')
-        local session_name="${repo_name}-${branch//\//-}"
+        local session_name
+        session_name=$(echo "$selection" | cut -d: -f1)
         switch_to "$session_name"
     fi
 }
@@ -910,11 +897,10 @@ main() {
                 # Inside tmux: show the action menu
                 tmux display-menu -T " Worktrees " -x C -y S \
                     "New worktree"       n "display-popup -E -w 80% -h 80% '$HOME/bin/wt new'" \
-                    "Switch (pick)"      s "display-popup -E -w 60% -h 40% '$HOME/bin/wt pick'" \
+                    "Switch (pick)"      s "display-popup -E -w 100% -h 100% '$HOME/bin/wt pick'" \
                     "Delete..."          d "display-popup -E -w 60% -h 40% '$HOME/bin/wt delete-pick'" \
                     "" \
                     "PR lookup..."       p "display-popup -E -w 60% -h 40% '$HOME/bin/wt pr-pick'" \
-                    "List all"           l "display-popup -E -w 80% -h 60% '$HOME/bin/wt list'" \
                     "" \
                     "Master session"     m "switch-client -t wt-master" \
                     "New master..."      M "display-popup -E -w 70% -h 50% '$HOME/bin/wt master'" \
@@ -932,7 +918,7 @@ main() {
             fi
             ;;
         list|ls)
-            list_worktrees full
+            list_worktrees "${1:-full}"
             ;;
         new)
             local repo="${1:-}"
