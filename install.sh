@@ -103,28 +103,48 @@ if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
 fi
 
 # -----------------------------------------------------------------------------
-#  tmux config reminder
+#  tmux config integration
 # -----------------------------------------------------------------------------
-echo "To enable tmux integration, add this to your ~/.tmux.conf:"
+TMUX_CONF="$HOME/.tmux.conf"
+TMUX_SOURCE_LINE="source-file ~/.config/wt/tmux-wt.conf"
+TMUX_STATUS_LINE='set -g status-right "#($HOME/bin/wt-tmux-status) | %H:%M"'
+
+echo "Configuring tmux integration..."
+
+if [[ -f "$TMUX_CONF" ]]; then
+    if grep -qF "tmux-wt.conf" "$TMUX_CONF"; then
+        echo "  tmux-wt.conf already sourced in $TMUX_CONF"
+    else
+        echo "" >> "$TMUX_CONF"
+        echo "# Worktree manager" >> "$TMUX_CONF"
+        echo "$TMUX_SOURCE_LINE" >> "$TMUX_CONF"
+        echo "$TMUX_STATUS_LINE" >> "$TMUX_CONF"
+        echo "  Added wt config to $TMUX_CONF"
+    fi
+else
+    echo "# Worktree manager" > "$TMUX_CONF"
+    echo "$TMUX_SOURCE_LINE" >> "$TMUX_CONF"
+    echo "$TMUX_STATUS_LINE" >> "$TMUX_CONF"
+    echo "  Created $TMUX_CONF with wt config"
+fi
+
 echo ""
-echo "  # Worktree manager"
-echo "  source-file ~/.config/wt/tmux-wt.conf"
-echo ""
-echo "  # Add to your status-right (example):"
-echo "  set -g status-right \"#(\$HOME/bin/wt-tmux-status) | %H:%M\""
-echo ""
+echo "  Reload tmux config with: tmux source-file ~/.tmux.conf"
 
 # -----------------------------------------------------------------------------
 #  Done
 # -----------------------------------------------------------------------------
+echo ""
 echo "================================================="
 echo "Installation complete!"
 echo ""
 echo "Quick start:"
-echo "  wt              # Open dashboard"
+echo "  wt ls           # List worktrees"
 echo "  wt new          # Create new worktree (interactive)"
 echo "  wt pick         # Switch between worktrees"
+echo "  wt master       # Create master orchestrator session"
 echo ""
-echo "Tmux keybindings (after adding source-file):"
-echo "  prefix + w      # Open dashboard popup"
-echo "  prefix + W      # Quick worktree picker"
+echo "Tmux keybindings:"
+echo "  prefix + w      # Action menu (new, delete, PR, master)"
+echo "  prefix + W      # Session switcher (choose-tree with status)"
+echo "  prefix + M      # Jump to master session"

@@ -12,10 +12,21 @@ set -euo pipefail
 WT_BASE_DIR="${WT_BASE_DIR:-$HOME/worktrees}"
 WT_STATUS_DIR="${WT_STATUS_DIR:-$HOME/.local/state/wt}"
 WT_CONFIG_DIR="${WT_CONFIG_DIR:-$HOME/.config/wt}"
+WT_LOG_FILE="${WT_LOG_FILE:-$HOME/.local/state/wt/wt.log}"
 WT_BIN_DIR="$(dirname "$(readlink -f "$0")")"
 
 # Ensure directories exist
 mkdir -p "$WT_BASE_DIR" "$WT_STATUS_DIR" "$WT_CONFIG_DIR"
+
+# -----------------------------------------------------------------------------
+#  Logging
+# -----------------------------------------------------------------------------
+log() {
+    echo "[$(date '+%H:%M:%S')] wt: $*" >> "$WT_LOG_FILE"
+}
+
+# Log errors on exit
+trap 'log "EXIT code=$? line=$LINENO cmd=$BASH_COMMAND"' ERR
 
 # -----------------------------------------------------------------------------
 #  Cross-Platform Helpers
@@ -81,11 +92,31 @@ set_status() {
     local status_file
     status_file=$(get_status_file "$session_name")
 
+    # Preserve existing metadata fields if file exists
+    local pr="" repo="" branch="" wt_path=""
+    if [[ -f "$status_file" ]]; then
+        source "$status_file" 2>/dev/null || true
+    fi
+
     cat > "$status_file" <<EOF
 status=$status
 message=$message
 timestamp=$(date +%s)
+repo=$repo
+branch=$branch
+wt_path=$wt_path
+pr=$pr
 EOF
+
+    # Write tmux user options for live display
+    if tmux has-session -t "$session_name" 2>/dev/null; then
+        local icon
+        icon=$(get_status_icon "$status")
+        tmux set-option -qt "$session_name" @wt-status  "$status"
+        tmux set-option -qt "$session_name" @wt-icon    "$icon"
+        tmux set-option -qt "$session_name" @wt-message "$message"
+        tmux refresh-client -S 2>/dev/null || true
+    fi
 }
 
 get_status() {
@@ -102,6 +133,18 @@ get_status() {
 }
 
 get_status_icon() {
+    local status="$1"
+    case "$status" in
+        working) echo "●" ;;
+        idle)    echo "○" ;;
+        input)   echo "⊘" ;;
+        error)   echo "✗" ;;
+        *)       echo "?" ;;
+    esac
+}
+
+# ANSI-colored icon for terminal output (list, pick commands)
+get_status_icon_ansi() {
     local status="$1"
     case "$status" in
         working) echo -e "\033[32m●\033[0m" ;;  # green
@@ -151,7 +194,7 @@ list_worktrees() {
             case "$format" in
                 full)
                     local icon
-                    icon=$(get_status_icon "$status")
+                    icon=$(get_status_icon_ansi "$status")
                     printf "%s %-20s %-25s %s\n" "$icon" "$repo_name" "$branch" "$wt_path"
                     ;;
                 simple)
@@ -171,6 +214,7 @@ create_worktree() {
     local branch="$2"
     local start_claude="${3:-false}"
     local task="${4:-}"
+    local base_branch="${5:-}"
 
     # Resolve to absolute path
     repo_path=$(cd "$repo_path" && pwd)
@@ -182,26 +226,43 @@ create_worktree() {
     local wt_path="$WT_BASE_DIR/$repo_name/$safe_branch"
     local session_name="${repo_name}-${safe_branch}"
 
-    # Check if worktree already exists
-    if [[ -d "$wt_path" ]]; then
+    # Check if worktree already exists on disk
+    if [[ -d "$wt_path" ]] && tmux has-session -t "$session_name" 2>/dev/null; then
         echo "Worktree already exists at $wt_path"
-        echo "Switching to existing session..."
         switch_to "$session_name"
         return
     fi
 
-    echo "Creating worktree for $repo_name @ $branch..."
+    # Resolve worktree path (create if needed, adopt if exists elsewhere)
+    if [[ ! -d "$wt_path" ]]; then
+        echo "Creating worktree for $repo_name @ $branch..."
+        mkdir -p "$(dirname "$wt_path")"
 
-    # Create the worktree
-    mkdir -p "$(dirname "$wt_path")"
-
-    # Check if branch exists
-    if git -C "$repo_path" show-ref --verify --quiet "refs/heads/$branch" 2>/dev/null; then
-        git -C "$repo_path" worktree add "$wt_path" "$branch"
+        # Check if branch is already checked out somewhere
+        local existing_wt
+        existing_wt=$(git -C "$repo_path" worktree list --porcelain 2>/dev/null | grep -B2 "branch refs/heads/$branch$" | head -1 | sed 's/^worktree //' || true)
+        if [[ -n "$existing_wt" && "$existing_wt" != "$repo_path" ]]; then
+            # Adopt existing worktree (not the primary repo)
+            echo "Branch '$branch' already checked out at: $existing_wt"
+            echo "Adopting existing checkout..."
+            wt_path="$existing_wt"
+        elif [[ -n "$existing_wt" && "$existing_wt" == "$repo_path" ]]; then
+            # Branch is checked out at the primary repo — use it directly
+            echo "Branch '$branch' is the primary checkout — using $repo_path directly."
+            wt_path="$repo_path"
+        elif git -C "$repo_path" show-ref --verify --quiet "refs/heads/$branch" 2>/dev/null; then
+            git -C "$repo_path" worktree add "$wt_path" "$branch"
+        else
+            # Branch doesn't exist — create from origin/<default> or HEAD
+            local base_ref="HEAD"
+            if [[ -n "$base_branch" ]]; then
+                base_ref="origin/$base_branch"
+            fi
+            echo "Creating branch '$branch' from $base_ref..."
+            git -C "$repo_path" worktree add -b "$branch" "$wt_path" "$base_ref"
+        fi
     else
-        # Branch doesn't exist, create it
-        echo "Branch '$branch' doesn't exist. Creating from current HEAD..."
-        git -C "$repo_path" worktree add -b "$branch" "$wt_path"
+        echo "Worktree exists at $wt_path, recreating session..."
     fi
 
     # Create tmux session
@@ -225,8 +286,28 @@ create_worktree() {
         # Go back to nvim window
         tmux select-window -t "$session_name:nvim"
 
-        # Set initial status
-        set_status "$session_name" "idle" "Ready"
+        # Write initial status file with full metadata
+        local status_file
+        status_file=$(get_status_file "$session_name")
+        cat > "$status_file" <<EOF2
+status=idle
+message=Ready
+timestamp=$(date +%s)
+repo=$repo_name
+branch=$branch
+wt_path=$wt_path
+pr=
+EOF2
+
+        # Set tmux session options (status + metadata)
+        tmux set-option -qt "$session_name" @wt-status  "idle"
+        tmux set-option -qt "$session_name" @wt-icon    "○"
+        tmux set-option -qt "$session_name" @wt-message "Ready"
+        tmux set-option -qt "$session_name" @wt-repo    "$repo_name"
+        tmux set-option -qt "$session_name" @wt-branch  "$branch"
+        tmux set-option -qt "$session_name" @wt-wt-path "$wt_path"
+        tmux set-option -qt "$session_name" @wt-pr      ""
+        tmux set-option -qt "$session_name" @wt-master  "0"
 
         # Wait for nvim/claudecode.nvim to start WebSocket server
         echo "Waiting for Neovim IDE server to start..."
@@ -321,7 +402,7 @@ delete_worktree() {
 #  Interactive Repo/Branch Pickers (fzf-based)
 # -----------------------------------------------------------------------------
 
-# Find git repos in common locations
+# Find git repos in common locations (depth 1 only for clean list)
 find_git_repos() {
     local search_dirs=(
         "$HOME/gt"
@@ -330,19 +411,17 @@ find_git_repos() {
         "$HOME/src"
         "$HOME/dev"
         "$HOME/work"
+        "$HOME/workspace"
         "$HOME/repos"
     )
 
     for dir in "${search_dirs[@]}"; do
-        if [[ -d "$dir/.git" ]] || [[ -f "$dir/.git" ]]; then
-            # The directory itself is a repo (or worktree)
-            echo "$dir"
-        elif [[ -d "$dir" ]]; then
-            # Find .git entries (directories or files for worktrees) up to 3 levels deep
-            find "$dir" -maxdepth 3 -name ".git" 2>/dev/null | while read -r git_entry; do
-                dirname "$git_entry"
-            done
-        fi
+        [[ -d "$dir" ]] || continue
+        # Only list immediate children that are primary repos (not worktrees)
+        # .git as directory = primary repo; .git as file = worktree, skip
+        for child in "$dir"/*/; do
+            [[ -d "$child/.git" ]] && echo "${child%/}"
+        done
     done
 }
 
@@ -423,37 +502,38 @@ pick_branch() {
 }
 
 # Interactive new worktree creation
+# Flow: pick repo → pick/create branch (based on origin/main) → create worktree
 interactive_new() {
     local repo_path="${1:-}"
     local branch="${2:-}"
 
-    # Step 1: Pick repo if not provided
+    log "interactive_new start repo_path='$repo_path' branch='$branch'"
+
+    # Step 1: Pick repo
     if [[ -z "$repo_path" ]]; then
-        echo ""
-        echo "Available repositories:"
-        echo "───────────────────────"
+        log "finding repos..."
 
         local repos=()
         local i=1
-
-        # Check main locations
-        for dir in "$HOME/gt" "$HOME/code" "$HOME/projects" "$HOME/src"; do
-            if [[ -d "$dir/.git" ]] || [[ -f "$dir/.git" ]]; then
-                repos+=("$dir")
-                echo "  [$i] $dir"
-                ((i++))
-            fi
-        done
+        echo ""
+        echo "Repositories:"
+        echo "─────────────"
+        while IFS= read -r dir; do
+            repos+=("$dir")
+            printf "  [%d] %s\n" "$i" "$(basename "$dir")"
+            ((i++))
+        done < <(find_git_repos | sort -u)
+        log "found ${#repos[@]} repos"
 
         if [[ ${#repos[@]} -eq 0 ]]; then
-            echo "  No repos found in common locations."
-            echo ""
+            echo "  No repos found."
             echo -n "  Enter repo path: "
             read -r repo_path </dev/tty
         else
             echo ""
-            echo -n "  Select [1-$((i-1))] or enter path: "
+            echo -n "Select [1-$((i-1))]: "
             read -r selection </dev/tty
+            log "repo selection='$selection'"
 
             if [[ "$selection" =~ ^[0-9]+$ ]] && [[ $selection -ge 1 ]] && [[ $selection -lt $i ]]; then
                 repo_path="${repos[$((selection-1))]}"
@@ -474,28 +554,39 @@ interactive_new() {
         return 1
     }
 
-    # Step 2: Pick branch if not provided
-    if [[ -z "$branch" ]]; then
-        echo ""
-        echo "Branches in $repo_path:"
-        echo "───────────────────────"
+    local repo_name
+    repo_name=$(basename "$repo_path")
 
+    # Step 2: Fetch latest from origin
+    echo "Fetching latest from origin..."
+    git -C "$repo_path" fetch origin 2>/dev/null || true
+
+    # Detect default branch
+    local default_branch
+    default_branch=$(git -C "$repo_path" symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||' || echo "main")
+
+    # Step 3: Pick or create branch
+    if [[ -z "$branch" ]]; then
         local branches=()
         local i=1
+        echo ""
+        echo "Branches (new branches based on origin/$default_branch):"
+        echo "────────────────────────────────────────────────────────"
+        echo "  [n] Create new branch"
         while IFS= read -r b; do
             branches+=("$b")
-            echo "  [$i] $b"
-            ((i++))
-        done < <(git -C "$repo_path" branch --format='%(refname:short)' 2>/dev/null | head -10)
+            printf "  [%d] %s\n" "$((i++))" "$b"
+        done < <(git -C "$repo_path" branch --format='%(refname:short)' 2>/dev/null)
 
-        echo "  [n] Create new branch"
         echo ""
-        echo -n "  Select or enter new branch name: "
+        echo -n "Select or enter branch name: "
         read -r selection </dev/tty
+        log "branch selection='$selection'"
 
         if [[ "$selection" == "n" ]]; then
-            echo -n "  New branch name: "
+            echo -n "New branch name: "
             read -r branch </dev/tty
+            log "new branch name='$branch'"
         elif [[ "$selection" =~ ^[0-9]+$ ]] && [[ $selection -ge 1 ]] && [[ $selection -lt $i ]]; then
             branch="${branches[$((selection-1))]}"
         else
@@ -508,9 +599,11 @@ interactive_new() {
         fi
     fi
 
+    log "branch=$branch repo_path=$repo_path default_branch=$default_branch"
+
     echo ""
-    echo "Creating worktree: $repo_path @ $branch"
-    create_worktree "$repo_path" "$branch" false ""
+    echo "Creating worktree: $repo_name @ $branch (from origin/$default_branch)"
+    create_worktree "$repo_path" "$branch" false "" "$default_branch"
 }
 
 # -----------------------------------------------------------------------------
@@ -550,109 +643,187 @@ pick_worktree() {
 }
 
 # -----------------------------------------------------------------------------
-#  Dashboard (Full TUI)
+#  Sync tmux options from status files (for after tmux restart)
 # -----------------------------------------------------------------------------
-dashboard() {
-    check_deps
+sync_tmux() {
+    for status_file in "$WT_STATUS_DIR"/*.status; do
+        [[ -f "$status_file" ]] || continue
+        local session_name
+        session_name=$(basename "$status_file" .status)
 
-    # Check if gum is available for nicer UI
-    local use_gum=false
-    if command -v gum &>/dev/null; then
-        use_gum=true
+        if tmux has-session -t "$session_name" 2>/dev/null; then
+            # Source the status file to get all fields
+            local status="" message="" repo="" branch="" wt_path="" pr=""
+            source "$status_file" 2>/dev/null || continue
+
+            local icon
+            icon=$(get_status_icon "${status:-unknown}")
+
+            tmux set-option -qt "$session_name" @wt-status  "${status:-unknown}"
+            tmux set-option -qt "$session_name" @wt-icon    "$icon"
+            tmux set-option -qt "$session_name" @wt-message "${message:-}"
+            tmux set-option -qt "$session_name" @wt-repo    "${repo:-}"
+            tmux set-option -qt "$session_name" @wt-branch  "${branch:-}"
+            tmux set-option -qt "$session_name" @wt-wt-path "${wt_path:-}"
+            tmux set-option -qt "$session_name" @wt-pr      "${pr:-}"
+            tmux set-option -qt "$session_name" @wt-master  "0"
+        fi
+    done
+
+    # Handle master session separately
+    if tmux has-session -t wt-master 2>/dev/null; then
+        tmux set-option -qt wt-master @wt-master "1"
+        tmux set-option -qt wt-master @wt-icon   "◆"
+        # Preserve existing status if set
+        local current
+        current=$(tmux show-option -qv -t wt-master @wt-status 2>/dev/null || echo "")
+        if [[ -z "$current" ]]; then
+            tmux set-option -qt wt-master @wt-status  "idle"
+            tmux set-option -qt wt-master @wt-message "Orchestrator"
+        fi
     fi
 
-    while true; do
-        clear
+    tmux refresh-client -S 2>/dev/null || true
+}
 
-        echo ""
-        if [[ "$use_gum" == "true" ]]; then
-            gum style --border double --padding "0 2" --border-foreground 212 \
-                "WORKTREE COMMAND CENTER"
-        else
-            echo "╔══════════════════════════════════════════════════════════════════╗"
-            echo "║              WORKTREE COMMAND CENTER                             ║"
-            echo "╚══════════════════════════════════════════════════════════════════╝"
-        fi
-        echo ""
+# -----------------------------------------------------------------------------
+#  Master Session
+# -----------------------------------------------------------------------------
+master() {
+    local session="wt-master"
 
-        # Aggregate stats
-        local total=0 working=0 idle=0 input_needed=0
-        while IFS=: read -r name path status; do
-            ((total++)) || true
-            case "$status" in
-                working) ((working++)) || true ;;
-                idle) ((idle++)) || true ;;
-                input) ((input_needed++)) || true ;;
-            esac
-        done < <(list_worktrees simple)
+    if tmux has-session -t "$session" 2>/dev/null; then
+        echo "Master session already exists, switching..."
+        switch_to "$session"
+        return
+    fi
 
-        echo "  Status: $(get_status_icon working) $working working  $(get_status_icon idle) $idle idle  $(get_status_icon input) $input_needed need input"
-        echo ""
-        echo "  ─────────────────────────────────────────────────────────────────"
-        echo ""
+    echo "Creating master session..."
 
-        # List worktrees
-        if [[ $total -eq 0 ]]; then
-            echo "  No worktrees found. Create one with: wt new <repo> <branch>"
-        else
-            echo "   #  Repository            Branch"
-            echo "  ─── ──────────────────── ─────────────────────────"
-            local i=1
-            while IFS=: read -r session_name wt_path status; do
-                local icon repo_name branch
-                icon=$(get_status_icon "$status")
-                repo_name=$(basename "$(dirname "$wt_path")")
-                branch=$(basename "$wt_path")
-                printf "  %s%-2d %-20s %-25s\n" "$icon" "$i" "$repo_name" "$branch"
-                ((i++))
-            done < <(list_worktrees simple)
-        fi
+    tmux new-session -d -s "$session" -c "$HOME" -n claude
+    tmux new-window -t "$session" -n shell -c "$HOME"
+    tmux select-window -t "$session:claude"
 
-        echo ""
-        echo "  ─────────────────────────────────────────────────────────────────"
-        echo ""
-        echo "  Commands:"
-        echo "    [1-9] Switch to worktree    [n] New worktree"
-        echo "    [d]   Delete worktree       [r] Refresh"
-        echo "    [q]   Quit"
-        echo ""
+    # Start Claude without --ide (master has no nvim)
+    tmux send-keys -t "$session:claude" "claude" Enter
 
-        read -rsn1 key
+    # Set tmux metadata
+    tmux set-option -qt "$session" @wt-master  "1"
+    tmux set-option -qt "$session" @wt-icon    "◆"
+    tmux set-option -qt "$session" @wt-status  "idle"
+    tmux set-option -qt "$session" @wt-message "Orchestrator"
+    tmux set-option -qt "$session" @wt-repo    ""
+    tmux set-option -qt "$session" @wt-branch  ""
+    tmux set-option -qt "$session" @wt-pr      ""
 
-        case "$key" in
-            [1-9])
-                local session
-                session=$(list_worktrees session | sed -n "${key}p")
-                if [[ -n "$session" ]]; then
-                    switch_to "$session"
-                    return
-                fi
-                ;;
-            n|N)
-                # Run interactive new, catch errors
-                if interactive_new; then
-                    return
+    switch_to "$session"
+    notify "Master Session" "wt-master created"
+}
+
+# -----------------------------------------------------------------------------
+#  PR Lookup
+# -----------------------------------------------------------------------------
+pr_lookup() {
+    local pr_number="${1:-}"
+
+    if ! command -v gh &>/dev/null; then
+        echo "gh (GitHub CLI) is required for PR lookup"
+        exit 1
+    fi
+
+    if [[ -z "$pr_number" ]]; then
+        echo "Usage: wt pr <number>"
+        return 1
+    fi
+
+    # Get branch name from PR
+    local target_branch
+    target_branch=$(gh pr view "$pr_number" --json headRefName -q .headRefName 2>/dev/null)
+
+    if [[ -z "$target_branch" ]]; then
+        echo "Could not find PR #$pr_number"
+        return 1
+    fi
+
+    echo "PR #$pr_number → branch: $target_branch"
+
+    # Search tmux sessions for matching branch
+    local session
+    for session in $(tmux list-sessions -F "#{session_name}" 2>/dev/null); do
+        local session_branch
+        session_branch=$(tmux show-option -qv -t "$session" @wt-branch 2>/dev/null || echo "")
+        if [[ "$session_branch" == "$target_branch" ]]; then
+            echo "Found session: $session"
+            # Store PR link
+            tmux set-option -qt "$session" @wt-pr "$pr_number"
+            # Update status file too
+            local status_file="$WT_STATUS_DIR/${session}.status"
+            if [[ -f "$status_file" ]]; then
+                # Update pr= line in status file
+                if grep -q '^pr=' "$status_file"; then
+                    sed -i'' -e "s/^pr=.*/pr=$pr_number/" "$status_file"
                 else
-                    echo ""
-                    echo "  Press any key to continue..."
-                    read -rsn1
+                    echo "pr=$pr_number" >> "$status_file"
                 fi
-                ;;
-            d|D)
-                echo ""
-                read -p "  Session name to delete: " del_session
-                if [[ -n "$del_session" ]]; then
-                    delete_worktree "$del_session"
-                fi
-                ;;
-            r|R)
-                continue
-                ;;
-            q|Q)
-                return
-                ;;
-        esac
+            fi
+            switch_to "$session"
+            return
+        fi
     done
+
+    echo "No active worktree session for branch '$target_branch'"
+    echo ""
+    read -p "Create worktree for this branch? [y/N] " confirm </dev/tty
+    if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
+        interactive_new "" "$target_branch"
+    fi
+}
+
+pr_pick() {
+    check_deps
+
+    if ! command -v gh &>/dev/null; then
+        echo "gh (GitHub CLI) is required for PR lookup"
+        exit 1
+    fi
+
+    # List open PRs via gh, let user pick with fzf
+    local selection
+    selection=$(gh pr list --json number,title,headRefName \
+        --template '{{range .}}{{.number}}	{{.title}}	{{.headRefName}}{{"\n"}}{{end}}' 2>/dev/null \
+        | fzf \
+            --header="Select PR to open" \
+            --delimiter='\t' \
+            --with-nth=1,2 \
+            --preview='echo "PR #{1} → branch: {3}"' \
+        </dev/tty || true)
+
+    if [[ -n "$selection" ]]; then
+        local pr_num
+        pr_num=$(echo "$selection" | cut -f1)
+        pr_lookup "$pr_num"
+    fi
+}
+
+# -----------------------------------------------------------------------------
+#  Delete Picker (for tmux menu popup)
+# -----------------------------------------------------------------------------
+delete_pick() {
+    check_deps
+
+    local selection
+    selection=$(list_worktrees full | fzf \
+        --ansi \
+        --header="Select worktree to delete" \
+        || true)
+
+    if [[ -n "$selection" ]]; then
+        local repo_name branch_name
+        repo_name=$(echo "$selection" | awk '{print $2}')
+        branch_name=$(echo "$selection" | awk '{print $3}')
+        local session_name="${repo_name}-${branch_name//\//-}"
+        delete_worktree "$session_name"
+    fi
 }
 
 # -----------------------------------------------------------------------------
@@ -693,23 +864,33 @@ Commands:
   pick, p               Interactive worktree picker (fzf)
   switch, s <session>   Switch to a worktree session
   delete, rm <session>  Delete a worktree and session
-  dashboard, d          Open full dashboard TUI
+  delete-pick           Interactive delete picker (fzf)
+
+  master                Create/attach master orchestrator session
+  pr <number>           Find worktree by PR number and switch to it
+  pr-pick               Interactive PR picker (fzf + gh)
 
   claude <session> <task>   Start Claude on a task in a session
   status <session>          Get status of a session
   set-status <session> <status> [message]   Set session status
+  sync-tmux                 Sync status files to tmux session options
 
 Options:
   --start-claude        Start Claude after creating worktree
   --task <task>         Task description for Claude
   --force               Skip confirmation prompts
 
+Tmux keybindings (after sourcing tmux-wt.conf):
+  prefix + w            Action menu (new, delete, PR, master)
+  prefix + W            Session switcher (choose-tree with status)
+  prefix + M            Jump to master session
+
 Examples:
   wt new                    # Interactive: pick repo, then branch
-  wt new ~/gt               # Interactive: pick branch for this repo
   wt new ~/gt feature-x     # Direct: create feature-x in ~/gt
-  wt pick
-  wt dashboard
+  wt pick                   # fzf worktree picker
+  wt master                 # Create/attach master session
+  wt pr 42                  # Find worktree for PR #42
 
 Environment:
   WT_BASE_DIR     Base directory for worktrees (default: ~/worktrees)
@@ -718,10 +899,38 @@ EOF
 }
 
 main() {
-    local cmd="${1:-dashboard}"
+    local cmd="${1:-default}"
     shift || true
 
+    log "cmd=$cmd args=$*"
+
     case "$cmd" in
+        default)
+            if [[ -n "${TMUX:-}" ]]; then
+                # Inside tmux: show the action menu
+                tmux display-menu -T " Worktrees " -x C -y S \
+                    "New worktree"       n "display-popup -E -w 80% -h 80% '$HOME/bin/wt new'" \
+                    "Switch (pick)"      s "display-popup -E -w 60% -h 40% '$HOME/bin/wt pick'" \
+                    "Delete..."          d "display-popup -E -w 60% -h 40% '$HOME/bin/wt delete-pick'" \
+                    "" \
+                    "PR lookup..."       p "display-popup -E -w 60% -h 40% '$HOME/bin/wt pr-pick'" \
+                    "List all"           l "display-popup -E -w 80% -h 60% '$HOME/bin/wt list'" \
+                    "" \
+                    "Master session"     m "switch-client -t wt-master" \
+                    "New master..."      M "display-popup -E -w 70% -h 50% '$HOME/bin/wt master'" \
+                    "" \
+                    "Sync status"        r "run-shell '$HOME/bin/wt sync-tmux'" \
+                    "" \
+                    "Quit"               q ""
+            else
+                # Outside tmux: attach to existing or start new
+                if tmux list-sessions &>/dev/null; then
+                    exec tmux attach
+                else
+                    exec tmux
+                fi
+            fi
+            ;;
         list|ls)
             list_worktrees full
             ;;
@@ -768,8 +977,20 @@ main() {
             [[ "${2:-}" == "--force" ]] && force=true
             delete_worktree "${1:-}" "$force"
             ;;
-        dashboard|d|"")
-            dashboard
+        delete-pick)
+            delete_pick
+            ;;
+        master)
+            master
+            ;;
+        pr)
+            pr_lookup "${1:-}"
+            ;;
+        pr-pick)
+            pr_pick
+            ;;
+        sync-tmux)
+            sync_tmux
             ;;
         claude)
             start_claude "${1:-}" "${2:-}"

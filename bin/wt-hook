@@ -49,6 +49,16 @@ get_session_name() {
 # -----------------------------------------------------------------------------
 #  Status Functions
 # -----------------------------------------------------------------------------
+get_icon() {
+    case "$1" in
+        working) echo "●" ;;
+        idle)    echo "○" ;;
+        input)   echo "⊘" ;;
+        error)   echo "✗" ;;
+        *)       echo "?" ;;
+    esac
+}
+
 set_status() {
     local session_name="$1"
     local status="$2"
@@ -56,11 +66,33 @@ set_status() {
 
     local status_file="$WT_STATUS_DIR/${session_name}.status"
 
+    # Preserve existing metadata fields if file exists
+    local pr="" repo="" branch="" wt_path=""
+    if [[ -f "$status_file" ]]; then
+        source "$status_file" 2>/dev/null || true
+    fi
+
+    # Write status file (with extended fields)
     cat > "$status_file" <<EOF
 status=$status
 message=$message
 timestamp=$(date +%s)
+repo=$repo
+branch=$branch
+wt_path=$wt_path
+pr=$pr
 EOF
+
+    # Write tmux user options for live display
+    if tmux has-session -t "$session_name" 2>/dev/null; then
+        local icon
+        icon=$(get_icon "$status")
+        tmux set-option -qt "$session_name" @wt-status  "$status"
+        tmux set-option -qt "$session_name" @wt-icon    "$icon"
+        tmux set-option -qt "$session_name" @wt-message "$message"
+        # Force immediate status bar redraw
+        tmux refresh-client -S 2>/dev/null || true
+    fi
 }
 
 # -----------------------------------------------------------------------------

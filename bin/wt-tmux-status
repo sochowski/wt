@@ -32,6 +32,16 @@ fi
 # Build output string (using terminal palette colours)
 output=""
 
+# Master session indicator
+master_status=$(tmux show-option -qv -t wt-master @wt-status 2>/dev/null || echo "")
+if [[ -n "$master_status" ]]; then
+    if [[ "$master_status" == "working" ]]; then
+        output+="#[fg=colour5]◆#[fg=default] "
+    else
+        output+="#[fg=colour8]◆#[fg=default] "
+    fi
+fi
+
 # Only show non-zero counts
 [[ $working -gt 0 ]] && output+="#[fg=colour2]●${working}#[fg=default] "
 [[ $idle -gt 0 ]]    && output+="#[fg=colour4]○${idle}#[fg=default] "
