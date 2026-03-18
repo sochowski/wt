@@ -109,6 +109,49 @@ check_deps() {
     fi
 }
 
+# Sync env files from primary repo to worktree using .wt/sync config
+# Format: one entry per line — "symlink <path>" or "copy <path>"
+sync_env_files() {
+    local repo_path="$1"
+    local wt_path="$2"
+
+    [[ "$wt_path" == "$repo_path" ]] && return 0
+
+    local sync_config="$repo_path/.wt/sync"
+    [[ -f "$sync_config" ]] || return 0
+
+    local count=0
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        [[ -z "${line// }" ]] && continue
+
+        local action file
+        action=$(awk '{print $1}' <<< "$line")
+        file=$(awk '{print $2}' <<< "$line")
+
+        local src="$repo_path/$file"
+        local dst="$wt_path/$file"
+
+        if [[ ! -f "$src" ]]; then
+            echo "  [sync] skipping $file (not found in primary repo)"
+            continue
+        fi
+        [[ -e "$dst" ]] && continue
+
+        mkdir -p "$(dirname "$dst")"
+
+        case "$action" in
+            symlink) ln -s "$src" "$dst"; echo "  [sync] → $file" ;;
+            copy)    cp "$src" "$dst";    echo "  [sync] ⊕ $file" ;;
+            *)       echo "  [sync] unknown action '$action' for $file"; continue ;;
+        esac
+        (( count++ )) || true
+    done < "$sync_config"
+
+    [[ $count -gt 0 ]] && log "Synced $count env file(s) from $repo_path"
+    return 0
+}
+
 # Apply allowed tools from ~/.config/wt/claude-allowed-tools.json
 # Merges into <dir>/.claude/settings.local.json (preserving existing keys)
 apply_allowed_tools() {
@@ -382,6 +425,9 @@ create_worktree() {
         if [[ "$agent" == "claude" ]]; then
             apply_allowed_tools "$wt_path"
         fi
+
+        # Sync env files from primary repo (.wt/sync)
+        sync_env_files "$repo_path" "$wt_path"
 
         # Create session with main window (nvim left, agent right)
         tmux new-session -d -s "$session_name" -c "$wt_path" -n main
