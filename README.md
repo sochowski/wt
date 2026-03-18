@@ -9,6 +9,7 @@ Supports **Claude**, **Codex**, and **Gemini** — any session can use any agent
 - One worktree = one tmux session (agent, nvim, shell windows)
 - Multi-agent: Claude, Codex, Gemini (auto-detects installed agents)
 - MCP profiles: per-session MCP server configuration
+- Env file sync: auto-copy/symlink `.env` files via `.wt/sync` config
 - Native tmux UI: `choose-tree` switcher with live status icons
 - Action menu via `display-menu` for quick session management
 - fzf picker with status info and agent conversation preview
@@ -100,6 +101,23 @@ cat > ~/.config/wt/mcp-profiles/master.json << 'EOF'
 { "mcpServers": { "my-server": { "type": "http", "url": "https://..." } } }
 EOF
 ```
+
+## Env File Sync
+
+Worktrees don't inherit gitignored files like `.env`. Add a `.wt/sync` file to any repo to automatically copy or symlink env files into each new worktree on creation.
+
+```
+# .wt/sync
+copy .env
+copy .env.local
+copy backend/.env
+symlink webapp/.env
+```
+
+- `copy` — copies the file from the primary repo checkout (isolated per worktree)
+- `symlink` — symlinks to the primary checkout (stays in sync, changes affect the source)
+
+Files missing from the primary repo are skipped with a warning. Files that already exist in the worktree are left untouched. `.wt/sync` itself is safe to commit — it contains no secrets.
 
 ## Example Setup
 
