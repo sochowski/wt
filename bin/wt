@@ -17,6 +17,9 @@ WT_LOG_FILE="${WT_LOG_FILE:-$HOME/.local/state/wt/wt.log}"
 WT_BIN_DIR="$(dirname "$(readlink -f "$0")")"
 WT_DEFAULT_AGENT="${WT_DEFAULT_AGENT:-claude}"
 
+# Mobile mode: set WT_MOBILE=1 in Termux, forwarded via SSH SendEnv
+WT_MOBILE="${WT_MOBILE:-}"
+
 # Ensure directories exist
 mkdir -p "$WT_BASE_DIR" "$WT_STATUS_DIR" "$WT_CONFIG_DIR"
 
@@ -265,6 +268,81 @@ get_status_icon_ansi() {
 }
 
 # -----------------------------------------------------------------------------
+#  Layout Management (Mobile / Desktop)
+# -----------------------------------------------------------------------------
+apply_layout() {
+    local session="$1"
+
+    # Skip non-wt sessions
+    local wt_status
+    wt_status=$(tmux show-option -qv -t "$session" @wt-status 2>/dev/null || echo "")
+    [[ -z "$wt_status" ]] && return
+
+    # Skip master (no editor)
+    [[ "$(tmux show-option -qv -t "$session" @wt-master 2>/dev/null)" == "1" ]] && return
+
+    if [[ -n "$WT_MOBILE" ]]; then
+        # Mobile: break editor out into its own window if joined
+        local pane_count
+        pane_count=$(tmux list-panes -t "$session:agent" 2>/dev/null | wc -l)
+        if [[ $pane_count -gt 1 ]]; then
+            local nvim_pane
+            nvim_pane=$(tmux list-panes -t "$session:agent" -F '#{pane_index} #{pane_current_command}' \
+                | grep -i 'nvim\|vim' | head -1 | awk '{print $1}')
+            if [[ -n "$nvim_pane" ]]; then
+                tmux break-pane -s "$session:agent.$nvim_pane" -n editor
+            fi
+        fi
+        tmux select-window -t "$session:agent" 2>/dev/null || true
+    else
+        # Desktop: join editor beside agent if it's a separate window
+        local editor_window
+        editor_window=$(tmux list-windows -t "$session" -F '#{window_name}' | grep '^editor$')
+        if [[ -n "$editor_window" ]]; then
+            tmux join-pane -hb -s "$session:editor" -t "$session:agent"
+            tmux select-layout -t "$session:agent" even-horizontal
+        fi
+    fi
+}
+
+toggle_layout() {
+    local session
+    if [[ -n "${TMUX:-}" ]]; then
+        session=$(tmux display-message -p '#{session_name}' 2>/dev/null || return)
+    else
+        echo "Must be run from inside tmux"
+        return 1
+    fi
+
+    # Skip non-wt / master sessions
+    local wt_status
+    wt_status=$(tmux show-option -qv -t "$session" @wt-status 2>/dev/null || echo "")
+    [[ -z "$wt_status" ]] && return
+    [[ "$(tmux show-option -qv -t "$session" @wt-master 2>/dev/null)" == "1" ]] && return
+
+    # Check current state: if editor is a separate window, join it (go desktop); otherwise break it (go mobile)
+    local editor_window
+    editor_window=$(tmux list-windows -t "$session" -F '#{window_name}' | grep '^editor$')
+    if [[ -n "$editor_window" ]]; then
+        # Editor is a window → join into panes (desktop)
+        tmux join-pane -hb -s "$session:editor" -t "$session:agent"
+        tmux select-layout -t "$session:agent" even-horizontal
+    else
+        # Editor is a pane → break out into window (mobile)
+        local pane_count
+        pane_count=$(tmux list-panes -t "$session:agent" 2>/dev/null | wc -l)
+        if [[ $pane_count -gt 1 ]]; then
+            local nvim_pane
+            nvim_pane=$(tmux list-panes -t "$session:agent" -F '#{pane_index} #{pane_current_command}' \
+                | grep -i 'nvim\|vim' | head -1 | awk '{print $1}')
+            if [[ -n "$nvim_pane" ]]; then
+                tmux break-pane -s "$session:agent.$nvim_pane" -n editor
+            fi
+        fi
+    fi
+}
+
+# -----------------------------------------------------------------------------
 #  Worktree Operations
 # -----------------------------------------------------------------------------
 # Get the bare repo path for a given repo
@@ -429,21 +507,18 @@ create_worktree() {
         # Sync env files from primary repo (.wt/sync)
         sync_env_files "$repo_path" "$wt_path"
 
-        # Create session with main window (nvim left, agent right)
-        tmux new-session -d -s "$session_name" -c "$wt_path" -n main
+        # Create session with agent as primary window
+        tmux new-session -d -s "$session_name" -c "$wt_path" -n agent
 
-        # Start nvim in the left pane
-        tmux send-keys -t "$session_name:main" "nvim" Enter
+        # Editor window (nvim)
+        tmux new-window -t "$session_name" -n editor -c "$wt_path"
+        tmux send-keys -t "$session_name:editor" "nvim" Enter
 
-        # Split right for agent pane
-        tmux split-window -h -t "$session_name:main" -c "$wt_path"
-
-        # Create shell window
+        # Shell window
         tmux new-window -t "$session_name" -n shell -c "$wt_path"
 
-        # Select agent pane (right pane of main window)
-        tmux select-window -t "$session_name:main"
-        tmux select-pane -t "$session_name:main.1"
+        # Focus agent window
+        tmux select-window -t "$session_name:agent"
 
         local agent_display
         agent_display=$(agent_label "$agent")
@@ -480,15 +555,18 @@ EOF2
         # Start agent via wt-agent-launch
         if [[ "$start_agent" == "true" ]]; then
             if [[ -n "$task" ]]; then
-                tmux send-keys -t "$session_name:main.1" "$WT_BIN_DIR/wt-agent-launch \"$task\"" Enter
+                tmux send-keys -t "$session_name:agent" "$WT_BIN_DIR/wt-agent-launch \"$task\"" Enter
             else
-                tmux send-keys -t "$session_name:main.1" "$WT_BIN_DIR/wt-agent-launch" Enter
+                tmux send-keys -t "$session_name:agent" "$WT_BIN_DIR/wt-agent-launch" Enter
             fi
             set_status "$session_name" "working" "${task:-Interactive session}"
         else
             # Start agent for when user wants it
-            tmux send-keys -t "$session_name:main.1" "$WT_BIN_DIR/wt-agent-launch" Enter
+            tmux send-keys -t "$session_name:agent" "$WT_BIN_DIR/wt-agent-launch" Enter
         fi
+
+        # Apply layout based on current connection mode
+        apply_layout "$session_name"
     fi
 
     # Switch to the session
@@ -505,6 +583,9 @@ switch_to() {
         echo "Session '$session_name' does not exist"
         return 1
     fi
+
+    # Apply layout for current connection's mode
+    apply_layout "$session_name"
 
     if [[ -n "${TMUX:-}" ]]; then
         tmux switch-client -t "$session_name"
@@ -842,7 +923,7 @@ pick_worktree() {
         --delimiter=: \
         --with-nth=2 \
         --header="Select worktree (Enter=switch, Ctrl-D=delete, ?=preview)" \
-        --preview="tmux capture-pane -t {1}:main.1 -p -e 2>/dev/null || tmux capture-pane -t {1}:agent -p -e 2>/dev/null || echo '(no agent pane)'" \
+        --preview="tmux capture-pane -t {1}:agent -p -e 2>/dev/null || tmux capture-pane -t {1}:agent.1 -p -e 2>/dev/null || echo '(no agent pane)'" \
         --preview-window=right:60% \
         --bind="ctrl-d:execute(wt delete {1} --force)+reload($WT_BIN_DIR/wt pick-list)" \
         || true)
@@ -897,6 +978,37 @@ sync_tmux() {
     fi
 
     tmux refresh-client -S 2>/dev/null || true
+}
+
+# -----------------------------------------------------------------------------
+#  Layout Migration (one-time conversion of old pane-based sessions)
+# -----------------------------------------------------------------------------
+migrate_layout() {
+    local count=0
+    for session in $(tmux list-sessions -F '#{session_name}'); do
+        local wt_status
+        wt_status=$(tmux show-option -qv -t "$session" @wt-status 2>/dev/null || echo "")
+        [[ -z "$wt_status" ]] && continue
+        [[ "$(tmux show-option -qv -t "$session" @wt-master 2>/dev/null)" == "1" ]] && continue
+
+        # Old layout: window named "main" with 2+ panes
+        local main_panes
+        main_panes=$(tmux list-panes -t "$session:main" 2>/dev/null | wc -l || echo 0)
+
+        if [[ $main_panes -ge 2 ]]; then
+            echo "Migrating $session..."
+            local nvim_pane
+            nvim_pane=$(tmux list-panes -t "$session:main" -F '#{pane_index} #{pane_current_command}' \
+                | grep -i 'nvim\|vim' | head -1 | awk '{print $1}')
+            if [[ -n "$nvim_pane" ]]; then
+                tmux break-pane -s "$session:main.$nvim_pane" -n editor
+            fi
+            tmux rename-window -t "$session:main" agent
+            ((count++))
+            echo "  Done"
+        fi
+    done
+    echo "Migrated $count session(s)"
 }
 
 # -----------------------------------------------------------------------------
@@ -1088,11 +1200,11 @@ start_agent() {
     local label
     label=$(agent_label "$agent")
 
-    # Send agent launch command
+    # Send agent launch command to agent window
     if [[ -n "$task" ]]; then
-        tmux send-keys -t "$session_name:main.1" "$WT_BIN_DIR/wt-agent-launch \"$task\"" Enter
+        tmux send-keys -t "$session_name:agent" "$WT_BIN_DIR/wt-agent-launch \"$task\"" Enter
     else
-        tmux send-keys -t "$session_name:main.1" "$WT_BIN_DIR/wt-agent-launch" Enter
+        tmux send-keys -t "$session_name:agent" "$WT_BIN_DIR/wt-agent-launch" Enter
     fi
     set_status "$session_name" "working" "${task:-Interactive session}"
 
@@ -1278,6 +1390,12 @@ main() {
             ;;
         sync-tmux)
             sync_tmux
+            ;;
+        migrate-layout)
+            migrate_layout
+            ;;
+        toggle-layout)
+            toggle_layout
             ;;
         agent|claude)
             start_agent "${1:-}" "${2:-}"
