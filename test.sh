@@ -227,7 +227,7 @@ test_status_file() {
     fi
 
     # Check required fields
-    for field in status message timestamp repo branch wt_path agent; do
+    for field in status message timestamp repo branch wt_path agent opencode_config; do
         if grep -q "^${field}=" "$status_file"; then
             pass "field present: $field=$(grep "^${field}=" "$status_file" | cut -d= -f2-)"
         else
@@ -249,15 +249,52 @@ test_tmux_options() {
         return
     fi
 
-    for opt in @wt-status @wt-icon @wt-message @wt-repo @wt-branch @wt-wt-path @wt-agent @wt-master; do
+    for opt in @wt-status @wt-icon @wt-message @wt-repo @wt-branch @wt-wt-path @wt-agent @wt-master @wt-opencode-config; do
         local val
         val=$(tmux show-option -qv -t "$TEST_SESSION" "$opt" 2>/dev/null)
-        if [[ -n "$val" || "$opt" == "@wt-wt-path" || "$opt" == "@wt-master" ]]; then
+        if [[ -n "$val" || "$opt" == "@wt-wt-path" || "$opt" == "@wt-master" || "$opt" == "@wt-opencode-config" ]]; then
             pass "$opt = '$val'"
         else
             fail "$opt not set"
         fi
     done
+}
+
+test_status_metadata_recovery() {
+    section "Status Metadata Recovery"
+
+    if [[ -z "$TEST_SESSION" ]]; then
+        fail "skipped: no test session"
+        return
+    fi
+
+    local status_file="$WT_STATUS_DIR/$TEST_SESSION.status"
+    local wt_path="$WT_BASE_DIR/test-wt-repo/test-branch"
+
+    cat > "$status_file" <<EOF
+status=working
+message=race write
+timestamp=$(date +%s)
+repo=
+branch=
+wt_path=
+pr=
+agent=
+opencode_config=
+EOF
+
+    (cd "$wt_path" 2>/dev/null || cd "$TEST_REPO"; "$WT_BIN_DIR/wt-hook" stop) 2>/dev/null
+
+    local repo branch wt_path_value agent
+    repo=$(grep '^repo=' "$status_file" | cut -d= -f2-)
+    branch=$(grep '^branch=' "$status_file" | cut -d= -f2-)
+    wt_path_value=$(grep '^wt_path=' "$status_file" | cut -d= -f2-)
+    agent=$(grep '^agent=' "$status_file" | cut -d= -f2-)
+
+    [[ "$repo" == "test-wt-repo" ]] && pass "recovered repo=$repo" || fail "repo not recovered" "$repo"
+    [[ "$branch" == "test-branch" ]] && pass "recovered branch=$branch" || fail "branch not recovered" "$branch"
+    [[ "$wt_path_value" == "$wt_path" ]] && pass "recovered wt_path=$wt_path_value" || fail "wt_path not recovered" "$wt_path_value"
+    [[ -n "$agent" ]] && pass "recovered agent=$agent" || fail "agent not recovered"
 }
 
 test_wt_hook_dual_write() {
@@ -691,6 +728,63 @@ test_opencode_plugin() {
     done
 }
 
+test_opencode_mcp_config() {
+    section "opencode MCP Config"
+
+    local tmp_dir tmp_config target out funcs
+    tmp_dir=$(mktemp -d)
+    tmp_config="$tmp_dir/wt-config"
+    target="$tmp_dir/worktree"
+    mkdir -p "$tmp_config/mcp-profiles" "$target"
+
+    cat > "$tmp_config/mcp-profiles/default.json" <<'JSON'
+{
+  "mcpServers": {
+    "remote-tools": {
+      "type": "http",
+      "url": "https://example.com/mcp",
+      "headers": { "Authorization": "Bearer {env:TOKEN}" }
+    },
+    "local-tools": {
+      "command": "npx",
+      "args": ["-y", "server"],
+      "env": { "API_KEY": "x" }
+    }
+  }
+}
+JSON
+
+    funcs="$({
+        sed -n '/^ensure_mcp_profile()/,/^}/p' "$WT_BIN_DIR/wt"
+        sed -n '/^write_opencode_mcp_config()/,/^}/p' "$WT_BIN_DIR/wt"
+        sed -n '/^configure_mcp_profile()/,/^}/p' "$WT_BIN_DIR/wt"
+    })"
+
+    out=$(WT_CONFIG_DIR="$tmp_config" bash -c "log(){ :; }; $funcs; configure_mcp_profile '$target' opencode default test-session" 2>/dev/null || true)
+
+    if [[ -f "$out" ]]; then
+        pass "generated opencode MCP config"
+    else
+        fail "opencode MCP config not generated" "$out"
+        rm -rf "$tmp_dir"
+        return
+    fi
+
+    if jq -e '.mcp."remote-tools".type == "remote" and .mcp."remote-tools".url == "https://example.com/mcp"' "$out" >/dev/null 2>&1; then
+        pass "converted HTTP MCP to opencode remote"
+    else
+        fail "remote MCP conversion incorrect" "$(jq . "$out" 2>/dev/null)"
+    fi
+
+    if jq -e '.mcp."local-tools".type == "local" and .mcp."local-tools".command == ["npx", "-y", "server"] and .mcp."local-tools".environment.API_KEY == "x"' "$out" >/dev/null 2>&1; then
+        pass "converted command MCP to opencode local"
+    else
+        fail "local MCP conversion incorrect" "$(jq . "$out" 2>/dev/null)"
+    fi
+
+    rm -rf "$tmp_dir"
+}
+
 test_agent_profiles() {
     section "Agent Profiles"
 
@@ -705,6 +799,12 @@ test_agent_profiles() {
     [[ "$codex_bin" == "codex" ]] && pass "agent_binary codex = codex" || fail "agent_binary codex = $codex_bin"
     [[ "$gemini_bin" == "gemini" ]] && pass "agent_binary gemini = gemini" || fail "agent_binary gemini = $gemini_bin"
     [[ "$opencode_bin" == "opencode" ]] && pass "agent_binary opencode = opencode" || fail "agent_binary opencode = $opencode_bin"
+
+    if grep -q 'WT_DEFAULT_AGENT="${WT_DEFAULT_AGENT:-opencode}"' "$WT_BIN_DIR/wt"; then
+        pass "default agent = opencode"
+    else
+        fail "default agent is not opencode"
+    fi
 
     # Test agent_label
     local claude_label codex_label gemini_label opencode_label
@@ -767,12 +867,14 @@ main() {
     test_claude_hooks_json
     test_gemini_hooks_json
     test_opencode_plugin
+    test_opencode_mcp_config
     test_agent_profiles
     test_install_script
     test_find_git_repos
     test_create_worktree
     test_status_file
     test_tmux_options
+    test_status_metadata_recovery
     test_wt_hook_dual_write
     test_sync_tmux
     test_wt_list

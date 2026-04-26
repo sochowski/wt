@@ -8,8 +8,13 @@
 
 set -euo pipefail
 
+WT_STATUS_DIR="${WT_STATUS_DIR:-$HOME/.local/state/wt}"
+WT_CONFIG_DIR="${WT_CONFIG_DIR:-$HOME/.config/wt}"
+
 # Determine which agent to launch
-AGENT="${WT_DEFAULT_AGENT:-claude}"
+AGENT="${WT_DEFAULT_AGENT:-opencode}"
+local_session=""
+status_opencode_config=""
 if [[ -n "${TMUX:-}" ]]; then
     local_session=$(tmux display-message -p '#{session_name}' 2>/dev/null || true)
     if [[ -n "$local_session" ]]; then
@@ -17,6 +22,23 @@ if [[ -n "${TMUX:-}" ]]; then
         if [[ -n "$tmux_agent" ]]; then
             AGENT="$tmux_agent"
         fi
+        status_file="$WT_STATUS_DIR/${local_session}.status"
+        if [[ -f "$status_file" ]]; then
+            agent=""
+            opencode_config=""
+            source "$status_file" 2>/dev/null || true
+            [[ -z "$tmux_agent" && -n "$agent" ]] && AGENT="$agent"
+            status_opencode_config="$opencode_config"
+        fi
+    fi
+fi
+
+if [[ "$AGENT" == "opencode" && -z "${OPENCODE_CONFIG:-}" && -n "${TMUX:-}" ]]; then
+    if [[ -n "$local_session" ]]; then
+        opencode_config=$(tmux show-option -qv -t "$local_session" @wt-opencode-config 2>/dev/null || true)
+        [[ -z "$opencode_config" ]] && opencode_config="$status_opencode_config"
+        [[ -z "$opencode_config" && -f "$WT_CONFIG_DIR/opencode-mcp/${local_session}.json" ]] && opencode_config="$WT_CONFIG_DIR/opencode-mcp/${local_session}.json"
+        [[ -n "$opencode_config" ]] && export OPENCODE_CONFIG="$opencode_config"
     fi
 fi
 
