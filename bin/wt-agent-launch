@@ -20,6 +20,16 @@ if [[ -n "${TMUX:-}" ]]; then
     fi
 fi
 
+if [[ "$AGENT" == "opencode" && -z "${OPENCODE_CONFIG:-}" && -n "${TMUX:-}" ]]; then
+    local_session=$(tmux display-message -p '#{session_name}' 2>/dev/null || true)
+    if [[ -n "$local_session" ]]; then
+        opencode_config=$(tmux show-option -qv -t "$local_session" @wt-opencode-config 2>/dev/null || true)
+        if [[ -n "$opencode_config" ]]; then
+            export OPENCODE_CONFIG="$opencode_config"
+        fi
+    fi
+fi
+
 case "$AGENT" in
     claude)
         # Clean up stale IDE lock files (dead neovim processes)

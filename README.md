@@ -85,10 +85,13 @@ wt sync-tmux                          # Restore tmux options after restart
 
 ## MCP Profiles
 
-Sessions get project-scoped MCP servers via `.mcp.json` files:
+Sessions get scoped MCP servers from wt profiles in `~/.config/wt/mcp-profiles/`:
 
-- **Worktree sessions**: copies `~/.config/wt/mcp-profiles/default.json` into the worktree (skipped if the repo already has `.mcp.json`)
-- **Master session**: copies `~/.config/wt/mcp-profiles/master.json` into `~/worktrees/.master/`
+- **Worktree sessions**: copies `~/.config/wt/mcp-profiles/default.json` into the worktree as `.mcp.json` if the repo does not already have one.
+- **Master session**: copies `~/.config/wt/mcp-profiles/master.json` into `~/worktrees/.master/.mcp.json`.
+- **OpenCode sessions**: also generate an OpenCode-native config at `~/.config/wt/opencode-mcp/<session>.json` and launch OpenCode with `OPENCODE_CONFIG` pointing at it.
+
+OpenCode does not read `.mcp.json` directly. wt converts Claude-style `mcpServers` profiles to OpenCode's `mcp` schema, mapping remote servers from `type: "http"` to `type: "remote"` and local command servers to `type: "local"` with a command array.
 
 Create profiles:
 ```bash
@@ -101,6 +104,20 @@ EOF
 cat > ~/.config/wt/mcp-profiles/master.json << 'EOF'
 { "mcpServers": { "my-server": { "type": "http", "url": "https://..." } } }
 EOF
+```
+
+For OpenCode, wt generates the equivalent runtime config:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "my-server": {
+      "type": "remote",
+      "url": "https://..."
+    }
+  }
+}
 ```
 
 ## Env File Sync

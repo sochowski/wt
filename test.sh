@@ -691,6 +691,63 @@ test_opencode_plugin() {
     done
 }
 
+test_opencode_mcp_config() {
+    section "opencode MCP Config"
+
+    local tmp_dir tmp_config target out funcs
+    tmp_dir=$(mktemp -d)
+    tmp_config="$tmp_dir/wt-config"
+    target="$tmp_dir/worktree"
+    mkdir -p "$tmp_config/mcp-profiles" "$target"
+
+    cat > "$tmp_config/mcp-profiles/default.json" <<'JSON'
+{
+  "mcpServers": {
+    "remote-tools": {
+      "type": "http",
+      "url": "https://example.com/mcp",
+      "headers": { "Authorization": "Bearer {env:TOKEN}" }
+    },
+    "local-tools": {
+      "command": "npx",
+      "args": ["-y", "server"],
+      "env": { "API_KEY": "x" }
+    }
+  }
+}
+JSON
+
+    funcs="$({
+        sed -n '/^ensure_mcp_profile()/,/^}/p' "$WT_BIN_DIR/wt"
+        sed -n '/^write_opencode_mcp_config()/,/^}/p' "$WT_BIN_DIR/wt"
+        sed -n '/^configure_mcp_profile()/,/^}/p' "$WT_BIN_DIR/wt"
+    })"
+
+    out=$(WT_CONFIG_DIR="$tmp_config" bash -c "log(){ :; }; $funcs; configure_mcp_profile '$target' opencode default test-session" 2>/dev/null || true)
+
+    if [[ -f "$out" ]]; then
+        pass "generated opencode MCP config"
+    else
+        fail "opencode MCP config not generated" "$out"
+        rm -rf "$tmp_dir"
+        return
+    fi
+
+    if jq -e '.mcp."remote-tools".type == "remote" and .mcp."remote-tools".url == "https://example.com/mcp"' "$out" >/dev/null 2>&1; then
+        pass "converted HTTP MCP to opencode remote"
+    else
+        fail "remote MCP conversion incorrect" "$(jq . "$out" 2>/dev/null)"
+    fi
+
+    if jq -e '.mcp."local-tools".type == "local" and .mcp."local-tools".command == ["npx", "-y", "server"] and .mcp."local-tools".environment.API_KEY == "x"' "$out" >/dev/null 2>&1; then
+        pass "converted command MCP to opencode local"
+    else
+        fail "local MCP conversion incorrect" "$(jq . "$out" 2>/dev/null)"
+    fi
+
+    rm -rf "$tmp_dir"
+}
+
 test_agent_profiles() {
     section "Agent Profiles"
 
@@ -767,6 +824,7 @@ main() {
     test_claude_hooks_json
     test_gemini_hooks_json
     test_opencode_plugin
+    test_opencode_mcp_config
     test_agent_profiles
     test_install_script
     test_find_git_repos
