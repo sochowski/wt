@@ -15,7 +15,7 @@ WT_STATUS_DIR="${WT_STATUS_DIR:-$HOME/.local/state/wt}"
 WT_CONFIG_DIR="${WT_CONFIG_DIR:-$HOME/.config/wt}"
 WT_LOG_FILE="${WT_LOG_FILE:-$HOME/.local/state/wt/wt.log}"
 WT_BIN_DIR="$(dirname "$(readlink -f "$0")")"
-WT_DEFAULT_AGENT="${WT_DEFAULT_AGENT:-claude}"
+WT_DEFAULT_AGENT="${WT_DEFAULT_AGENT:-opencode}"
 
 # Ensure directories exist
 mkdir -p "$WT_BASE_DIR" "$WT_STATUS_DIR" "$WT_CONFIG_DIR"
@@ -303,6 +303,59 @@ configure_mcp_profile() {
     fi
 }
 
+derive_status_metadata() {
+    local session_name="$1"
+
+    if tmux has-session -t "$session_name" 2>/dev/null; then
+        [[ -z "$repo" ]] && repo=$(tmux show-option -qv -t "$session_name" @wt-repo 2>/dev/null || true)
+        [[ -z "$branch" ]] && branch=$(tmux show-option -qv -t "$session_name" @wt-branch 2>/dev/null || true)
+        [[ -z "$wt_path" ]] && wt_path=$(tmux show-option -qv -t "$session_name" @wt-wt-path 2>/dev/null || true)
+        [[ -z "$agent" ]] && agent=$(tmux show-option -qv -t "$session_name" @wt-agent 2>/dev/null || true)
+        [[ -z "$opencode_config" ]] && opencode_config=$(tmux show-option -qv -t "$session_name" @wt-opencode-config 2>/dev/null || true)
+    fi
+
+    if [[ -n "$wt_path" && -d "$wt_path" ]]; then
+        if [[ -z "$branch" ]]; then
+            branch=$(git -C "$wt_path" branch --show-current 2>/dev/null || true)
+        fi
+        if [[ -z "$repo" ]]; then
+            if [[ "$wt_path" == "$WT_BASE_DIR"/* ]]; then
+                local rel_path="${wt_path#$WT_BASE_DIR/}"
+                repo="${rel_path%%/*}"
+            else
+                repo=$(basename "$(git -C "$wt_path" rev-parse --show-toplevel 2>/dev/null || echo "$wt_path")")
+            fi
+        fi
+    fi
+
+    if [[ -z "$repo" || -z "$branch" || -z "$wt_path" ]]; then
+        local repo_dir candidate candidate_repo candidate_branch candidate_session
+        for repo_dir in "$WT_BASE_DIR"/*; do
+            [[ -d "$repo_dir" ]] || continue
+            for candidate in "$repo_dir"/*; do
+                [[ -d "$candidate" ]] || continue
+                [[ -d "$candidate/.git" || -f "$candidate/.git" ]] || continue
+                candidate_branch=$(git -C "$candidate" branch --show-current 2>/dev/null || true)
+                [[ -n "$candidate_branch" ]] || candidate_branch="detached"
+                candidate_repo=$(basename "$repo_dir")
+                candidate_session="${candidate_repo}-${candidate_branch//\//-}"
+                if [[ "$candidate_session" == "$session_name" ]]; then
+                    [[ -z "$repo" ]] && repo="$candidate_repo"
+                    [[ -z "$branch" ]] && branch="$candidate_branch"
+                    [[ -z "$wt_path" ]] && wt_path="$candidate"
+                    break 2
+                fi
+            done
+        done
+    fi
+
+    [[ -z "$agent" ]] && agent="$WT_DEFAULT_AGENT"
+    if [[ "$agent" == "opencode" && -z "$opencode_config" ]]; then
+        local default_opencode_config="$WT_CONFIG_DIR/opencode-mcp/${session_name}.json"
+        [[ -f "$default_opencode_config" ]] && opencode_config="$default_opencode_config"
+    fi
+}
+
 # -----------------------------------------------------------------------------
 #  Status Tracking
 # -----------------------------------------------------------------------------
@@ -320,10 +373,11 @@ set_status() {
     status_file=$(get_status_file "$session_name")
 
     # Preserve existing metadata fields if file exists
-    local pr="" repo="" branch="" wt_path="" agent=""
+    local pr="" repo="" branch="" wt_path="" agent="" opencode_config=""
     if [[ -f "$status_file" ]]; then
         source "$status_file" 2>/dev/null || true
     fi
+    derive_status_metadata "$session_name"
 
     cat > "$status_file" <<EOF
 status=$status
@@ -334,6 +388,7 @@ branch=$branch
 wt_path=$wt_path
 pr=$pr
 agent=$agent
+opencode_config=$opencode_config
 EOF
 
     # Write tmux user options for live display
@@ -343,6 +398,14 @@ EOF
         tmux set-option -qt "$session_name" @wt-status  "$status"
         tmux set-option -qt "$session_name" @wt-icon    "$icon"
         tmux set-option -qt "$session_name" @wt-message "$message"
+        tmux set-option -qt "$session_name" @wt-repo    "$repo"
+        tmux set-option -qt "$session_name" @wt-branch  "$branch"
+        tmux set-option -qt "$session_name" @wt-wt-path "$wt_path"
+        tmux set-option -qt "$session_name" @wt-agent   "$agent"
+        tmux set-option -qt "$session_name" @wt-opencode-config "$opencode_config"
+        if [[ -n "$opencode_config" ]]; then
+            tmux set-environment -t "$session_name" OPENCODE_CONFIG "$opencode_config"
+        fi
         tmux refresh-client -S 2>/dev/null || true
     fi
 }
@@ -573,6 +636,7 @@ branch=$branch
 wt_path=$wt_path
 pr=
 agent=$agent
+opencode_config=$opencode_config
 EOF2
 
         # Set tmux session options (status + metadata)
@@ -941,7 +1005,7 @@ pick_list() {
         local icon
         icon=$(get_status_icon "${sess_status:-unknown}")
         local label
-        label=$(agent_label "${agent:-claude}")
+        label=$(agent_label "${agent:-$WT_DEFAULT_AGENT}")
         echo "${session_name}:${icon} ${sess_status:-?}  ${label}  ${repo:-?}@${branch:-?}  ${message:-}"
     done < <(list_worktrees simple)
 }
@@ -985,8 +1049,9 @@ sync_tmux() {
 
         if tmux has-session -t "$session_name" 2>/dev/null; then
             # Source the status file to get all fields
-            local status="" message="" repo="" branch="" wt_path="" pr="" agent=""
+            local status="" message="" repo="" branch="" wt_path="" pr="" agent="" opencode_config=""
             source "$status_file" 2>/dev/null || continue
+            derive_status_metadata "$session_name"
 
             local icon
             icon=$(get_status_icon "${status:-unknown}")
@@ -998,8 +1063,12 @@ sync_tmux() {
             tmux set-option -qt "$session_name" @wt-branch  "${branch:-}"
             tmux set-option -qt "$session_name" @wt-wt-path "${wt_path:-}"
             tmux set-option -qt "$session_name" @wt-pr      "${pr:-}"
-            tmux set-option -qt "$session_name" @wt-agent   "${agent:-claude}"
+            tmux set-option -qt "$session_name" @wt-agent   "${agent:-$WT_DEFAULT_AGENT}"
             tmux set-option -qt "$session_name" @wt-master  "0"
+            tmux set-option -qt "$session_name" @wt-opencode-config "${opencode_config:-}"
+            if [[ -n "${opencode_config:-}" ]]; then
+                tmux set-environment -t "$session_name" OPENCODE_CONFIG "$opencode_config"
+            fi
         fi
     done
 
@@ -1296,7 +1365,7 @@ Examples:
 Environment:
   WT_BASE_DIR        Base directory for worktrees (default: ~/worktrees)
   WT_STATUS_DIR      Status file directory (default: ~/.local/state/wt)
-  WT_DEFAULT_AGENT   Default agent CLI (default: claude)
+  WT_DEFAULT_AGENT   Default agent CLI (default: opencode)
 EOF
 }
 

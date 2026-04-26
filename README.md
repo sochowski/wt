@@ -246,7 +246,7 @@ Status bar → wt-tmux-status aggregates counts from .status files
 |----------|---------|-------------|
 | `WT_BASE_DIR` | `~/worktrees` | Base directory for worktrees |
 | `WT_STATUS_DIR` | `~/.local/state/wt` | Status file directory |
-| `WT_DEFAULT_AGENT` | `claude` | Default agent CLI (claude, codex, gemini, opencode) |
+| `WT_DEFAULT_AGENT` | `opencode` | Default agent CLI (opencode, claude, codex, gemini) |
 
 ## License
 
