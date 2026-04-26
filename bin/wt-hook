@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  wt-hook - Agent Hook Handler for Worktree Status Tracking
-#  Called by agent hooks (Claude, Codex, Gemini) to update status automatically
+#  Called by agent hooks to update status automatically
 # =============================================================================
 
 set -euo pipefail
@@ -130,6 +130,7 @@ get_agent_label() {
         claude) echo "Claude" ;;
         codex)  echo "Codex" ;;
         gemini) echo "Gemini" ;;
+        opencode) echo "opencode" ;;
         *)      echo "${agent:-Agent}" ;;
     esac
 }

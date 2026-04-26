@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  wt - Worktree Manager for Multi-Agent CLI Workflow
-#  Supports: Claude, Codex, Gemini
+#  Supports: Claude, Codex, Gemini, opencode
 #  Cross-platform: Arch Linux / macOS
 # =============================================================================
 
@@ -28,6 +28,7 @@ agent_binary() {
         claude) echo "claude" ;;
         codex)  echo "codex" ;;
         gemini) echo "gemini" ;;
+        opencode) echo "opencode" ;;
         *)      echo "$1" ;;
     esac
 }
@@ -37,12 +38,13 @@ agent_label() {
         claude) echo "Claude" ;;
         codex)  echo "Codex" ;;
         gemini) echo "Gemini" ;;
+        opencode) echo "opencode" ;;
         *)      echo "$1" ;;
     esac
 }
 
 available_agents() {
-    for agent in claude codex gemini; do
+    for agent in claude codex gemini opencode; do
         local bin
         bin=$(agent_binary "$agent")
         if command -v "$bin" &>/dev/null; then
@@ -1135,7 +1137,7 @@ Status:
   sync-tmux                               Restore tmux options from status files
 
 Options for 'new':
-  --agent <name>        Agent: claude, codex, gemini (default: \$WT_DEFAULT_AGENT)
+  --agent <name>        Agent: claude, codex, gemini, opencode (default: \$WT_DEFAULT_AGENT)
   --start-agent         Start agent immediately after creating session
   --task <task>         Task description for agent
   --force               Skip confirmation prompts

@@ -2,12 +2,12 @@
 
 Worktree manager for multi-agent CLI workflows. Each worktree gets a tmux session with agent + nvim + shell windows, live status tracking, and a native tmux UI.
 
-Supports **Claude**, **Codex**, and **Gemini** — any session can use any agent.
+Supports **Claude**, **Codex**, **Gemini**, and **opencode** — any session can use any agent.
 
 ## Features
 
 - One worktree = one tmux session (agent, nvim, shell windows)
-- Multi-agent: Claude, Codex, Gemini (auto-detects installed agents)
+- Multi-agent: Claude, Codex, Gemini, opencode (auto-detects installed agents)
 - MCP profiles: per-session MCP server configuration
 - Env file sync: auto-copy/symlink `.env` files via `.wt/sync` config
 - Native tmux UI: `choose-tree` switcher with live status icons
@@ -35,8 +35,9 @@ The installer will:
   - Claude: `~/.claude/settings.json`
   - Gemini: `~/.gemini/settings.json`
   - Codex: `~/.codex/config.toml`
+  - opencode: `~/.config/opencode/plugins/wt-status.js`
 
-Requires: git, tmux, fzf, jq, and at least one agent CLI ([Claude Code](https://github.com/anthropics/claude-code), [Codex](https://github.com/openai/codex), or [Gemini CLI](https://github.com/google/gemini-cli))
+Requires: git, tmux, fzf, jq, and at least one agent CLI ([Claude Code](https://github.com/anthropics/claude-code), [Codex](https://github.com/openai/codex), [Gemini CLI](https://github.com/google/gemini-cli), or [opencode](https://opencode.ai/))
 
 Optional: [gh](https://cli.github.com/) (for PR lookup), [claudecode.nvim](https://github.com/anthropics/claudecode.nvim) (for Claude IDE integration)
 
@@ -198,7 +199,7 @@ Workflow:
 ## Architecture
 
 ```
-Agent hook event (Claude/Codex/Gemini)
+Agent hook event
   ├── wt-hook writes ~/.local/state/wt/<session>.status
   ├── wt-hook writes tmux @wt-* session options
   └── wt-hook calls tmux refresh-client -S (instant redraw)
@@ -213,13 +214,14 @@ Status bar → wt-tmux-status aggregates counts from .status files
 | Path | Purpose |
 |------|---------|
 | `bin/wt` | Main CLI |
-| `bin/wt-hook` | Agent hook handler (Claude, Codex, Gemini) |
+| `bin/wt-hook` | Agent hook handler |
 | `bin/wt-tmux-status` | Tmux status bar segment |
 | `bin/wt-agent-launch` | Multi-agent launcher with per-agent logic |
 | `bin/claude-ide` | Backward-compat wrapper for wt-agent-launch |
 | `config/tmux-wt.conf` | Tmux keybindings and hooks |
 | `config/claude-hooks.json` | Claude Code hook configuration |
 | `config/hooks-gemini.json` | Gemini CLI hook configuration |
+| `config/opencode-wt-plugin.js` | opencode status plugin |
 
 ## Environment Variables
 
@@ -227,7 +229,7 @@ Status bar → wt-tmux-status aggregates counts from .status files
 |----------|---------|-------------|
 | `WT_BASE_DIR` | `~/worktrees` | Base directory for worktrees |
 | `WT_STATUS_DIR` | `~/.local/state/wt` | Status file directory |
-| `WT_DEFAULT_AGENT` | `claude` | Default agent CLI (claude, codex, gemini) |
+| `WT_DEFAULT_AGENT` | `claude` | Default agent CLI (claude, codex, gemini, opencode) |
 
 ## License
 

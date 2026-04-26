@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  wt installer - Sets up symlinks and merges config
-#  Supports: Claude, Codex, Gemini
+#  Supports: Claude, Codex, Gemini, opencode
 #  Run: ./install.sh
 # =============================================================================
 
@@ -13,6 +13,7 @@ CONFIG_DIR="$HOME/.config/wt"
 CLAUDE_SETTINGS="$HOME/.claude/settings.json"
 GEMINI_SETTINGS="$HOME/.gemini/settings.json"
 CODEX_CONFIG="$HOME/.codex/config.toml"
+OPENCODE_PLUGIN_DIR="$HOME/.config/opencode/plugins"
 
 echo "Installing wt - Worktree Manager for Multi-Agent CLI"
 echo "====================================================="
@@ -132,6 +133,24 @@ else
     else
         echo "    pacman -S jq"
     fi
+fi
+
+# --- opencode ---
+if command -v opencode &>/dev/null; then
+    mkdir -p "$OPENCODE_PLUGIN_DIR"
+    target="$OPENCODE_PLUGIN_DIR/wt-status.js"
+
+    if [[ -L "$target" ]]; then
+        rm "$target"
+    elif [[ -e "$target" ]]; then
+        echo "  Warning: $target exists and is not a symlink, backing up..."
+        mv "$target" "$target.bak"
+    fi
+
+    ln -s "$SCRIPT_DIR/config/opencode-wt-plugin.js" "$target"
+    echo "  opencode: installed status plugin at $target"
+else
+    echo "  opencode: not installed, skipping plugin"
 fi
 
 # -----------------------------------------------------------------------------

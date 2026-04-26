@@ -3,7 +3,7 @@
 #  wt-agent-launch - Multi-agent launcher for worktree sessions
 #  Reads @wt-agent from current tmux session to pick the right CLI
 #  For Claude: auto-connects to the right Neovim via IDE lock files
-#  For Codex/Gemini: launches the binary directly
+#  For Codex/Gemini/opencode: launches the binary directly
 # =============================================================================
 
 set -euo pipefail
@@ -62,6 +62,10 @@ case "$AGENT" in
 
     gemini)
         exec gemini "$@"
+        ;;
+
+    opencode)
+        exec opencode "$@"
         ;;
 
     *)

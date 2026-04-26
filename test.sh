@@ -660,28 +660,63 @@ test_gemini_hooks_json() {
     done
 }
 
+test_opencode_plugin() {
+    section "opencode Plugin"
+
+    local plugin_file="$(dirname "$WT_BIN_DIR")/config/opencode-wt-plugin.js"
+
+    if [[ -f "$plugin_file" ]]; then
+        pass "opencode-wt-plugin.js exists"
+    else
+        fail "opencode-wt-plugin.js not found"
+        return
+    fi
+
+    if command -v node >/dev/null 2>&1; then
+        if node --check "$plugin_file" >/dev/null 2>&1; then
+            pass "valid JavaScript"
+        else
+            fail "invalid JavaScript"
+        fi
+    else
+        pass "skipped JavaScript syntax check (node not installed)"
+    fi
+
+    for event_type in session.created session.idle session.error permission.asked tool.execute.before tool.execute.after; do
+        if grep -q "$event_type" "$plugin_file"; then
+            pass "event handled: $event_type"
+        else
+            fail "event missing: $event_type"
+        fi
+    done
+}
+
 test_agent_profiles() {
     section "Agent Profiles"
 
     # Extract and test agent_binary function
-    local claude_bin codex_bin gemini_bin
+    local claude_bin codex_bin gemini_bin opencode_bin
     claude_bin=$(bash -c "$(sed -n '/^agent_binary()/,/^}/p' "$WT_BIN_DIR/wt"); agent_binary claude")
     codex_bin=$(bash -c "$(sed -n '/^agent_binary()/,/^}/p' "$WT_BIN_DIR/wt"); agent_binary codex")
     gemini_bin=$(bash -c "$(sed -n '/^agent_binary()/,/^}/p' "$WT_BIN_DIR/wt"); agent_binary gemini")
+    opencode_bin=$(bash -c "$(sed -n '/^agent_binary()/,/^}/p' "$WT_BIN_DIR/wt"); agent_binary opencode")
 
     [[ "$claude_bin" == "claude" ]] && pass "agent_binary claude = claude" || fail "agent_binary claude = $claude_bin"
     [[ "$codex_bin" == "codex" ]] && pass "agent_binary codex = codex" || fail "agent_binary codex = $codex_bin"
     [[ "$gemini_bin" == "gemini" ]] && pass "agent_binary gemini = gemini" || fail "agent_binary gemini = $gemini_bin"
+    [[ "$opencode_bin" == "opencode" ]] && pass "agent_binary opencode = opencode" || fail "agent_binary opencode = $opencode_bin"
 
     # Test agent_label
-    local claude_label codex_label gemini_label
+    local claude_label codex_label gemini_label opencode_label
     claude_label=$(bash -c "$(sed -n '/^agent_label()/,/^}/p' "$WT_BIN_DIR/wt"); agent_label claude")
     codex_label=$(bash -c "$(sed -n '/^agent_label()/,/^}/p' "$WT_BIN_DIR/wt"); agent_label codex")
     gemini_label=$(bash -c "$(sed -n '/^agent_label()/,/^}/p' "$WT_BIN_DIR/wt"); agent_label gemini")
+    opencode_label=$(bash -c "$(sed -n '/^agent_label()/,/^}/p' "$WT_BIN_DIR/wt"); agent_label opencode")
 
     [[ "$claude_label" == "Claude" ]] && pass "agent_label claude = Claude" || fail "agent_label claude = $claude_label"
     [[ "$codex_label" == "Codex" ]] && pass "agent_label codex = Codex" || fail "agent_label codex = $codex_label"
     [[ "$gemini_label" == "Gemini" ]] && pass "agent_label gemini = Gemini" || fail "agent_label gemini = $gemini_label"
+    [[ "$opencode_label" == "opencode" ]] && pass "agent_label opencode = opencode" || fail "agent_label opencode = $opencode_label"
 }
 
 test_install_script() {
@@ -731,6 +766,7 @@ main() {
     test_tmux_conf_syntax
     test_claude_hooks_json
     test_gemini_hooks_json
+    test_opencode_plugin
     test_agent_profiles
     test_install_script
     test_find_git_repos
