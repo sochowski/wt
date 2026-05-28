@@ -11,6 +11,22 @@ set -euo pipefail
 WT_STATUS_DIR="${WT_STATUS_DIR:-$HOME/.local/state/wt}"
 WT_CONFIG_DIR="${WT_CONFIG_DIR:-$HOME/.config/wt}"
 
+load_status_file() {
+    local status_file="$1"
+    [[ -f "$status_file" ]] || return 1
+
+    local key value
+    while IFS='=' read -r key value || [[ -n "$key" ]]; do
+        case "$key" in
+            agent|opencode_config)
+                value="${value//\\ / }"
+                value="${value//\\\\/\\}"
+                printf -v "$key" '%s' "$value"
+                ;;
+        esac
+    done < "$status_file"
+}
+
 # Determine which agent to launch
 AGENT="${WT_DEFAULT_AGENT:-opencode}"
 local_session=""
@@ -26,7 +42,7 @@ if [[ -n "${TMUX:-}" ]]; then
         if [[ -f "$status_file" ]]; then
             agent=""
             opencode_config=""
-            source "$status_file" 2>/dev/null || true
+            load_status_file "$status_file" || true
             [[ -z "$tmux_agent" && -n "$agent" ]] && AGENT="$agent"
             status_opencode_config="$opencode_config"
         fi

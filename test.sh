@@ -236,6 +236,51 @@ test_status_file() {
     done
 }
 
+test_status_messages_are_data() {
+    section "Status Messages Are Data"
+
+    if [[ -z "$TEST_SESSION" ]]; then
+        fail "skipped: no test session"
+        return
+    fi
+
+    local status_file="$WT_STATUS_DIR/$TEST_SESSION.status"
+    "$WT_BIN_DIR/wt" set-status "$TEST_SESSION" working "Using grep" 2>/dev/null
+
+    if grep -q '^message=Using\\ grep$' "$status_file"; then
+        pass "status message with spaces is escaped"
+    else
+        fail "status message was not escaped" "$(grep '^message=' "$status_file" 2>/dev/null)"
+    fi
+
+    local pick_output
+    pick_output=$("$WT_BIN_DIR/wt" pick-list 2>&1)
+    if echo "$pick_output" | grep -q "$TEST_SESSION" && echo "$pick_output" | grep -q "Using grep"; then
+        pass "pick-list reads escaped message without sourcing it"
+    else
+        fail "pick-list did not show escaped message" "$pick_output"
+    fi
+
+    cat > "$status_file" <<EOF
+status=working
+message=Using legacy grep
+timestamp=$(date +%s)
+repo=test-wt-repo
+branch=test-branch
+wt_path=$WT_BASE_DIR/test-wt-repo/test-branch
+pr=
+agent=opencode
+opencode_config=
+EOF
+
+    pick_output=$("$WT_BIN_DIR/wt" pick-list 2>&1)
+    if echo "$pick_output" | grep -q "$TEST_SESSION" && echo "$pick_output" | grep -q "Using legacy grep"; then
+        pass "pick-list handles legacy unescaped messages"
+    else
+        fail "pick-list broke on legacy unescaped message" "$pick_output"
+    fi
+}
+
 test_tmux_options() {
     section "Tmux Session Options (@wt-*)"
 
@@ -873,6 +918,7 @@ main() {
     test_find_git_repos
     test_create_worktree
     test_status_file
+    test_status_messages_are_data
     test_tmux_options
     test_status_metadata_recovery
     test_wt_hook_dual_write

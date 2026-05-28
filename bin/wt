@@ -352,7 +352,9 @@ derive_status_metadata() {
     [[ -z "$agent" ]] && agent="$WT_DEFAULT_AGENT"
     if [[ "$agent" == "opencode" && -z "$opencode_config" ]]; then
         local default_opencode_config="$WT_CONFIG_DIR/opencode-mcp/${session_name}.json"
-        [[ -f "$default_opencode_config" ]] && opencode_config="$default_opencode_config"
+        if [[ -f "$default_opencode_config" ]]; then
+            opencode_config="$default_opencode_config"
+        fi
     fi
 }
 
@@ -364,6 +366,46 @@ get_status_file() {
     echo "$WT_STATUS_DIR/${session_name}.status"
 }
 
+load_status_file() {
+    local status_file="$1"
+    [[ -f "$status_file" ]] || return 1
+
+    local key value
+    while IFS='=' read -r key value || [[ -n "$key" ]]; do
+        case "$key" in
+            status|message|timestamp|repo|branch|wt_path|pr|agent|opencode_config)
+                # Older status files used shell escaping or raw values with spaces.
+                # Parse as data, never source, so status messages cannot execute.
+                value="${value//\\ / }"
+                value="${value//\\\\/\\}"
+                printf -v "$key" '%s' "$value"
+                ;;
+        esac
+    done < "$status_file"
+}
+
+status_escape() {
+    local value="$1"
+    value="${value//\\/\\\\}"
+    value="${value// /\\ }"
+    printf '%s' "$value"
+}
+
+write_status_file() {
+    local status_file="$1"
+    {
+        printf 'status=%s\n' "$(status_escape "$status")"
+        printf 'message=%s\n' "$(status_escape "$message")"
+        printf 'timestamp=%s\n' "$(date +%s)"
+        printf 'repo=%s\n' "$(status_escape "$repo")"
+        printf 'branch=%s\n' "$(status_escape "$branch")"
+        printf 'wt_path=%s\n' "$(status_escape "$wt_path")"
+        printf 'pr=%s\n' "$(status_escape "$pr")"
+        printf 'agent=%s\n' "$(status_escape "$agent")"
+        printf 'opencode_config=%s\n' "$(status_escape "$opencode_config")"
+    } > "$status_file"
+}
+
 set_status() {
     local session_name="$1"
     local status="$2"  # idle, working, input, error
@@ -371,25 +413,19 @@ set_status() {
 
     local status_file
     status_file=$(get_status_file "$session_name")
+    local new_status="$status"
+    local new_message="$message"
 
     # Preserve existing metadata fields if file exists
     local pr="" repo="" branch="" wt_path="" agent="" opencode_config=""
     if [[ -f "$status_file" ]]; then
-        source "$status_file" 2>/dev/null || true
+        load_status_file "$status_file" || true
     fi
+    status="$new_status"
+    message="$new_message"
     derive_status_metadata "$session_name"
 
-    cat > "$status_file" <<EOF
-status=$status
-message=$message
-timestamp=$(date +%s)
-repo=$repo
-branch=$branch
-wt_path=$wt_path
-pr=$pr
-agent=$agent
-opencode_config=$opencode_config
-EOF
+    write_status_file "$status_file"
 
     # Write tmux user options for live display
     if tmux has-session -t "$session_name" 2>/dev/null; then
@@ -416,7 +452,8 @@ get_status() {
     status_file=$(get_status_file "$session_name")
 
     if [[ -f "$status_file" ]]; then
-        source "$status_file"
+        local status=""
+        load_status_file "$status_file" || true
         echo "$status"
     else
         echo "unknown"
@@ -512,7 +549,7 @@ list_worktrees() {
         tmux has-session -t "$session_name" 2>/dev/null || continue
 
         local status="" repo="" branch="" wt_path=""
-        source "$status_file" 2>/dev/null || continue
+        load_status_file "$status_file" || continue
 
         case "$format" in
             full)
@@ -627,17 +664,12 @@ create_worktree() {
         # Write initial status file with full metadata
         local status_file
         status_file=$(get_status_file "$session_name")
-        cat > "$status_file" <<EOF2
-status=idle
-message=Ready
-timestamp=$(date +%s)
-repo=$repo_name
-branch=$branch
-wt_path=$wt_path
-pr=
-agent=$agent
-opencode_config=$opencode_config
-EOF2
+        status=idle
+        message=Ready
+        timestamp=$(date +%s)
+        repo=$repo_name
+        pr=
+        write_status_file "$status_file"
 
         # Set tmux session options (status + metadata)
         tmux set-option -qt "$session_name" @wt-status  "idle"
@@ -1000,7 +1032,7 @@ pick_list() {
         local status_file="$WT_STATUS_DIR/${session_name}.status"
         local agent="" message="" repo="" branch=""
         if [[ -f "$status_file" ]]; then
-            source "$status_file" 2>/dev/null || true
+            load_status_file "$status_file" || true
         fi
         local icon
         icon=$(get_status_icon "${sess_status:-unknown}")
@@ -1048,9 +1080,9 @@ sync_tmux() {
         session_name=$(basename "$status_file" .status)
 
         if tmux has-session -t "$session_name" 2>/dev/null; then
-            # Source the status file to get all fields
+            # Read the status file as data; messages can contain shell metacharacters.
             local status="" message="" repo="" branch="" wt_path="" pr="" agent="" opencode_config=""
-            source "$status_file" 2>/dev/null || continue
+            load_status_file "$status_file" || continue
             derive_status_metadata "$session_name"
 
             local icon

@@ -115,8 +115,48 @@ derive_status_metadata() {
     [[ -z "$agent" ]] && agent="$WT_DEFAULT_AGENT"
     if [[ "$agent" == "opencode" && -z "$opencode_config" ]]; then
         local default_opencode_config="$WT_CONFIG_DIR/opencode-mcp/${session_name}.json"
-        [[ -f "$default_opencode_config" ]] && opencode_config="$default_opencode_config"
+        if [[ -f "$default_opencode_config" ]]; then
+            opencode_config="$default_opencode_config"
+        fi
     fi
+}
+
+load_status_file() {
+    local status_file="$1"
+    [[ -f "$status_file" ]] || return 1
+
+    local key value
+    while IFS='=' read -r key value || [[ -n "$key" ]]; do
+        case "$key" in
+            status|message|timestamp|repo|branch|wt_path|pr|agent|opencode_config)
+                value="${value//\\ / }"
+                value="${value//\\\\/\\}"
+                printf -v "$key" '%s' "$value"
+                ;;
+        esac
+    done < "$status_file"
+}
+
+status_escape() {
+    local value="$1"
+    value="${value//\\/\\\\}"
+    value="${value// /\\ }"
+    printf '%s' "$value"
+}
+
+write_status_file() {
+    local status_file="$1"
+    {
+        printf 'status=%s\n' "$(status_escape "$status")"
+        printf 'message=%s\n' "$(status_escape "$message")"
+        printf 'timestamp=%s\n' "$(date +%s)"
+        printf 'repo=%s\n' "$(status_escape "$repo")"
+        printf 'branch=%s\n' "$(status_escape "$branch")"
+        printf 'wt_path=%s\n' "$(status_escape "$wt_path")"
+        printf 'pr=%s\n' "$(status_escape "$pr")"
+        printf 'agent=%s\n' "$(status_escape "$agent")"
+        printf 'opencode_config=%s\n' "$(status_escape "$opencode_config")"
+    } > "$status_file"
 }
 
 set_status() {
@@ -125,26 +165,20 @@ set_status() {
     local message="${3:-}"
 
     local status_file="$WT_STATUS_DIR/${session_name}.status"
+    local new_status="$status"
+    local new_message="$message"
 
     # Preserve existing metadata fields if file exists
     local pr="" repo="" branch="" wt_path="" agent="" opencode_config=""
     if [[ -f "$status_file" ]]; then
-        source "$status_file" 2>/dev/null || true
+        load_status_file "$status_file" || true
     fi
+    status="$new_status"
+    message="$new_message"
     derive_status_metadata "$session_name" "$(pwd)"
 
     # Write status file (with extended fields)
-    cat > "$status_file" <<EOF
-status=$status
-message=$message
-timestamp=$(date +%s)
-repo=$repo
-branch=$branch
-wt_path=$wt_path
-pr=$pr
-agent=$agent
-opencode_config=$opencode_config
-EOF
+    write_status_file "$status_file"
 
     # Write tmux user options for live display
     if tmux has-session -t "$session_name" 2>/dev/null; then

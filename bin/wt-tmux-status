@@ -7,6 +7,22 @@
 
 WT_STATUS_DIR="${WT_STATUS_DIR:-$HOME/.local/state/wt}"
 
+load_status_file() {
+    local status_file="$1"
+    [[ -f "$status_file" ]] || return 1
+
+    local key value
+    while IFS='=' read -r key value || [[ -n "$key" ]]; do
+        case "$key" in
+            status)
+                value="${value//\\ / }"
+                value="${value//\\\\/\\}"
+                printf -v status '%s' "$value"
+                ;;
+        esac
+    done < "$status_file"
+}
+
 # Count statuses
 working=0
 idle=0
@@ -18,7 +34,7 @@ if [[ -d "$WT_STATUS_DIR" ]]; then
         [[ -f "$status_file" ]] || continue
 
         status=""
-        source "$status_file" 2>/dev/null || continue
+        load_status_file "$status_file" || continue
 
         case "$status" in
             working) ((working++)) ;;
