@@ -1028,7 +1028,15 @@ interactive_new() {
 # -----------------------------------------------------------------------------
 # Build rich pick list: session_name:display_string
 pick_list() {
+    local show_progress="${1:-false}"
+    local count=0
+
     while IFS=: read -r session_name wt_path sess_status; do
+        ((count++)) || true
+        if [[ "$show_progress" == "true" ]]; then
+            printf '\rLoading worktrees... %d' "$count" >/dev/tty
+        fi
+
         local status_file="$WT_STATUS_DIR/${session_name}.status"
         local agent="" message="" repo="" branch=""
         if [[ -f "$status_file" ]]; then
@@ -1038,25 +1046,81 @@ pick_list() {
         icon=$(get_status_icon "${sess_status:-unknown}")
         local label
         label=$(agent_label "${agent:-$WT_DEFAULT_AGENT}")
-        echo "${session_name}:${icon} ${sess_status:-?}  ${label}  ${repo:-?}@${branch:-?}  ${message:-}"
+        echo "${session_name}:${wt_path}:${icon} ${sess_status:-?}  ${label}  ${repo:-?}@${branch:-?}  ${message:-}"
     done < <(list_worktrees simple)
+
+    if [[ "$show_progress" == "true" ]]; then
+        printf '\n' >/dev/tty
+    fi
+}
+
+revive_worktree_session() {
+    local session_name="$1"
+    local wt_path="$2"
+
+    if [[ -z "$wt_path" || ! -d "$wt_path" ]]; then
+        echo "Cannot revive '$session_name': worktree path not found"
+        return 1
+    fi
+
+    local status_file="$WT_STATUS_DIR/${session_name}.status"
+    local status="idle" message="Ready" repo="" branch="" pr="" agent="" opencode_config=""
+    if [[ -f "$status_file" ]]; then
+        load_status_file "$status_file" || true
+    fi
+
+    branch="${branch:-$(git -C "$wt_path" branch --show-current 2>/dev/null || echo detached)}"
+    if [[ -z "$repo" || "$repo" == "?" ]]; then
+        repo=$(basename "$(dirname "$wt_path")")
+    fi
+    agent="${agent:-$WT_DEFAULT_AGENT}"
+
+    echo "Reviving tmux session: $session_name"
+    opencode_config=$(configure_mcp_profile "$wt_path" "$agent" "default" "$session_name" || true)
+    if [[ "$agent" == "claude" ]]; then
+        apply_allowed_tools "$wt_path"
+    fi
+
+    tmux new-session -d -s "$session_name" -c "$wt_path" -n main
+    tmux send-keys -t "$session_name:main" "nvim" Enter
+    tmux split-window -h -t "$session_name:main" -c "$wt_path"
+    tmux new-window -t "$session_name" -n shell -c "$wt_path"
+    tmux select-window -t "$session_name:main"
+    tmux select-pane -t "$session_name:main.1"
+
+    tmux set-option -qt "$session_name" @wt-status  "${status:-idle}"
+    tmux set-option -qt "$session_name" @wt-message "${message:-Ready}"
+    tmux set-option -qt "$session_name" @wt-repo    "$repo"
+    tmux set-option -qt "$session_name" @wt-branch  "$branch"
+    tmux set-option -qt "$session_name" @wt-pr      "$pr"
+    tmux set-option -qt "$session_name" @wt-agent   "$agent"
+    tmux set-option -qt "$session_name" @wt-opencode-config "$opencode_config"
+    if [[ -n "$opencode_config" ]]; then
+        tmux set-environment -t "$session_name" OPENCODE_CONFIG "$opencode_config"
+    fi
+
+    status="${status:-idle}"
+    message="${message:-Ready}"
+    write_status_file "$status_file"
 }
 
 pick_worktree() {
     check_deps
 
     local items
-    items=$(pick_list)
+    items=$(pick_list true)
 
     if [[ -z "$items" ]]; then
         echo "No worktrees found."
         return
     fi
 
+    printf 'Opening picker...\n' >/dev/tty
+
     local selection
     selection=$(echo "$items" | fzf \
         --delimiter=: \
-        --with-nth=2 \
+        --with-nth=3 \
         --header="Select worktree (Enter=switch, Ctrl-D=delete, ?=preview)" \
         --preview="tmux capture-pane -t {1}:main.1 -p -e 2>/dev/null || tmux capture-pane -t {1}:agent -p -e 2>/dev/null || echo '(no agent pane)'" \
         --preview-window=right:60% \
@@ -1064,8 +1128,13 @@ pick_worktree() {
         || true)
 
     if [[ -n "$selection" ]]; then
-        local session_name
+        local session_name wt_path
         session_name=$(echo "$selection" | cut -d: -f1)
+        wt_path=$(echo "$selection" | cut -d: -f2)
+        if ! tmux has-session -t "$session_name" 2>/dev/null; then
+            printf "Session '%s' is not running. Reviving...\n" "$session_name" >/dev/tty
+            revive_worktree_session "$session_name" "$wt_path" || return 1
+        fi
         switch_to "$session_name"
     fi
 }
