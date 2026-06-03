@@ -1028,15 +1028,7 @@ interactive_new() {
 # -----------------------------------------------------------------------------
 # Build rich pick list: session_name:display_string
 pick_list() {
-    local show_progress="${1:-false}"
-    local count=0
-
     while IFS=: read -r session_name wt_path sess_status; do
-        ((count++)) || true
-        if [[ "$show_progress" == "true" ]]; then
-            printf '\rLoading worktrees... %d' "$count" >/dev/tty
-        fi
-
         local status_file="$WT_STATUS_DIR/${session_name}.status"
         local agent="" message="" repo="" branch=""
         if [[ -f "$status_file" ]]; then
@@ -1048,10 +1040,6 @@ pick_list() {
         label=$(agent_label "${agent:-$WT_DEFAULT_AGENT}")
         echo "${session_name}:${wt_path}:${icon} ${sess_status:-?}  ${label}  ${repo:-?}@${branch:-?}  ${message:-}"
     done < <(list_worktrees simple)
-
-    if [[ "$show_progress" == "true" ]]; then
-        printf '\n' >/dev/tty
-    fi
 }
 
 revive_worktree_session() {
@@ -1107,18 +1095,11 @@ revive_worktree_session() {
 pick_worktree() {
     check_deps
 
-    local items
-    items=$(pick_list true)
-
-    if [[ -z "$items" ]]; then
-        echo "No worktrees found."
-        return
-    fi
-
-    printf 'Opening picker...\n' >/dev/tty
-
+    # Stream rows into fzf as they're produced — the picker opens instantly
+    # and fills in live (with fzf's own spinner) instead of waiting for the
+    # full ~250-worktree scan to finish first.
     local selection
-    selection=$(echo "$items" | fzf \
+    selection=$(pick_list | fzf \
         --delimiter=: \
         --with-nth=3 \
         --header="Select worktree (Enter=switch, Ctrl-D=delete, ?=preview)" \
