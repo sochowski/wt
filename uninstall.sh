@@ -56,7 +56,7 @@ echo ""
 # -----------------------------------------------------------------------------
 echo "The following directories were NOT removed (contain your data):"
 echo "  ~/worktrees/           - Your worktree directories"
-echo "  ~/.local/state/wt/     - Status tracking files"
+echo "  ~/.local/state/wt/     - Session state (wt.db) and logs"
 echo ""
 echo "Remove them manually if you want a complete uninstall."
 echo ""

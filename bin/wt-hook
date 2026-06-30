@@ -11,6 +11,12 @@ WT_BASE_DIR="${WT_BASE_DIR:-$HOME/worktrees}"
 WT_CONFIG_DIR="${WT_CONFIG_DIR:-$HOME/.config/wt}"
 WT_DEFAULT_AGENT="${WT_DEFAULT_AGENT:-opencode}"
 
+# wt-state binary: prefer a sibling of this script (repo or ~/bin install),
+# fall back to PATH.
+WT_HOOK_DIR="$(dirname "$(readlink -f "$0")")"
+WT_STATE="${WT_STATE:-$WT_HOOK_DIR/wt-state}"
+[[ -x "$WT_STATE" ]] || WT_STATE="wt-state"
+
 # Ensure status directory exists
 mkdir -p "$WT_STATUS_DIR"
 
@@ -121,42 +127,20 @@ derive_status_metadata() {
     fi
 }
 
-load_status_file() {
-    local status_file="$1"
-    [[ -f "$status_file" ]] || return 1
-
-    local key value
-    while IFS='=' read -r key value || [[ -n "$key" ]]; do
-        case "$key" in
-            status|message|timestamp|repo|branch|wt_path|pr|agent|opencode_config)
-                value="${value//\\ / }"
-                value="${value//\\\\/\\}"
-                printf -v "$key" '%s' "$value"
-                ;;
-        esac
-    done < "$status_file"
+load_session() {
+    local name="$1" json
+    json=$("$WT_STATE" get "$name" --json 2>/dev/null) || return 1
+    eval "$(jq -r '{status,message,repo,branch,wt_path,pr,agent,opencode_config}
+                   | to_entries[] | "\(.key)=\(.value|@sh)"' <<<"$json")"
 }
 
-status_escape() {
-    local value="$1"
-    value="${value//\\/\\\\}"
-    value="${value// /\\ }"
-    printf '%s' "$value"
-}
-
-write_status_file() {
-    local status_file="$1"
-    {
-        printf 'status=%s\n' "$(status_escape "$status")"
-        printf 'message=%s\n' "$(status_escape "$message")"
-        printf 'timestamp=%s\n' "$(date +%s)"
-        printf 'repo=%s\n' "$(status_escape "$repo")"
-        printf 'branch=%s\n' "$(status_escape "$branch")"
-        printf 'wt_path=%s\n' "$(status_escape "$wt_path")"
-        printf 'pr=%s\n' "$(status_escape "$pr")"
-        printf 'agent=%s\n' "$(status_escape "$agent")"
-        printf 'opencode_config=%s\n' "$(status_escape "$opencode_config")"
-    } > "$status_file"
+save_session() {
+    local name="$1"
+    "$WT_STATE" set "$name" \
+        --status "${status:-}" --message "${message:-}" \
+        --repo "${repo:-}" --branch "${branch:-}" --wt-path "${wt_path:-}" \
+        --pr "${pr:-}" --agent "${agent:-}" \
+        --opencode-config "${opencode_config:-}" >/dev/null
 }
 
 set_status() {
@@ -164,21 +148,18 @@ set_status() {
     local status="$2"
     local message="${3:-}"
 
-    local status_file="$WT_STATUS_DIR/${session_name}.status"
     local new_status="$status"
     local new_message="$message"
 
-    # Preserve existing metadata fields if file exists
+    # Preserve existing metadata fields if the session already has a row
     local pr="" repo="" branch="" wt_path="" agent="" opencode_config=""
-    if [[ -f "$status_file" ]]; then
-        load_status_file "$status_file" || true
-    fi
+    load_session "$session_name" || true
     status="$new_status"
     message="$new_message"
     derive_status_metadata "$session_name" "$(pwd)"
 
-    # Write status file (with extended fields)
-    write_status_file "$status_file"
+    # Persist to the store
+    save_session "$session_name"
 
     # Write tmux user options for live display
     if tmux has-session -t "$session_name" 2>/dev/null; then
@@ -222,12 +203,9 @@ get_agent_label() {
     local session_name="${1:-}"
     local agent=""
 
-    # Try to read from status file
+    # Try to read the agent from the store
     if [[ -n "$session_name" ]]; then
-        local status_file="$WT_STATUS_DIR/${session_name}.status"
-        if [[ -f "$status_file" ]]; then
-            agent=$(grep '^agent=' "$status_file" 2>/dev/null | cut -d= -f2 || true)
-        fi
+        agent=$("$WT_STATE" get "$session_name" --field agent 2>/dev/null || true)
     fi
 
     case "${agent:-$WT_DEFAULT_AGENT}" in
