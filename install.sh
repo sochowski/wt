@@ -20,6 +20,53 @@ echo "====================================================="
 echo ""
 
 # -----------------------------------------------------------------------------
+#  Dependency checks
+# -----------------------------------------------------------------------------
+echo "Checking dependencies..."
+
+missing=()
+for cmd in git tmux fzf jq; do
+    if command -v "$cmd" &>/dev/null; then
+        echo "  $cmd: ok"
+    else
+        echo "  $cmd: MISSING"
+        missing+=("$cmd")
+    fi
+done
+
+if command -v gh &>/dev/null; then
+    echo "  gh: ok (optional)"
+else
+    echo "  gh: not found (optional - needed for PR lookup)"
+fi
+
+agents=()
+for agent in claude codex gemini opencode; do
+    command -v "$agent" &>/dev/null && agents+=("$agent")
+done
+
+if [[ ${#missing[@]} -gt 0 ]]; then
+    echo ""
+    echo "Error: missing required commands: ${missing[*]}"
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        echo "  brew install ${missing[*]}"
+    else
+        echo "  pacman -S ${missing[*]}         # Arch"
+        echo "  sudo apt install ${missing[*]}  # Debian/Ubuntu"
+    fi
+    exit 1
+fi
+
+if [[ ${#agents[@]} -eq 0 ]]; then
+    echo ""
+    echo "Error: no agent CLI found. Install at least one of:"
+    echo "  claude, codex, gemini, opencode"
+    exit 1
+fi
+echo "  agents: ${agents[*]}"
+echo ""
+
+# -----------------------------------------------------------------------------
 #  Create directories
 # -----------------------------------------------------------------------------
 echo "Creating directories..."
@@ -64,6 +111,23 @@ fi
 
 ln -s "$SCRIPT_DIR/config/tmux-wt.conf" "$target"
 echo "  tmux-wt.conf -> $target"
+
+# -----------------------------------------------------------------------------
+#  Symlink menu config
+# -----------------------------------------------------------------------------
+# wt-bind-menu reads this on tmux startup to generate the prefix+w action menu
+# and the direct prefix+<key> bindings. Without it, those bindings never load.
+echo "Symlinking menu config..."
+target="$CONFIG_DIR/wt-menu.conf"
+
+if [[ -L "$target" ]]; then
+    rm "$target"
+elif [[ -e "$target" ]]; then
+    mv "$target" "$target.bak"
+fi
+
+ln -s "$SCRIPT_DIR/config/wt-menu.conf" "$target"
+echo "  wt-menu.conf -> $target"
 
 # -----------------------------------------------------------------------------
 #  Merge Agent Hooks
