@@ -66,6 +66,23 @@ ln -s "$SCRIPT_DIR/config/tmux-wt.conf" "$target"
 echo "  tmux-wt.conf -> $target"
 
 # -----------------------------------------------------------------------------
+#  Symlink menu config
+# -----------------------------------------------------------------------------
+# wt-bind-menu reads this on tmux startup to generate the prefix+w action menu
+# and the direct prefix+<key> bindings. Without it, those bindings never load.
+echo "Symlinking menu config..."
+target="$CONFIG_DIR/wt-menu.conf"
+
+if [[ -L "$target" ]]; then
+    rm "$target"
+elif [[ -e "$target" ]]; then
+    mv "$target" "$target.bak"
+fi
+
+ln -s "$SCRIPT_DIR/config/wt-menu.conf" "$target"
+echo "  wt-menu.conf -> $target"
+
+# -----------------------------------------------------------------------------
 #  Merge Agent Hooks
 # -----------------------------------------------------------------------------
 echo "Configuring agent hooks..."
