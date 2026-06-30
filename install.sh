@@ -25,7 +25,7 @@ echo ""
 echo "Checking dependencies..."
 
 missing=()
-for cmd in git tmux fzf jq; do
+for cmd in git tmux fzf jq go; do
     if command -v "$cmd" &>/dev/null; then
         echo "  $cmd: ok"
     else
@@ -77,6 +77,13 @@ mkdir -p "$HOME/.local/state/wt"
 mkdir -p "$HOME/worktrees"
 
 # -----------------------------------------------------------------------------
+#  Build wt-state (Go binary backing the session store)
+# -----------------------------------------------------------------------------
+echo "Building wt-state..."
+( cd "$SCRIPT_DIR/state" && go build -o "$SCRIPT_DIR/bin/wt-state" . )
+echo "  wt-state -> $SCRIPT_DIR/bin/wt-state"
+
+# -----------------------------------------------------------------------------
 #  Symlink bin scripts
 # -----------------------------------------------------------------------------
 echo "Symlinking scripts to $BIN_DIR..."
@@ -96,6 +103,12 @@ for script in "$SCRIPT_DIR/bin/"*; do
     chmod +x "$script"
     echo "  $script_name -> $target"
 done
+
+# -----------------------------------------------------------------------------
+#  Migrate legacy .status files into the SQLite store (idempotent)
+# -----------------------------------------------------------------------------
+echo "Migrating existing session state into SQLite..."
+"$SCRIPT_DIR/bin/wt-state" migrate || echo "  (nothing to migrate)"
 
 # -----------------------------------------------------------------------------
 #  Symlink tmux config

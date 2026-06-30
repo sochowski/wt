@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  wt test suite - comprehensive end-to-end tests
-#  Run inside tmux: ./test.sh
+#  Safe to run from anywhere: ./test.sh
+#  (Re-execs itself inside a private throwaway tmux server with isolated state;
+#   it never touches your real tmux sessions, wt.db, or worktrees.)
 # =============================================================================
 
 set -uo pipefail
@@ -13,6 +15,17 @@ TEST_SESSION=""
 WT_BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/bin" && pwd)"
 WT_BASE_DIR="${WT_BASE_DIR:-$HOME/worktrees}"
 WT_STATUS_DIR="${WT_STATUS_DIR:-$HOME/.local/state/wt}"
+WT_STATE="$WT_BIN_DIR/wt-state"
+
+# Read a single field of a session from the store (empty if absent).
+state_field() {
+    "$WT_STATE" get "$1" --field "$2" 2>/dev/null || true
+}
+
+# True if a session has a row in the store.
+state_has() {
+    "$WT_STATE" get "$1" >/dev/null 2>&1
+}
 
 # Colors
 GREEN='\033[32m'
@@ -66,9 +79,9 @@ teardown() {
         rm -rf "$test_wt" 2>/dev/null || true
     fi
 
-    # Remove test status files
-    rm -f "$WT_STATUS_DIR/test-wt-repo-test-branch.status" 2>/dev/null
-    rm -f "$WT_STATUS_DIR/test-wt-repo-main.status" 2>/dev/null
+    # Remove test session rows from the store
+    "$WT_STATE" delete test-wt-repo-test-branch 2>/dev/null || true
+    "$WT_STATE" delete test-wt-repo-main 2>/dev/null || true
 
     # Kill master test session
     tmux kill-session -t wt-master 2>/dev/null || true
@@ -88,6 +101,10 @@ test_script_syntax() {
 
     for script in "$WT_BIN_DIR"/*; do
         local name=$(basename "$script")
+        # Skip compiled binaries (e.g. wt-state) — only lint shell scripts.
+        if ! head -c2 "$script" 2>/dev/null | grep -q '#!'; then
+            continue
+        fi
         if bash -n "$script" 2>/dev/null; then
             pass "$name: valid syntax"
         else
@@ -101,9 +118,11 @@ test_tmux_conf_syntax() {
 
     local conf="$(dirname "$WT_BIN_DIR")/config/tmux-wt.conf"
     if [[ -f "$conf" ]]; then
-        # tmux can validate by sourcing into a temp server
+        # Validate by sourcing into a THROWAWAY server on a private socket
+        # (-L wt-test). NEVER use the default socket here: `kill-server` on it
+        # would destroy the user's real tmux server and every session.
         local result
-        result=$(tmux -f "$conf" start-server \; kill-server 2>&1 || true)
+        result=$(tmux -L wt-test -f "$conf" start-server \; kill-server 2>&1 || true)
         if [[ -z "$result" ]] || [[ "$result" != *"error"* && "$result" != *"unknown"* ]]; then
             pass "tmux-wt.conf: valid syntax"
         else
@@ -215,21 +234,26 @@ test_create_worktree() {
 }
 
 test_status_file() {
-    section "Status File"
+    section "Session State (store)"
 
-    local status_file="$WT_STATUS_DIR/$TEST_SESSION.status"
-
-    if [[ -f "$status_file" ]]; then
-        pass "status file exists"
-    else
-        fail "status file not found: $status_file"
+    if [[ -z "$TEST_SESSION" ]]; then
+        fail "skipped: no test session"
         return
     fi
 
-    # Check required fields
-    for field in status message timestamp repo branch wt_path agent opencode_config; do
-        if grep -q "^${field}=" "$status_file"; then
-            pass "field present: $field=$(grep "^${field}=" "$status_file" | cut -d= -f2-)"
+    if state_has "$TEST_SESSION"; then
+        pass "session row exists in store"
+    else
+        fail "session row not found: $TEST_SESSION"
+        return
+    fi
+
+    # Check required fields are present in the JSON row
+    local json
+    json=$("$WT_STATE" get "$TEST_SESSION" --json 2>/dev/null)
+    for field in status message repo branch wt_path agent opencode_config updated_at status_changed_at; do
+        if echo "$json" | jq -e "has(\"$field\")" >/dev/null 2>&1; then
+            pass "field present: $field=$(echo "$json" | jq -r ".$field")"
         else
             fail "field missing: $field"
         fi
@@ -244,40 +268,29 @@ test_status_messages_are_data() {
         return
     fi
 
-    local status_file="$WT_STATUS_DIR/$TEST_SESSION.status"
-    "$WT_BIN_DIR/wt" set-status "$TEST_SESSION" working "Using grep" 2>/dev/null
+    # A message containing shell metacharacters must round-trip as data and
+    # never be interpreted (no escaping scheme to get wrong anymore).
+    local danger='Using grep; $(touch /tmp/wt-pwned-$$)'
+    "$WT_BIN_DIR/wt" set-status "$TEST_SESSION" working "$danger" 2>/dev/null
 
-    if grep -q '^message=Using\\ grep$' "$status_file"; then
-        pass "status message with spaces is escaped"
+    if [[ "$(state_field "$TEST_SESSION" message)" == "$danger" ]]; then
+        pass "message with metacharacters round-trips verbatim"
     else
-        fail "status message was not escaped" "$(grep '^message=' "$status_file" 2>/dev/null)"
+        fail "message did not round-trip" "$(state_field "$TEST_SESSION" message)"
+    fi
+    if [[ ! -e "/tmp/wt-pwned-$$" ]]; then
+        pass "message was never executed (stored as data)"
+    else
+        fail "message was executed — command injection!"
+        rm -f "/tmp/wt-pwned-$$"
     fi
 
     local pick_output
     pick_output=$("$WT_BIN_DIR/wt" pick-list 2>&1)
-    if echo "$pick_output" | grep -q "$TEST_SESSION" && echo "$pick_output" | grep -q "Using grep"; then
-        pass "pick-list reads escaped message without sourcing it"
+    if echo "$pick_output" | grep -q "$TEST_SESSION" && echo "$pick_output" | grep -qF "Using grep"; then
+        pass "pick-list renders the message without sourcing it"
     else
-        fail "pick-list did not show escaped message" "$pick_output"
-    fi
-
-    cat > "$status_file" <<EOF
-status=working
-message=Using legacy grep
-timestamp=$(date +%s)
-repo=test-wt-repo
-branch=test-branch
-wt_path=$WT_BASE_DIR/test-wt-repo/test-branch
-pr=
-agent=opencode
-opencode_config=
-EOF
-
-    pick_output=$("$WT_BIN_DIR/wt" pick-list 2>&1)
-    if echo "$pick_output" | grep -q "$TEST_SESSION" && echo "$pick_output" | grep -q "Using legacy grep"; then
-        pass "pick-list handles legacy unescaped messages"
-    else
-        fail "pick-list broke on legacy unescaped message" "$pick_output"
+        fail "pick-list did not show message" "$pick_output"
     fi
 }
 
@@ -313,28 +326,20 @@ test_status_metadata_recovery() {
         return
     fi
 
-    local status_file="$WT_STATUS_DIR/$TEST_SESSION.status"
     local wt_path="$WT_BASE_DIR/test-wt-repo/test-branch"
 
-    cat > "$status_file" <<EOF
-status=working
-message=race write
-timestamp=$(date +%s)
-repo=
-branch=
-wt_path=
-pr=
-agent=
-opencode_config=
-EOF
+    # Seed a row with empty metadata; the stop hook's derive_status_metadata
+    # should refill repo/branch/wt_path/agent from tmux options + the filesystem.
+    "$WT_STATE" set "$TEST_SESSION" --status working --message "race write" \
+        --repo "" --branch "" --wt-path "" --agent "" --opencode-config "" >/dev/null
 
     (cd "$wt_path" 2>/dev/null || cd "$TEST_REPO"; "$WT_BIN_DIR/wt-hook" stop) 2>/dev/null
 
     local repo branch wt_path_value agent
-    repo=$(grep '^repo=' "$status_file" | cut -d= -f2-)
-    branch=$(grep '^branch=' "$status_file" | cut -d= -f2-)
-    wt_path_value=$(grep '^wt_path=' "$status_file" | cut -d= -f2-)
-    agent=$(grep '^agent=' "$status_file" | cut -d= -f2-)
+    repo=$(state_field "$TEST_SESSION" repo)
+    branch=$(state_field "$TEST_SESSION" branch)
+    wt_path_value=$(state_field "$TEST_SESSION" wt_path)
+    agent=$(state_field "$TEST_SESSION" agent)
 
     [[ "$repo" == "test-wt-repo" ]] && pass "recovered repo=$repo" || fail "repo not recovered" "$repo"
     [[ "$branch" == "test-branch" ]] && pass "recovered branch=$branch" || fail "branch not recovered" "$branch"
@@ -343,7 +348,7 @@ EOF
 }
 
 test_wt_hook_dual_write() {
-    section "wt-hook Dual Write"
+    section "wt-hook: store write + tmux projection"
 
     if [[ -z "${TMUX:-}" ]] || [[ -z "$TEST_SESSION" ]]; then
         fail "skipped: no test session"
@@ -356,16 +361,13 @@ test_wt_hook_dual_write() {
 
     sleep 0.5
 
-    # Check status file was updated
-    local status_file="$WT_STATUS_DIR/$TEST_SESSION.status"
-    if [[ -f "$status_file" ]]; then
-        local file_status
-        file_status=$(grep "^status=" "$status_file" | cut -d= -f2)
-        if [[ "$file_status" == "working" ]]; then
-            pass "status file updated to 'working'"
-        else
-            fail "status file has '$file_status' (expected 'working')"
-        fi
+    # Check the store was updated (source of truth)
+    local store_status
+    store_status=$(state_field "$TEST_SESSION" status)
+    if [[ "$store_status" == "working" ]]; then
+        pass "store status updated to 'working'"
+    else
+        fail "store status is '$store_status' (expected 'working')"
     fi
 
     # Check tmux option was updated
@@ -633,11 +635,10 @@ test_delete_worktree() {
         fail "tmux session still exists"
     fi
 
-    local status_file="$WT_STATUS_DIR/$TEST_SESSION.status"
-    if [[ ! -f "$status_file" ]]; then
-        pass "status file removed"
+    if ! state_has "$TEST_SESSION"; then
+        pass "session row removed from store"
     else
-        fail "status file still exists"
+        fail "session row still exists in store"
     fi
 
     TEST_SESSION=""
@@ -651,10 +652,11 @@ test_adopt_existing() {
         return
     fi
 
-    # Try to create a worktree on main — should adopt the existing checkout
-    local output
+    # Try to create a worktree on main — should adopt the existing checkout.
+    # Use a LOCAL session var so we don't clobber the shared $TEST_SESSION that
+    # later tests (choose-tree, delete) still depend on.
+    local output adopt_session="test-wt-repo-main"
     output=$("$WT_BIN_DIR/wt" new "$TEST_REPO" main 2>&1)
-    TEST_SESSION="test-wt-repo-main"
 
     if echo "$output" | grep -q "Adopting"; then
         pass "adopted existing checkout"
@@ -663,12 +665,12 @@ test_adopt_existing() {
         pass "created/switched to main"
     fi
 
-    if tmux has-session -t "$TEST_SESSION" 2>/dev/null; then
+    if tmux has-session -t "$adopt_session" 2>/dev/null; then
         pass "session created for adopted checkout"
 
         # Check the session's working directory matches the repo
         local pane_path
-        pane_path=$(tmux display-message -t "$TEST_SESSION:shell" -p '#{pane_current_path}' 2>/dev/null)
+        pane_path=$(tmux display-message -t "$adopt_session:shell" -p '#{pane_current_path}' 2>/dev/null)
         if [[ "$pane_path" == "$TEST_REPO" ]]; then
             pass "shell window cwd matches repo: $pane_path"
         else
@@ -678,10 +680,9 @@ test_adopt_existing() {
         fail "session not created"
     fi
 
-    # Cleanup
-    tmux kill-session -t "$TEST_SESSION" 2>/dev/null || true
-    rm -f "$WT_STATUS_DIR/$TEST_SESSION.status" 2>/dev/null
-    TEST_SESSION=""
+    # Cleanup just this adopted session; leave $TEST_SESSION intact.
+    tmux kill-session -t "$adopt_session" 2>/dev/null || true
+    "$WT_STATE" delete "$adopt_session" 2>/dev/null || true
 }
 
 test_claude_hooks_json() {
@@ -891,6 +892,59 @@ test_install_script() {
     done
 }
 
+test_go_unit() {
+    section "wt-state Go unit tests"
+
+    local state_dir
+    state_dir="$(dirname "$WT_BIN_DIR")/state"
+    if ! command -v go >/dev/null 2>&1; then
+        fail "skipped: go not installed"
+        return
+    fi
+    if (cd "$state_dir" && go test ./... >/tmp/wt-gotest-$$.log 2>&1); then
+        pass "go test ./... passed"
+    else
+        fail "go test ./... failed" "$(cat /tmp/wt-gotest-$$.log)"
+    fi
+    rm -f /tmp/wt-gotest-$$.log
+}
+
+test_wt_state_cli() {
+    section "wt-state CLI (migrate + concurrency)"
+
+    if [[ ! -x "$WT_STATE" ]]; then
+        fail "skipped: wt-state not built (run install.sh or 'go build')"
+        return
+    fi
+
+    local tmp; tmp=$(mktemp -d)
+
+    # migrate: a legacy escaped .status file must import with the space decoded.
+    printf 'status=idle\nmessage=opencode\\ finished\nrepo=wt\nagent=opencode\n' \
+        > "$tmp/wt-demo.status"
+    WT_DB="$tmp/wt.db" "$WT_STATE" migrate --dir "$tmp" >/dev/null 2>&1
+    if [[ "$(WT_DB="$tmp/wt.db" "$WT_STATE" get wt-demo --field message)" == "opencode finished" ]]; then
+        pass "migrate decodes legacy escaping"
+    else
+        fail "migrate did not decode legacy escaping"
+    fi
+
+    # concurrency: many parallel writers to one row, no errors, consistent state.
+    local n=40 fails=0 pids=()
+    for ((i=0; i<n; i++)); do
+        ( WT_DB="$tmp/wt.db" "$WT_STATE" set race --status working --message "i$i" >/dev/null 2>&1 ) &
+        pids+=($!)
+    done
+    for p in "${pids[@]}"; do wait "$p" || fails=$((fails+1)); done
+    if [[ "$fails" -eq 0 ]] && [[ "$(WT_DB="$tmp/wt.db" "$WT_STATE" get race --field status)" == "working" ]]; then
+        pass "$n concurrent writers, no errors, consistent row"
+    else
+        fail "concurrent writers failed ($fails errors)"
+    fi
+
+    rm -rf "$tmp"
+}
+
 # =============================================================================
 #  Run
 # =============================================================================
@@ -907,6 +961,8 @@ main() {
 
     setup
 
+    test_go_unit
+    test_wt_state_cli
     test_script_syntax
     test_tmux_conf_syntax
     test_claude_hooks_json
@@ -943,4 +999,59 @@ main() {
     [[ $FAIL -eq 0 ]] && exit 0 || exit 1
 }
 
-main "$@"
+# =============================================================================
+#  Isolation wrapper
+#
+#  The suite creates/kills tmux sessions, calls switch-client, and writes wt
+#  state. Run inside your normal tmux server it would yank your view around and
+#  (historically) could even kill the server. So instead we re-exec the WHOLE
+#  suite inside a PRIVATE, throwaway tmux server (TMUX_TMPDIR) with ISOLATED
+#  state dirs. Nothing here can touch your real sessions, wt.db, or worktrees.
+# =============================================================================
+run_isolated() {
+    local self repo_dir sock priv log rc_file
+    self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+    repo_dir="$(dirname "$WT_BIN_DIR")"
+    sock="wt-test-$$"
+    priv="$(mktemp -d)"
+    log="$(mktemp)"
+    rc_file="$(mktemp)"
+
+    # Build wt-state so the suite (and the wt/wt-hook it drives) can use it.
+    if command -v go >/dev/null 2>&1; then
+        if ! ( cd "$repo_dir/state" && go build -o "$WT_BIN_DIR/wt-state" . ); then
+            echo "wt-state build failed — aborting" >&2
+            rm -rf "$priv" "$log" "$rc_file"
+            exit 1
+        fi
+    fi
+
+    # Private tmux server + isolated state. Exported so the inner run and every
+    # tmux/wt subprocess it spawns inherit them.
+    export TMUX_TMPDIR="$priv"
+    export WT_STATUS_DIR="$priv/state"; mkdir -p "$WT_STATUS_DIR"
+    export WT_BASE_DIR="$priv/worktrees"; mkdir -p "$WT_BASE_DIR"
+    unset TMUX  # detach from the caller's server before starting ours
+
+    echo "Running test suite on an isolated tmux server (socket: $sock)..."
+    echo "  TMUX_TMPDIR=$priv  WT_STATUS_DIR=$WT_STATUS_DIR  WT_BASE_DIR=$WT_BASE_DIR"
+
+    # Run the suite detached on the private server; capture output + exit code,
+    # then signal completion. The trailing echo/signal run even if the suite
+    # fails, so the waiter below never hangs on a non-zero exit.
+    tmux -L "$sock" new-session -d -x 220 -y 50 -s runner \
+        "bash '$self' --inner > '$log' 2>&1; echo \$? > '$rc_file'; tmux -L '$sock' wait-for -S wt-test-done"
+    tmux -L "$sock" wait-for wt-test-done
+
+    cat "$log"
+    local rc; rc="$(cat "$rc_file" 2>/dev/null || echo 1)"
+
+    tmux -L "$sock" kill-server 2>/dev/null || true
+    rm -rf "$priv" "$log" "$rc_file"
+    exit "$rc"
+}
+
+case "${1:-}" in
+    --inner) shift; main "$@" ;;   # already inside the private server
+    *)       run_isolated "$@" ;;
+esac

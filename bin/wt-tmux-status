@@ -7,43 +7,18 @@
 
 WT_STATUS_DIR="${WT_STATUS_DIR:-$HOME/.local/state/wt}"
 
-load_status_file() {
-    local status_file="$1"
-    [[ -f "$status_file" ]] || return 1
+# wt-state binary: sibling of this script (repo or ~/bin install), else PATH.
+WT_TMUX_STATUS_DIR="$(dirname "$(readlink -f "$0")")"
+WT_STATE="${WT_STATE:-$WT_TMUX_STATUS_DIR/wt-state}"
+[[ -x "$WT_STATE" ]] || WT_STATE="wt-state"
 
-    local key value
-    while IFS='=' read -r key value || [[ -n "$key" ]]; do
-        case "$key" in
-            status)
-                value="${value//\\ / }"
-                value="${value//\\\\/\\}"
-                printf -v status '%s' "$value"
-                ;;
-        esac
-    done < "$status_file"
-}
-
-# Count statuses
+# Count statuses in one query (master excluded by wt-state). `counts` prints
+# `working=N` lines, which we eval directly.
 working=0
 idle=0
 input=0
 error=0
-
-if [[ -d "$WT_STATUS_DIR" ]]; then
-    for status_file in "$WT_STATUS_DIR"/*.status; do
-        [[ -f "$status_file" ]] || continue
-
-        status=""
-        load_status_file "$status_file" || continue
-
-        case "$status" in
-            working) ((working++)) ;;
-            idle)    ((idle++)) ;;
-            input)   ((input++)) ;;
-            error)   ((error++)) ;;
-        esac
-    done
-fi
+eval "$("$WT_STATE" counts 2>/dev/null || true)"
 
 # Build output string (using terminal palette colours)
 output=""

@@ -17,6 +17,12 @@ WT_LOG_FILE="${WT_LOG_FILE:-$HOME/.local/state/wt/wt.log}"
 WT_BIN_DIR="$(dirname "$(readlink -f "$0")")"
 WT_DEFAULT_AGENT="${WT_DEFAULT_AGENT:-opencode}"
 
+# wt-state binary: authoritative SQLite-backed session store. Prefer a sibling
+# of this script (handles both repo checkout and ~/bin symlink install); fall
+# back to PATH.
+WT_STATE="${WT_STATE:-$WT_BIN_DIR/wt-state}"
+[[ -x "$WT_STATE" ]] || WT_STATE="wt-state"
+
 # Ensure directories exist
 mkdir -p "$WT_BASE_DIR" "$WT_STATUS_DIR" "$WT_CONFIG_DIR"
 
@@ -361,49 +367,25 @@ derive_status_metadata() {
 # -----------------------------------------------------------------------------
 #  Status Tracking
 # -----------------------------------------------------------------------------
-get_status_file() {
-    local session_name="$1"
-    echo "$WT_STATUS_DIR/${session_name}.status"
+# Populate status/message/repo/branch/wt_path/pr/agent/opencode_config from the
+# store for a session. Returns 1 if the session has no row yet. Values are read
+# as data via jq @sh (shell-quoted), never sourced, so messages can't execute.
+load_session() {
+    local name="$1" json
+    json=$("$WT_STATE" get "$name" --json 2>/dev/null) || return 1
+    eval "$(jq -r '{status,message,repo,branch,wt_path,pr,agent,opencode_config}
+                   | to_entries[] | "\(.key)=\(.value|@sh)"' <<<"$json")"
 }
 
-load_status_file() {
-    local status_file="$1"
-    [[ -f "$status_file" ]] || return 1
-
-    local key value
-    while IFS='=' read -r key value || [[ -n "$key" ]]; do
-        case "$key" in
-            status|message|timestamp|repo|branch|wt_path|pr|agent|opencode_config)
-                # Older status files used shell escaping or raw values with spaces.
-                # Parse as data, never source, so status messages cannot execute.
-                value="${value//\\ / }"
-                value="${value//\\\\/\\}"
-                printf -v "$key" '%s' "$value"
-                ;;
-        esac
-    done < "$status_file"
-}
-
-status_escape() {
-    local value="$1"
-    value="${value//\\/\\\\}"
-    value="${value// /\\ }"
-    printf '%s' "$value"
-}
-
-write_status_file() {
-    local status_file="$1"
-    {
-        printf 'status=%s\n' "$(status_escape "$status")"
-        printf 'message=%s\n' "$(status_escape "$message")"
-        printf 'timestamp=%s\n' "$(date +%s)"
-        printf 'repo=%s\n' "$(status_escape "$repo")"
-        printf 'branch=%s\n' "$(status_escape "$branch")"
-        printf 'wt_path=%s\n' "$(status_escape "$wt_path")"
-        printf 'pr=%s\n' "$(status_escape "$pr")"
-        printf 'agent=%s\n' "$(status_escape "$agent")"
-        printf 'opencode_config=%s\n' "$(status_escape "$opencode_config")"
-    } > "$status_file"
+# Persist the current status/* vars for a session (full overwrite). Relies on
+# bash dynamic scoping: the caller's locals are visible here.
+save_session() {
+    local name="$1"
+    "$WT_STATE" set "$name" \
+        --status "${status:-}" --message "${message:-}" \
+        --repo "${repo:-}" --branch "${branch:-}" --wt-path "${wt_path:-}" \
+        --pr "${pr:-}" --agent "${agent:-}" \
+        --opencode-config "${opencode_config:-}" >/dev/null
 }
 
 set_status() {
@@ -411,21 +393,17 @@ set_status() {
     local status="$2"  # idle, working, input, error
     local message="${3:-}"
 
-    local status_file
-    status_file=$(get_status_file "$session_name")
     local new_status="$status"
     local new_message="$message"
 
-    # Preserve existing metadata fields if file exists
+    # Preserve existing metadata fields if the session already has a row
     local pr="" repo="" branch="" wt_path="" agent="" opencode_config=""
-    if [[ -f "$status_file" ]]; then
-        load_status_file "$status_file" || true
-    fi
+    load_session "$session_name" || true
     status="$new_status"
     message="$new_message"
     derive_status_metadata "$session_name"
 
-    write_status_file "$status_file"
+    save_session "$session_name"
 
     # Write tmux user options for live display
     if tmux has-session -t "$session_name" 2>/dev/null; then
@@ -447,17 +425,7 @@ set_status() {
 }
 
 get_status() {
-    local session_name="$1"
-    local status_file
-    status_file=$(get_status_file "$session_name")
-
-    if [[ -f "$status_file" ]]; then
-        local status=""
-        load_status_file "$status_file" || true
-        echo "$status"
-    else
-        echo "unknown"
-    fi
+    "$WT_STATE" get "$1" --field status 2>/dev/null || echo "unknown"
 }
 
 get_status_icon() {
@@ -535,21 +503,16 @@ list_worktrees() {
         done < <(find "$WT_BASE_DIR" -maxdepth 2 -type d -print0 2>/dev/null)
     fi
 
-    # Also include sessions tracked via status files (covers adopted/primary worktrees)
-    for status_file in "$WT_STATUS_DIR"/*.status; do
-        [[ -f "$status_file" ]] || continue
-        local session_name
-        session_name=$(basename "$status_file" .status)
+    # Also include sessions tracked in the store (covers adopted/primary worktrees)
+    local session_name status repo branch wt_path
+    while IFS=$'\t' read -r session_name status repo branch wt_path; do
+        [[ -n "$session_name" ]] || continue
 
-        # Skip already-seen and master
+        # Skip already-seen
         [[ "$seen_sessions" == *":${session_name}:"* ]] && continue
-        [[ "$session_name" == "wt-master" ]] && continue
 
         # Only include if tmux session exists
         tmux has-session -t "$session_name" 2>/dev/null || continue
-
-        local status="" repo="" branch="" wt_path=""
-        load_status_file "$status_file" || continue
 
         case "$format" in
             full)
@@ -564,7 +527,7 @@ list_worktrees() {
                 echo "$session_name"
                 ;;
         esac
-    done
+    done < <("$WT_STATE" list --no-master | jq -r '.[] | [.name,.status,.repo,.branch,.wt_path] | @tsv')
 }
 
 # Create a new worktree and tmux session
@@ -661,15 +624,12 @@ create_worktree() {
         local agent_display
         agent_display=$(agent_label "$agent")
 
-        # Write initial status file with full metadata
-        local status_file
-        status_file=$(get_status_file "$session_name")
+        # Persist initial session state with full metadata
         status=idle
         message=Ready
-        timestamp=$(date +%s)
         repo=$repo_name
         pr=
-        write_status_file "$status_file"
+        save_session "$session_name"
 
         # Set tmux session options (status + metadata)
         tmux set-option -qt "$session_name" @wt-status  "idle"
@@ -770,8 +730,8 @@ delete_worktree() {
         fi
     fi
 
-    # Remove status file
-    rm -f "$(get_status_file "$session_name")"
+    # Remove session state
+    "$WT_STATE" delete "$session_name" >/dev/null 2>&1 || true
     rm -f "$WT_CONFIG_DIR/opencode-mcp/${session_name}.json"
 
     echo "Deleted: $session_name"
@@ -1029,11 +989,10 @@ interactive_new() {
 # Build rich pick list: session_name:display_string
 pick_list() {
     while IFS=: read -r session_name wt_path sess_status; do
-        local status_file="$WT_STATUS_DIR/${session_name}.status"
-        local agent="" message="" repo="" branch=""
-        if [[ -f "$status_file" ]]; then
-            load_status_file "$status_file" || true
-        fi
+        # load_session populates agent/message/repo/branch (and re-sets wt_path
+        # to the stored value); locals keep the extra fields from leaking.
+        local agent="" message="" repo="" branch="" status="" pr="" opencode_config=""
+        load_session "$session_name" || true
         local icon
         icon=$(get_status_icon "${sess_status:-unknown}")
         local label
@@ -1051,11 +1010,9 @@ revive_worktree_session() {
         return 1
     fi
 
-    local status_file="$WT_STATUS_DIR/${session_name}.status"
     local status="idle" message="Ready" repo="" branch="" pr="" agent="" opencode_config=""
-    if [[ -f "$status_file" ]]; then
-        load_status_file "$status_file" || true
-    fi
+    load_session "$session_name" || true
+    wt_path="$2"  # the passed path is authoritative for revival, not the stored one
 
     branch="${branch:-$(git -C "$wt_path" branch --show-current 2>/dev/null || echo detached)}"
     if [[ -z "$repo" || "$repo" == "?" ]]; then
@@ -1089,7 +1046,7 @@ revive_worktree_session() {
 
     status="${status:-idle}"
     message="${message:-Ready}"
-    write_status_file "$status_file"
+    save_session "$session_name"
 }
 
 pick_worktree() {
@@ -1124,48 +1081,36 @@ pick_worktree() {
 #  Sync tmux options from status files (for after tmux restart)
 # -----------------------------------------------------------------------------
 sync_tmux() {
-    for status_file in "$WT_STATUS_DIR"/*.status; do
-        [[ -f "$status_file" ]] || continue
-        local session_name
-        session_name=$(basename "$status_file" .status)
+    # Project every stored session (master included via is_master) onto its tmux
+    # options. @tsv escapes tabs/newlines in fields so read stays aligned.
+    local name status message repo branch wt_path pr agent opencode_config is_master icon
+    while IFS=$'\t' read -r name status message repo branch wt_path pr agent opencode_config is_master; do
+        tmux has-session -t "$name" 2>/dev/null || continue
 
-        if tmux has-session -t "$session_name" 2>/dev/null; then
-            # Read the status file as data; messages can contain shell metacharacters.
-            local status="" message="" repo="" branch="" wt_path="" pr="" agent="" opencode_config=""
-            load_status_file "$status_file" || continue
-            derive_status_metadata "$session_name"
-
-            local icon
+        if [[ "$is_master" == "1" ]]; then
+            tmux set-option -qt "$name" @wt-master  "1"
+            tmux set-option -qt "$name" @wt-icon    "◆"
+            tmux set-option -qt "$name" @wt-status  "${status:-idle}"
+            tmux set-option -qt "$name" @wt-message "${message:-Orchestrator}"
+            tmux set-option -qt "$name" @wt-agent   "${agent:-$WT_DEFAULT_AGENT}"
+            tmux set-option -qt "$name" @wt-opencode-config "${opencode_config:-}"
+        else
             icon=$(get_status_icon "${status:-unknown}")
-
-            tmux set-option -qt "$session_name" @wt-status  "${status:-unknown}"
-            tmux set-option -qt "$session_name" @wt-icon    "$icon"
-            tmux set-option -qt "$session_name" @wt-message "${message:-}"
-            tmux set-option -qt "$session_name" @wt-repo    "${repo:-}"
-            tmux set-option -qt "$session_name" @wt-branch  "${branch:-}"
-            tmux set-option -qt "$session_name" @wt-wt-path "${wt_path:-}"
-            tmux set-option -qt "$session_name" @wt-pr      "${pr:-}"
-            tmux set-option -qt "$session_name" @wt-agent   "${agent:-$WT_DEFAULT_AGENT}"
-            tmux set-option -qt "$session_name" @wt-master  "0"
-            tmux set-option -qt "$session_name" @wt-opencode-config "${opencode_config:-}"
-            if [[ -n "${opencode_config:-}" ]]; then
-                tmux set-environment -t "$session_name" OPENCODE_CONFIG "$opencode_config"
-            fi
+            tmux set-option -qt "$name" @wt-status  "${status:-unknown}"
+            tmux set-option -qt "$name" @wt-icon    "$icon"
+            tmux set-option -qt "$name" @wt-message "${message:-}"
+            tmux set-option -qt "$name" @wt-repo    "${repo:-}"
+            tmux set-option -qt "$name" @wt-branch  "${branch:-}"
+            tmux set-option -qt "$name" @wt-wt-path "${wt_path:-}"
+            tmux set-option -qt "$name" @wt-pr      "${pr:-}"
+            tmux set-option -qt "$name" @wt-agent   "${agent:-$WT_DEFAULT_AGENT}"
+            tmux set-option -qt "$name" @wt-master  "0"
+            tmux set-option -qt "$name" @wt-opencode-config "${opencode_config:-}"
         fi
-    done
-
-    # Handle master session separately
-    if tmux has-session -t wt-master 2>/dev/null; then
-        tmux set-option -qt wt-master @wt-master "1"
-        tmux set-option -qt wt-master @wt-icon   "◆"
-        # Preserve existing status if set
-        local current
-        current=$(tmux show-option -qv -t wt-master @wt-status 2>/dev/null || echo "")
-        if [[ -z "$current" ]]; then
-            tmux set-option -qt wt-master @wt-status  "idle"
-            tmux set-option -qt wt-master @wt-message "Orchestrator"
+        if [[ -n "${opencode_config:-}" ]]; then
+            tmux set-environment -t "$name" OPENCODE_CONFIG "$opencode_config"
         fi
-    fi
+    done < <("$WT_STATE" list | jq -r '.[] | [.name,.status,.message,.repo,.branch,.wt_path,.pr,.agent,.opencode_config,(if .is_master then "1" else "0" end)] | @tsv')
 
     tmux refresh-client -S 2>/dev/null || true
 }
@@ -1239,6 +1184,10 @@ master() {
     tmux set-option -qt "$session" @wt-pr      ""
     tmux set-option -qt "$session" @wt-agent   "$agent"
 
+    # Persist master as a row (is_master=1 keeps it out of status-bar counts)
+    "$WT_STATE" set "$session" --is-master 1 --status idle --message Orchestrator \
+        --agent "$agent" --opencode-config "$opencode_config" >/dev/null
+
     switch_to "$session"
     notify "Master Session" "wt-master created ($label)"
 }
@@ -1277,18 +1226,9 @@ pr_lookup() {
         session_branch=$(tmux show-option -qv -t "$session" @wt-branch 2>/dev/null || echo "")
         if [[ "$session_branch" == "$target_branch" ]]; then
             echo "Found session: $session"
-            # Store PR link
+            # Store PR link (tmux for live display, store for persistence)
             tmux set-option -qt "$session" @wt-pr "$pr_number"
-            # Update status file too
-            local status_file="$WT_STATUS_DIR/${session}.status"
-            if [[ -f "$status_file" ]]; then
-                # Update pr= line in status file
-                if grep -q '^pr=' "$status_file"; then
-                    sed -i'' -e "s/^pr=.*/pr=$pr_number/" "$status_file"
-                else
-                    echo "pr=$pr_number" >> "$status_file"
-                fi
-            fi
+            "$WT_STATE" set "$session" --pr "$pr_number" >/dev/null 2>&1 || true
             switch_to "$session"
             return
         fi

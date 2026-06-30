@@ -7,3 +7,6 @@
 
 # Local MCP config
 .mcp.json
+
+# Compiled wt-state binary (built by install.sh)
+/bin/wt-state
