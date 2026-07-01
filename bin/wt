@@ -538,6 +538,7 @@ create_worktree() {
     local task="${4:-}"
     local base_branch="${5:-}"
     local agent="${6:-$WT_DEFAULT_AGENT}"
+    local switch_after="${7:-false}"  # only steal the client's focus when asked
 
     # Resolve to absolute path
     repo_path=$(cd "$repo_path" && pwd)
@@ -552,7 +553,7 @@ create_worktree() {
     # Check if worktree already exists on disk
     if [[ -d "$wt_path" ]] && tmux has-session -t "$session_name" 2>/dev/null; then
         echo "Worktree already exists at $wt_path"
-        switch_to "$session_name"
+        [[ "$switch_after" == "true" ]] && switch_to "$session_name"
         return
     fi
 
@@ -666,8 +667,14 @@ create_worktree() {
         fi
     fi
 
-    # Switch to the session
-    switch_to "$session_name"
+    # Switch to the session only when explicitly asked (e.g. `wt new --switch`
+    # or the "New + open" menu entry). By default we create in the background so
+    # spinning up several worktrees never yanks your current view.
+    if [[ "$switch_after" == "true" ]]; then
+        switch_to "$session_name"
+    else
+        echo "Created session '$session_name' (still here — 'wt pick' or prefix+W to open it)"
+    fi
 
     notify "Worktree Created" "$repo_name @ $branch"
 }
@@ -846,6 +853,7 @@ pick_branch() {
 interactive_new() {
     local repo_path="${1:-}"
     local branch="${2:-}"
+    local switch_after="${3:-false}"
 
     log "interactive_new start repo_path='$repo_path' branch='$branch'"
 
@@ -980,7 +988,7 @@ interactive_new() {
 
     echo ""
     echo "Creating worktree: $repo_name @ $branch (from origin/$default_branch) [$agent_display]"
-    create_worktree "$repo_path" "$branch" false "" "$default_branch" "$agent"
+    create_worktree "$repo_path" "$branch" false "" "$default_branch" "$agent" "$switch_after"
 }
 
 # -----------------------------------------------------------------------------
@@ -1327,7 +1335,8 @@ wt - Worktree Manager for Multi-Agent CLI Workflow
 Usage: wt <command> [options]
 
 Session Management:
-  new [repo] [branch]     Create new worktree (interactive if no args)
+  new [repo] [branch]     Create new worktree in the background (interactive if no args)
+  new ... --switch        Create and switch to it (default stays in current session)
   pick, p                 Interactive session picker (fzf, ?=preview)
   switch, s <session>     Switch to a session
   list, ls                List all sessions with status
@@ -1403,6 +1412,7 @@ main() {
                 # Inside tmux: show the action menu
                 tmux display-menu -T " Worktrees " -x C -y C \
                     "New worktree"       n "display-popup -E -w 80% -h 80% '$HOME/bin/wt new'" \
+                    "New + open"         N "display-popup -E -w 80% -h 80% '$HOME/bin/wt new --switch'" \
                     "Switch (pick)"      s "display-popup -E -w 100% -h 100% '$HOME/bin/wt pick'" \
                     "Delete..."          d "display-popup -E -w 60% -h 40% '$HOME/bin/wt delete-pick'" \
                     "" \
@@ -1432,6 +1442,7 @@ main() {
             local start_agent=false
             local task=""
             local agent="$WT_DEFAULT_AGENT"
+            local switch_after=false  # background by default; --switch to jump
 
             # Skip repo/branch args if they look like flags
             if [[ "$repo" == --* ]]; then
@@ -1449,15 +1460,16 @@ main() {
                     --start-agent|--start-claude) start_agent=true; shift ;;
                     --task) task="$2"; shift 2 ;;
                     --agent) agent="$2"; shift 2 ;;
+                    --switch) switch_after=true; shift ;;
                     *) shift ;;
                 esac
             done
 
             # Use interactive mode if repo or branch not provided
             if [[ -z "$repo" || -z "$branch" ]]; then
-                interactive_new "$repo" "$branch"
+                interactive_new "$repo" "$branch" "$switch_after"
             else
-                create_worktree "$repo" "$branch" "$start_agent" "$task" "" "$agent"
+                create_worktree "$repo" "$branch" "$start_agent" "$task" "" "$agent" "$switch_after"
             fi
             ;;
         pick|p)

@@ -231,6 +231,27 @@ test_create_worktree() {
     else
         fail "unexpected window names: $windows (expected main, shell)"
     fi
+
+    # --- Focus behavior: `wt new` creates in the BACKGROUND by default ---------
+    # (Regression guard: it used to switch-client and yank the current view.)
+    # The suite runs on a detached server (no attached client), so we assert on
+    # which code path ran — the stays-put notice — not on client movement.
+    if echo "$output" | grep -q "still here"; then
+        pass "default 'wt new' stays put (background create)"
+    else
+        fail "default 'wt new' took the switch path (should stay put)" "$output"
+    fi
+
+    # `wt new --switch` must take the switch path (no stays-put notice).
+    local switch_out
+    switch_out=$("$WT_BIN_DIR/wt" new "$TEST_REPO" switch-branch --switch 2>&1)
+    if echo "$switch_out" | grep -q "still here"; then
+        fail "'wt new --switch' stayed put (should switch)" "$switch_out"
+    else
+        pass "'wt new --switch' takes the switch path"
+    fi
+    tmux kill-session -t "test-wt-repo-switch-branch" 2>/dev/null || true
+    git -C "$TEST_REPO" worktree remove "$WT_BASE_DIR/test-wt-repo/switch-branch" --force 2>/dev/null || true
 }
 
 test_status_file() {
