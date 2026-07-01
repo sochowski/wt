@@ -35,11 +35,17 @@ WT_STATE="${WT_STATE:-$WT_BIN_DIR/wt-state}"
 WT_FZF_VIM="${WT_FZF_VIM:-0}"
 
 # Live nvim diff view. On by default: each worktree session's nvim boots into
-# diffview.nvim (branch vs base) and a watcher keeps it current. Disable with
+# a diff of the branch vs its base and a watcher keeps it current. Disable with
 # `export WT_DIFF_VIEW=0`. Sockets live under WT_STATUS_DIR so the test/staging
 # harnesses stay isolated.
 WT_DIFF_VIEW="${WT_DIFF_VIEW:-1}"
 WT_NVIM_SOCK_DIR="${WT_NVIM_SOCK_DIR:-$WT_STATUS_DIR/nvim-sockets}"
+
+# Which nvim diff plugin the live view uses: "unified" (unified.nvim, inline
+# unified diff) or "diffview" (diffview.nvim, side-by-side). Passed to
+# wt-diff.lua via the environment; it degrades to a plain editor if the chosen
+# plugin isn't installed.
+WT_DIFF_TOOL="${WT_DIFF_TOOL:-unified}"
 
 # How long (seconds) a cached PR state stays fresh before `wt ls`/`pick` refetch
 # it from `gh`. Warm calls within the TTL make zero network calls. Set to 0 to
@@ -93,9 +99,10 @@ launch_nvim() {
     base=$(diff_merge_base "$wt_path")
     lua="$WT_BIN_DIR/../config/wt-diff.lua"
 
-    # WT_DIFF_BASE is read by wt-diff.lua on VimEnter to open the diff.
-    cmd=$(printf 'WT_DIFF_BASE=%q nvim --listen %q -c %q' \
-                 "$base" "$sock" "luafile $lua")
+    # WT_DIFF_BASE / WT_DIFF_TOOL are read by wt-diff.lua on VimEnter to pick
+    # the plugin and open the diff.
+    cmd=$(printf 'WT_DIFF_BASE=%q WT_DIFF_TOOL=%q nvim --listen %q -c %q' \
+                 "$base" "$WT_DIFF_TOOL" "$sock" "luafile $lua")
     tmux send-keys -t "$session_name:main" "$cmd" Enter
 
     # Watcher: refreshes the view on file changes. Only meaningful when there's
@@ -1820,6 +1827,7 @@ Environment:
                      built-in defaults (~/gt:~/code:~/projects:~/src:~/dev:
                      ~/work:~/workspace:~/repos). Each dir is listed if it is
                      itself a repo, and its immediate children are scanned.
+  WT_DIFF_TOOL       Live diff plugin: unified | diffview (default: unified)
   WT_PR_TTL          Seconds a cached PR badge stays fresh (default: 900)
 EOF
 }
