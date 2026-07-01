@@ -27,12 +27,17 @@ WT_STATE="${WT_STATE:-$WT_BIN_DIR/wt-state}"
 # with `export WT_FZF_VIM=1`.
 WT_FZF_VIM="${WT_FZF_VIM:-0}"
 
-# Live nvim diff view. On by default: each worktree session's nvim boots into
-# diffview.nvim (branch vs base) and a watcher keeps it current. Disable with
-# `export WT_DIFF_VIEW=0`. Sockets live under WT_STATUS_DIR so the test/staging
-# harnesses stay isolated.
+# Live diff view. On by default: each worktree session opens a diff of the
+# branch (vs its base) in pane 0 and a watcher keeps it current as files change.
+# Disable with `export WT_DIFF_VIEW=0`.
+#   WT_DIFF_RENDERER=fzf  (default) single pane: file list + unified diff of the
+#                         selected file (delta if installed, else git's color).
+#   WT_DIFF_RENDERER=nvim boots nvim into diffview.nvim (side-by-side).
+# State (fzf port files / nvim sockets) lives under WT_STATUS_DIR so the
+# test/staging harnesses stay isolated.
 WT_DIFF_VIEW="${WT_DIFF_VIEW:-1}"
-WT_NVIM_SOCK_DIR="${WT_NVIM_SOCK_DIR:-$WT_STATUS_DIR/nvim-sockets}"
+WT_DIFF_RENDERER="${WT_DIFF_RENDERER:-fzf}"
+WT_DIFF_DIR="${WT_DIFF_DIR:-$WT_STATUS_DIR/diff-view}"
 
 # How long (seconds) a cached PR state stays fresh before `wt ls`/`pick` refetch
 # it from `gh`. Warm calls within the TTL make zero network calls. Set to 0 to
@@ -64,48 +69,70 @@ diff_merge_base() {
     git -C "$wt_path" merge-base HEAD "$base_ref" 2>/dev/null || echo HEAD
 }
 
-# Path to a session's nvim RPC listen socket.
-nvim_socket_path() { printf '%s/%s.sock' "$WT_NVIM_SOCK_DIR" "$1"; }
+# Path to a session's diff-view state file (ext: "port" for fzf, "sock" for nvim).
+diff_state_path() { printf '%s/%s.%s' "$WT_DIFF_DIR" "$1" "$2"; }
 
-# Launch nvim in pane 0 of the session's main window. With the diff view enabled
-# (WT_DIFF_VIEW=1) and nvim present, nvim listens on a per-session socket, boots
-# into diffview.nvim against the branch base, and a file watcher keeps it live.
-# Falls back to a plain `nvim` otherwise.
-launch_nvim() {
+# Open the live diff view in pane 0 of the session's main window and start the
+# watcher that keeps it current. Renderer per WT_DIFF_RENDERER:
+#   fzf  — wt-diff-view: file list + unified diff in one pane (default).
+#   nvim — nvim booted into diffview.nvim (side-by-side).
+# Falls back to a plain `nvim` when the diff view is off or its tooling is
+# missing. The watcher pid is stashed in @wt-diff-pid for cleanup on delete.
+launch_diff_view() {
     local session_name="$1" wt_path="$2"
 
-    if [[ "$WT_DIFF_VIEW" != "1" ]] || ! command -v nvim >/dev/null 2>&1; then
+    if [[ "$WT_DIFF_VIEW" != "1" ]]; then
         tmux send-keys -t "$session_name:main" "nvim" Enter
         return
     fi
 
-    local sock base lua cmd
-    sock=$(nvim_socket_path "$session_name")
-    mkdir -p "$WT_NVIM_SOCK_DIR"
-    rm -f "$sock"
+    local base
     base=$(diff_merge_base "$wt_path")
-    lua="$WT_BIN_DIR/../config/wt-diff.lua"
+    mkdir -p "$WT_DIFF_DIR"
 
-    # WT_DIFF_BASE is read by wt-diff.lua on VimEnter to open the diff.
-    cmd=$(printf 'WT_DIFF_BASE=%q nvim --listen %q -c %q' \
-                 "$base" "$sock" "luafile $lua")
-    tmux send-keys -t "$session_name:main" "$cmd" Enter
-
-    # Watcher: refreshes the view on file changes. Only meaningful when there's
-    # a diffable worktree; it self-exits when the socket disappears.
-    if [[ -n "$base" ]]; then
-        nohup "$WT_BIN_DIR/wt-diff-watch" "$sock" "$wt_path" >/dev/null 2>&1 &
+    # Default renderer: single-pane fzf file-list + unified diff.
+    if [[ "$WT_DIFF_RENDERER" == "fzf" ]] && command -v fzf >/dev/null 2>&1 \
+           && [[ -n "$base" ]]; then
+        local portfile cmd
+        portfile=$(diff_state_path "$session_name" port)
+        rm -f "$portfile"
+        cmd=$(printf '%q %q %q %q' \
+                     "$WT_BIN_DIR/wt-diff-view" "$wt_path" "$base" "$portfile")
+        tmux send-keys -t "$session_name:main" "$cmd" Enter
+        nohup "$WT_BIN_DIR/wt-diff-watch" "$wt_path" "$portfile" "$base" \
+              >/dev/null 2>&1 &
         tmux set-option -qt "$session_name" @wt-diff-pid "$!"
+        return
+    fi
+
+    # nvim/diffview renderer (or fzf unavailable): boot nvim into diffview.nvim.
+    if command -v nvim >/dev/null 2>&1; then
+        local sock lua cmd
+        sock=$(diff_state_path "$session_name" sock)
+        rm -f "$sock"
+        lua="$WT_BIN_DIR/../config/wt-diff.lua"
+        # WT_DIFF_BASE is read by wt-diff.lua on VimEnter to open the diff.
+        cmd=$(printf 'WT_DIFF_BASE=%q nvim --listen %q -c %q' \
+                     "$base" "$sock" "luafile $lua")
+        tmux send-keys -t "$session_name:main" "$cmd" Enter
+        if [[ -n "$base" ]]; then
+            nohup "$WT_BIN_DIR/wt-diff-watch" "$wt_path" "$sock" "$base" \
+                  >/dev/null 2>&1 &
+            tmux set-option -qt "$session_name" @wt-diff-pid "$!"
+        fi
+    else
+        tmux send-keys -t "$session_name:main" "nvim" Enter
     fi
 }
 
-# Stop a session's diff-view watcher and remove its socket. Read @wt-diff-pid
-# before killing the tmux session, since the option vanishes with it.
+# Stop a session's diff-view watcher and remove its state files. Read
+# @wt-diff-pid before killing the tmux session, since the option vanishes with it.
 stop_diff_view() {
     local session_name="$1" diff_pid
     diff_pid=$(tmux show-option -qv -t "$session_name" @wt-diff-pid 2>/dev/null || true)
     [[ -n "$diff_pid" ]] && kill "$diff_pid" 2>/dev/null || true
-    rm -f "$(nvim_socket_path "$session_name")"
+    rm -f "$(diff_state_path "$session_name" port)" \
+          "$(diff_state_path "$session_name" sock)"
 }
 
 # -----------------------------------------------------------------------------
@@ -870,8 +897,8 @@ create_worktree() {
         # Create session with main window (nvim left, agent right)
         tmux new-session -d -s "$session_name" -c "$wt_path" -n main
 
-        # Start nvim in the left pane (boots into the live diff view)
-        launch_nvim "$session_name" "$wt_path"
+        # Open the live diff view in the left pane
+        launch_diff_view "$session_name" "$wt_path"
 
         # Split right for agent pane
         tmux split-window -h -t "$session_name:main" -c "$wt_path"
@@ -1323,7 +1350,7 @@ revive_worktree_session() {
     fi
 
     tmux new-session -d -s "$session_name" -c "$wt_path" -n main
-    launch_nvim "$session_name" "$wt_path"
+    launch_diff_view "$session_name" "$wt_path"
     tmux split-window -h -t "$session_name:main" -c "$wt_path"
     tmux new-window -t "$session_name" -n shell -c "$wt_path"
     tmux select-window -t "$session_name:main"

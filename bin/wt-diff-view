@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# =============================================================================
+#  wt-diff-view — single-pane diff browser for a wt worktree.
+#
+#  Usage: wt-diff-view <worktree-path> <base-rev> [port-file]
+#
+#  Left column: files changed vs <base-rev>. Right: the selected file's unified
+#  diff, rendered with delta if installed, else git's own color. Enter opens the
+#  file in nvim to edit; ctrl-r reloads the list.
+#
+#  When <port-file> is given, fzf runs an HTTP listener on a free port and writes
+#  that port to the file, so wt-diff-watch can POST reload/refresh-preview
+#  actions to keep the view live as files change.
+# =============================================================================
+set -euo pipefail
+
+wt="${1:?worktree path required}"
+base="${2:?base rev required}"
+portfile="${3:-}"
+
+command -v fzf >/dev/null 2>&1 || { echo "wt-diff-view: fzf is required" >&2; exit 1; }
+
+# Exported so fzf's child shells (preview / reload / execute) inherit them.
+export WT_DV_WT="$wt" WT_DV_BASE="$base"
+
+# One line per changed file: "<status>\t<path>". {2} is the path in fzf.
+list_cmd='git -C "$WT_DV_WT" diff --name-status "$WT_DV_BASE"'
+
+if command -v delta >/dev/null 2>&1; then
+    preview_cmd='git -C "$WT_DV_WT" diff "$WT_DV_BASE" -- {2} | delta --paging=never --width ${FZF_PREVIEW_COLUMNS:-120}'
+else
+    preview_cmd='git -C "$WT_DV_WT" -c color.ui=always diff "$WT_DV_BASE" -- {2}'
+fi
+
+args=(
+    --ansi
+    --delimiter=$'\t'
+    --with-nth=1,2
+    --preview="$preview_cmd"
+    --preview-window='right,68%,border-left'
+    --header='changes vs base   [enter] edit in nvim   [ctrl-r] reload'
+    --bind="ctrl-r:reload($list_cmd)"
+    --bind='enter:execute(nvim "$WT_DV_WT"/{2})'
+)
+
+# Live mode: listen on a free port and publish it so the watcher can reach us.
+if [[ -n "$portfile" ]]; then
+    mkdir -p "$(dirname "$portfile")"
+    rm -f "$portfile"
+    trap 'rm -f "$portfile"' EXIT
+    args+=(--listen=0 --bind="start:execute-silent(echo \$FZF_PORT > $portfile)")
+fi
+
+eval "$list_cmd" | fzf "${args[@]}"

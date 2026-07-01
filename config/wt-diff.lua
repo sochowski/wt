@@ -24,6 +24,9 @@ function M.open(base)
   if not has_diffview() then return end
   base = base or vim.env.WT_DIFF_BASE
   if not base or base == '' then return end
+  -- Show every line, not just changed hunks: a huge fold context means diff-mode
+  -- folds effectively never close, so no `...`-collapsed unchanged regions.
+  pcall(function() vim.opt.diffopt:append('context:999999') end)
   pcall(vim.cmd, 'DiffviewOpen ' .. base)
 end
 

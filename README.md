@@ -14,7 +14,7 @@ Supports **Claude**, **Codex**, **Gemini**, and **opencode** — any session can
 - Action menu via `display-menu` for quick session management
 - fzf picker with status info and agent conversation preview
 - Auto-connects Claude to Neovim via claudecode.nvim (`--ide`)
-- Live diff view: nvim boots into diffview.nvim (branch vs base) and auto-refreshes as files change (`WT_DIFF_VIEW`)
+- Live diff view: pane 0 shows the branch diff (vs its base) — a single-pane file list + unified diff (delta if installed) that auto-refreshes as files change; `WT_DIFF_RENDERER=nvim` switches to side-by-side diffview.nvim (`WT_DIFF_VIEW`)
 - Status tracking via dual-write (files + tmux session options)
 - PR lookup: find sessions by GitHub PR number
 - Master orchestrator session with its own MCP profile
@@ -40,7 +40,7 @@ The installer will:
 
 Requires: git, tmux, fzf, jq, and at least one agent CLI ([Claude Code](https://github.com/anthropics/claude-code), [Codex](https://github.com/openai/codex), [Gemini CLI](https://github.com/google/gemini-cli), or [opencode](https://opencode.ai/))
 
-Optional: [gh](https://cli.github.com/) (for PR lookup), [claudecode.nvim](https://github.com/anthropics/claudecode.nvim) (for Claude IDE integration), [diffview.nvim](https://github.com/sindrets/diffview.nvim) + a file watcher ([watchexec](https://github.com/watchexec/watchexec), [entr](https://eradman.com/entrproject/), or `inotifywait`) for the live diff view
+Optional: [gh](https://cli.github.com/) (for PR lookup), [claudecode.nvim](https://github.com/anthropics/claudecode.nvim) (for Claude IDE integration). For the live diff view: a file watcher ([watchexec](https://github.com/watchexec/watchexec), [entr](https://eradman.com/entrproject/), or `inotifywait`) for auto-refresh, plus [delta](https://github.com/dandavison/delta) for nicer diff rendering (falls back to git's own color); or [diffview.nvim](https://github.com/sindrets/diffview.nvim) if you set `WT_DIFF_RENDERER=nvim`
 
 ## Usage
 
@@ -248,8 +248,9 @@ Status bar → wt-tmux-status aggregates counts from .status files
 | `WT_BASE_DIR` | `~/worktrees` | Base directory for worktrees |
 | `WT_STATUS_DIR` | `~/.local/state/wt` | Status file directory |
 | `WT_DEFAULT_AGENT` | `opencode` | Default agent CLI (opencode, claude, codex, gemini) |
-| `WT_DIFF_VIEW` | `1` | Boot session nvim into the live diffview.nvim diff; set `0` to disable |
-| `WT_NVIM_SOCK_DIR` | `$WT_STATUS_DIR/nvim-sockets` | Where per-session nvim RPC sockets live |
+| `WT_DIFF_VIEW` | `1` | Open the live diff view in pane 0; set `0` to disable |
+| `WT_DIFF_RENDERER` | `fzf` | `fzf` = single-pane file list + unified diff (delta); `nvim` = side-by-side diffview.nvim |
+| `WT_DIFF_DIR` | `$WT_STATUS_DIR/diff-view` | Where per-session diff-view state (fzf ports / nvim sockets) lives |
 
 ## License
 
