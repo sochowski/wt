@@ -25,6 +25,12 @@ type Session struct {
 	IsMaster        bool   `json:"is_master"`
 	UpdatedAt       int64  `json:"updated_at"`
 	StatusChangedAt int64  `json:"status_changed_at"`
+	// PRState caches the GitHub PR state for this session's branch
+	// (merged/open/closed/draft/none/""), refreshed by `wt` on a TTL so the
+	// list surfaces don't hit `gh` on every render. PRStateCheckedAt is the
+	// unix time of the last refresh; it auto-stamps whenever pr_state is set.
+	PRState          string `json:"pr_state"`
+	PRStateCheckedAt int64  `json:"pr_state_checked_at"`
 }
 
 // column names that `set` and `get --field` accept, in a stable order.
@@ -32,6 +38,7 @@ var columns = []string{
 	"status", "message", "repo", "branch", "wt_path",
 	"pr", "agent", "opencode_config", "is_master",
 	"updated_at", "status_changed_at",
+	"pr_state", "pr_state_checked_at",
 }
 
 type Store struct {
@@ -70,7 +77,7 @@ func Open(path string) (*Store, error) {
 func (s *Store) Close() error { return s.db.Close() }
 
 func (s *Store) init() error {
-	_, err := s.db.Exec(`
+	if _, err := s.db.Exec(`
 CREATE TABLE IF NOT EXISTS sessions (
   name              TEXT PRIMARY KEY,
   status            TEXT    NOT NULL DEFAULT 'unknown',
@@ -83,19 +90,37 @@ CREATE TABLE IF NOT EXISTS sessions (
   opencode_config   TEXT    NOT NULL DEFAULT '',
   is_master         INTEGER NOT NULL DEFAULT 0,
   updated_at        INTEGER NOT NULL DEFAULT 0,
-  status_changed_at INTEGER NOT NULL DEFAULT 0
-);`)
-	return err
+  status_changed_at INTEGER NOT NULL DEFAULT 0,
+  pr_state            TEXT    NOT NULL DEFAULT '',
+  pr_state_checked_at INTEGER NOT NULL DEFAULT 0
+);`); err != nil {
+		return err
+	}
+
+	// Columns added after the initial schema: CREATE TABLE IF NOT EXISTS won't
+	// alter an existing DB, and SQLite has no "ADD COLUMN IF NOT EXISTS", so
+	// run each ALTER and ignore only the duplicate-column error.
+	for _, stmt := range []string{
+		`ALTER TABLE sessions ADD COLUMN pr_state TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE sessions ADD COLUMN pr_state_checked_at INTEGER NOT NULL DEFAULT 0`,
+	} {
+		if _, err := s.db.Exec(stmt); err != nil &&
+			!strings.Contains(err.Error(), "duplicate column name") {
+			return err
+		}
+	}
+	return nil
 }
 
 const selectCols = `name, status, message, repo, branch, wt_path, pr, agent,
-	opencode_config, is_master, updated_at, status_changed_at`
+	opencode_config, is_master, updated_at, status_changed_at,
+	pr_state, pr_state_checked_at`
 
 func scanSession(row interface{ Scan(...any) error }) (Session, error) {
 	var s Session
 	err := row.Scan(&s.Name, &s.Status, &s.Message, &s.Repo, &s.Branch,
 		&s.WtPath, &s.PR, &s.Agent, &s.OpencodeConfig, &s.IsMaster,
-		&s.UpdatedAt, &s.StatusChangedAt)
+		&s.UpdatedAt, &s.StatusChangedAt, &s.PRState, &s.PRStateCheckedAt)
 	return s, err
 }
 
@@ -157,6 +182,12 @@ func (s *Store) Set(name string, fields map[string]string) (Session, error) {
 			cur.OpencodeConfig = v
 		case "is_master":
 			cur.IsMaster = v == "1" || strings.EqualFold(v, "true")
+		case "pr_state":
+			// pr_state_checked_at auto-stamps on every write, even when the
+			// state is unchanged, so a TTL refresh that re-confirms the same
+			// value still pushes the next check out.
+			cur.PRState = v
+			cur.PRStateCheckedAt = now
 		default:
 			return Session{}, fmt.Errorf("unknown field %q", k)
 		}
@@ -170,17 +201,19 @@ func (s *Store) Set(name string, fields map[string]string) (Session, error) {
 
 	_, err = tx.Exec(`
 INSERT INTO sessions (name, status, message, repo, branch, wt_path, pr, agent,
-	opencode_config, is_master, updated_at, status_changed_at)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+	opencode_config, is_master, updated_at, status_changed_at,
+	pr_state, pr_state_checked_at)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(name) DO UPDATE SET
 	status=excluded.status, message=excluded.message, repo=excluded.repo,
 	branch=excluded.branch, wt_path=excluded.wt_path, pr=excluded.pr,
 	agent=excluded.agent, opencode_config=excluded.opencode_config,
 	is_master=excluded.is_master, updated_at=excluded.updated_at,
-	status_changed_at=excluded.status_changed_at`,
+	status_changed_at=excluded.status_changed_at,
+	pr_state=excluded.pr_state, pr_state_checked_at=excluded.pr_state_checked_at`,
 		cur.Name, cur.Status, cur.Message, cur.Repo, cur.Branch, cur.WtPath,
 		cur.PR, cur.Agent, cur.OpencodeConfig, b2i(cur.IsMaster),
-		cur.UpdatedAt, cur.StatusChangedAt)
+		cur.UpdatedAt, cur.StatusChangedAt, cur.PRState, cur.PRStateCheckedAt)
 	if err != nil {
 		return Session{}, err
 	}

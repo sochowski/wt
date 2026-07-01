@@ -74,6 +74,31 @@ func TestStatusChangedAtOnlyOnChange(t *testing.T) {
 	}
 }
 
+func TestPRStateStampsCheckedAt(t *testing.T) {
+	st, clock := newStore(t)
+
+	// Setting pr_state stamps pr_state_checked_at to now.
+	*clock = 500
+	got, _ := st.Set("s", map[string]string{"pr_state": "open"})
+	if got.PRState != "open" || got.PRStateCheckedAt != 500 {
+		t.Fatalf("pr_state=%q checked_at=%d, want open/500", got.PRState, got.PRStateCheckedAt)
+	}
+
+	// Re-confirming the same state still advances checked_at (pushes TTL out).
+	*clock = 900
+	same, _ := st.Set("s", map[string]string{"pr_state": "open"})
+	if same.PRStateCheckedAt != 900 {
+		t.Errorf("checked_at = %d, want 900 on re-confirm", same.PRStateCheckedAt)
+	}
+
+	// An unrelated update must not touch pr_state or its timestamp.
+	*clock = 1000
+	other, _ := st.Set("s", map[string]string{"status": "idle"})
+	if other.PRState != "open" || other.PRStateCheckedAt != 900 {
+		t.Errorf("pr_state fields not preserved: %q %d", other.PRState, other.PRStateCheckedAt)
+	}
+}
+
 func TestCountsExcludesMaster(t *testing.T) {
 	st, _ := newStore(t)
 	st.Set("a", map[string]string{"status": "working"})

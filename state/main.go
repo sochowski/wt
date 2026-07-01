@@ -73,7 +73,7 @@ func cmdSet(st *Store, args []string) {
 	fs := flag.NewFlagSet("set", flag.ExitOnError)
 	vals := map[string]*string{}
 	for _, c := range columns {
-		if c == "updated_at" || c == "status_changed_at" {
+		if c == "updated_at" || c == "status_changed_at" || c == "pr_state_checked_at" {
 			continue // managed automatically, not settable
 		}
 		vals[c] = fs.String(flagName(c), "", "set "+c)
@@ -214,6 +214,10 @@ func fieldValue(s Session, col string) string {
 		return fmt.Sprintf("%d", s.UpdatedAt)
 	case "status_changed_at":
 		return fmt.Sprintf("%d", s.StatusChangedAt)
+	case "pr_state":
+		return s.PRState
+	case "pr_state_checked_at":
+		return fmt.Sprintf("%d", s.PRStateCheckedAt)
 	default:
 		fatalf("get: unknown field %q", col)
 		return ""
@@ -250,6 +254,7 @@ usage:
   wt-state set <name> [--status S] [--message M] [--repo R] [--branch B]
                       [--wt-path P] [--pr N] [--agent A]
                       [--opencode-config C] [--is-master 0|1]
+                      [--pr-state merged|open|closed|draft|none]
   wt-state get <name> [--field COL | --json]
   wt-state list [--master | --no-master] [--sort recency|name] [--json]
   wt-state counts [--json]
