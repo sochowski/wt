@@ -34,6 +34,11 @@ WT_FZF_VIM="${WT_FZF_VIM:-0}"
 WT_DIFF_VIEW="${WT_DIFF_VIEW:-1}"
 WT_NVIM_SOCK_DIR="${WT_NVIM_SOCK_DIR:-$WT_STATUS_DIR/nvim-sockets}"
 
+# How long (seconds) a cached PR state stays fresh before `wt ls`/`pick` refetch
+# it from `gh`. Warm calls within the TTL make zero network calls. Set to 0 to
+# always refetch, or a large value to effectively pin the cache.
+WT_PR_TTL="${WT_PR_TTL:-900}"
+
 # Ensure directories exist
 mkdir -p "$WT_BASE_DIR" "$WT_STATUS_DIR" "$WT_CONFIG_DIR"
 
@@ -500,7 +505,7 @@ derive_status_metadata() {
 load_session() {
     local name="$1" json
     json=$("$WT_STATE" get "$name" --json 2>/dev/null) || return 1
-    eval "$(jq -r '{status,message,repo,branch,wt_path,pr,agent,opencode_config}
+    eval "$(jq -r '{status,message,repo,branch,wt_path,pr,agent,opencode_config,pr_state,pr_state_checked_at}
                    | to_entries[] | "\(.key)=\(.value|@sh)"' <<<"$json")"
 }
 
@@ -525,6 +530,7 @@ set_status() {
 
     # Preserve existing metadata fields if the session already has a row
     local pr="" repo="" branch="" wt_path="" agent="" opencode_config=""
+    local pr_state="" pr_state_checked_at=""  # populated by load_session; not re-saved here
     load_session "$session_name" || true
     status="$new_status"
     message="$new_message"
@@ -579,6 +585,89 @@ get_status_icon_ansi() {
 }
 
 # -----------------------------------------------------------------------------
+#  PR State (GitHub, gh-only, cached in the store)
+# -----------------------------------------------------------------------------
+# Resolve the GitHub PR state for a branch. Echoes one of
+# merged|open|closed|draft|none, or nothing when gh is unavailable/offline or
+# the path isn't a GitHub repo — callers treat empty as "don't know yet, retry
+# on the next TTL" and never cache it. Reusable primitive: a future `wt sweep`
+# calls this to find worktrees whose PR has merged.
+pr_state_lookup() {
+    local branch="$1" wt_path="$2"
+    [[ -n "$branch" && -n "$wt_path" && -d "$wt_path" ]] || return 0
+    command -v gh &>/dev/null || return 0
+
+    # --state all so a merged/closed PR still resolves. `gh pr list` prints a
+    # JSON array and exits 0 even when empty, which lets us tell "no PR for this
+    # branch" (empty array) apart from a gh/network error (non-zero exit).
+    local json
+    json=$(cd "$wt_path" && gh pr list --head "$branch" --state all \
+             --json state,isDraft --limit 1 2>/dev/null) || return 0
+    [[ -n "$json" ]] || return 0
+
+    local state draft
+    state=$(jq -r '.[0].state // "none"' <<<"$json" 2>/dev/null) || return 0
+    draft=$(jq -r '.[0].isDraft // false' <<<"$json" 2>/dev/null)
+    case "$state" in
+        MERGED) echo "merged" ;;
+        CLOSED) echo "closed" ;;
+        OPEN)   [[ "$draft" == "true" ]] && echo "draft" || echo "open" ;;
+        none)   echo "none" ;;
+    esac
+}
+
+# Colored one-glyph badge for a PR state, for the ls/pick surfaces. Empty string
+# for none/unknown so worktrees without a PR stay visually quiet.
+pr_badge() {
+    case "$1" in
+        merged) echo -e "\033[35m⬤\033[0m" ;;  # magenta — merged
+        open)   echo -e "\033[32m◆\033[0m" ;;  # green — open
+        draft)  echo -e "\033[90m◇\033[0m" ;;  # gray — draft
+        closed) echo -e "\033[31m⊘\033[0m" ;;  # red — closed, not merged
+        *)       echo "" ;;
+    esac
+}
+
+# True (stale) when a cached PR state is missing, malformed, or older than the
+# TTL and should be refetched from gh.
+is_pr_stale() {
+    local checked="${1:-0}"
+    [[ "$checked" =~ ^[0-9]+$ ]] || return 0
+    (( checked == 0 )) && return 0
+    local now
+    now=$(date +%s)
+    (( now - checked >= WT_PR_TTL ))
+}
+
+# Refresh cached PR states for the given "session<TAB>branch<TAB>wt_path" lines,
+# persisting each to the store. Runs detached and in parallel so the caller
+# (wt ls / pick) never blocks on the network; refreshed badges surface on the
+# next render. stdin/stdout/stderr are redirected so a backgrounded refresh can't
+# hold open a pipe the caller is reading from (e.g. `list_worktrees full | fzf`).
+refresh_pr_states() {
+    local lines="$1"
+    [[ -n "$lines" ]] || return 0
+    command -v gh &>/dev/null || return 0
+
+    {
+        local TAB session branch wt_path n=0
+        TAB=$(printf '\t')
+        while IFS="$TAB" read -r session branch wt_path; do
+            [[ -n "$session" && -n "$wt_path" ]] || continue
+            (
+                local state
+                state=$(pr_state_lookup "$branch" "$wt_path")
+                [[ -n "$state" ]] && "$WT_STATE" set "$session" --pr-state "$state" >/dev/null 2>&1
+            ) &
+            # Cap concurrency so a large worktree list can't fork a gh storm.
+            (( ++n % 8 == 0 )) && wait
+        done <<<"$lines"
+        wait
+    } </dev/null >/dev/null 2>&1 &
+    disown 2>/dev/null || true
+}
+
+# -----------------------------------------------------------------------------
 #  Worktree Operations
 # -----------------------------------------------------------------------------
 # Get the bare repo path for a given repo
@@ -601,12 +690,16 @@ get_bare_repo() {
 # Render a single worktree row in the requested format (no trailing newline;
 # rows are collected into an array, sorted by recency, then printed).
 render_worktree_row() {
-    local format="$1" session_name="$2" wt_path="$3" status="$4" repo="$5" branch="$6"
+    local format="$1" session_name="$2" wt_path="$3" status="$4" repo="$5" branch="$6" pr_state="${7:-}"
     case "$format" in
         full)
-            local icon
+            local icon badge
             icon=$(get_status_icon_ansi "${status:-unknown}")
-            printf "%s %-20s %-25s %s" "$icon" "${repo:-?}" "${branch:-?}" "${wt_path:-?}"
+            # One-char PR cell; a space keeps the wt_path column aligned across
+            # rows even though the colored glyph and space differ in byte width.
+            badge=$(pr_badge "$pr_state")
+            [[ -n "$badge" ]] || badge=" "
+            printf "%s %-20s %-25s %s %s" "$icon" "${repo:-?}" "${branch:-?}" "$badge" "${wt_path:-?}"
             ;;
         simple)  printf "%s:%s:%s" "$session_name" "${wt_path:-?}" "${status:-unknown}" ;;
         session) printf "%s" "$session_name" ;;
@@ -622,19 +715,21 @@ list_worktrees() {
     local format="${1:-full}"
     local seen_sessions=""
     local -a rows=()
+    local stale_lines=""   # "session<TAB>branch<TAB>wt_path" per worktree needing a PR refresh
     local TAB
     TAB=$(printf '\t')
 
-    # Fetch store metadata once. TSV columns: name status repo branch wt_path updated_at
+    # Fetch store metadata once. TSV columns:
+    #   name status repo branch wt_path updated_at pr_state pr_state_checked_at
     local store_data
     store_data=$("$WT_STATE" list --no-master 2>/dev/null \
-        | jq -r '.[] | [.name,.status,.repo,.branch,.wt_path,.updated_at] | @tsv' || true)
+        | jq -r '.[] | [.name,.status,.repo,.branch,.wt_path,.updated_at,.pr_state,.pr_state_checked_at] | @tsv' || true)
 
     # Phase A: worktrees on disk under WT_BASE_DIR (authoritative for existence).
     if [[ -d "$WT_BASE_DIR" ]]; then
         while IFS= read -r -d '' wt_path; do
             [[ -d "$wt_path/.git" || -f "$wt_path/.git" ]] || continue
-            local branch repo_name session_name srow status key
+            local branch repo_name session_name srow status key pr_state pr_checked
             branch=$(git -C "$wt_path" branch --show-current 2>/dev/null || echo "detached")
             repo_name=$(basename "$(dirname "$wt_path")")
             session_name="${repo_name}-${branch//\//-}"
@@ -642,26 +737,40 @@ list_worktrees() {
             # Exact field match (awk, not grep) so repo/branch names with regex
             # metacharacters like '.' or '+' can't false-match.
             srow=$(awk -F"$TAB" -v n="$session_name" '$1==n{print; exit}' <<<"$store_data")
+            pr_state=""
+            pr_checked=0
             if [[ -n "$srow" ]]; then
                 status=$(cut -f2 <<<"$srow")
                 key=$(cut -f6 <<<"$srow")
+                pr_state=$(cut -f7 <<<"$srow")
+                pr_checked=$(cut -f8 <<<"$srow")
             else
                 status="unknown"
                 key=$(stat -c %Y "$wt_path" 2>/dev/null || stat -f %m "$wt_path" 2>/dev/null || echo 0)
             fi
-            rows+=("${key:-0}${TAB}$(render_worktree_row "$format" "$session_name" "$wt_path" "$status" "$repo_name" "$branch")")
+            if [[ "$format" == full ]] && is_pr_stale "$pr_checked"; then
+                stale_lines+="${session_name}${TAB}${branch}${TAB}${wt_path}"$'\n'
+            fi
+            rows+=("${key:-0}${TAB}$(render_worktree_row "$format" "$session_name" "$wt_path" "$status" "$repo_name" "$branch" "$pr_state")")
         done < <(find "$WT_BASE_DIR" -maxdepth 2 -type d -print0 2>/dev/null)
     fi
 
     # Phase B: store sessions not found on disk (adopted/primary worktrees),
     # included only when a live tmux session exists.
-    local name status repo branch wt_path updated_at
-    while IFS="$TAB" read -r name status repo branch wt_path updated_at; do
+    local name status repo branch wt_path updated_at pr_state pr_checked
+    while IFS="$TAB" read -r name status repo branch wt_path updated_at pr_state pr_checked; do
         [[ -n "$name" ]] || continue
         [[ "$seen_sessions" == *":${name}:"* ]] && continue
         tmux has-session -t "$name" 2>/dev/null || continue
-        rows+=("${updated_at:-0}${TAB}$(render_worktree_row "$format" "$name" "${wt_path:-?}" "${status:-unknown}" "${repo:-?}" "${branch:-?}")")
+        if [[ "$format" == full && -n "$wt_path" ]] && is_pr_stale "$pr_checked"; then
+            stale_lines+="${name}${TAB}${branch}${TAB}${wt_path}"$'\n'
+        fi
+        rows+=("${updated_at:-0}${TAB}$(render_worktree_row "$format" "$name" "${wt_path:-?}" "${status:-unknown}" "${repo:-?}" "${branch:-?}" "$pr_state")")
     done <<<"$store_data"
+
+    # Kick off a detached, parallel refresh of any stale PR states so badges are
+    # warm on the next render; this never blocks the listing below.
+    [[ "$format" == full ]] && refresh_pr_states "$stale_lines"
 
     # Emit most-recently-active first, then strip the leading recency key.
     [[ ${#rows[@]} -gt 0 ]] || return 0
@@ -1257,6 +1366,7 @@ preview_pane() {
 
     # Best-effort metadata from the store; locals stay empty if it's not there.
     local status="" message="" repo="" branch="" pr="" agent="" opencode_config=""
+    local pr_state="" pr_state_checked_at=""
     load_session "$session" 2>/dev/null || true
     if [[ -z "$branch" && -n "$wt_path" ]]; then
         branch=$(git -C "$wt_path" branch --show-current 2>/dev/null || echo detached)
@@ -1289,6 +1399,20 @@ preview_pane() {
         untracked=$(git -C "$wt_path" ls-files --others --exclude-standard 2>/dev/null)
     fi
 
+    # Show the cached PR state; if it's missing or stale, do one synchronous gh
+    # lookup for the selected worktree (cheap — one call per selection) and write
+    # it back so the ls badge and later previews are warm.
+    local pr_disp="$pr_state"
+    if [[ -n "$branch" && -n "$wt_path" && -e "$wt_path/.git" ]] \
+       && { [[ -z "$pr_disp" ]] || is_pr_stale "$pr_state_checked_at"; }; then
+        local fresh
+        fresh=$(pr_state_lookup "$branch" "$wt_path")
+        if [[ -n "$fresh" ]]; then
+            pr_disp="$fresh"
+            "$WT_STATE" set "$session" --pr-state "$fresh" >/dev/null 2>&1 || true
+        fi
+    fi
+
     # Footer: bold rule + session header + diffstat. Built into a buffer so we
     # can measure its height and give the agent capture whatever rows remain.
     local agent_lbl footer
@@ -1302,6 +1426,9 @@ preview_pane() {
         h="${icon} ${bold}${branch:-?}${reset}"
         [[ -n "$base_label" ]] && h+="${dim} vs ${base_label}${reset}"
         [[ -n "$pr" ]] && h+=" · PR#${pr}"
+        case "$pr_disp" in
+            merged|open|draft|closed) h+=" · $(pr_badge "$pr_disp") ${pr_disp}" ;;
+        esac
         [[ -n "$status" ]] && h+=" · ${status}"
         h+="${dim} · ${agent_lbl}${reset}"
         printf '%s\n' "$h"
@@ -1662,6 +1789,8 @@ Master Session:
 PR Integration:
   pr <number>             Find session by PR number and switch to it
   pr-pick                 Interactive PR picker (fzf + gh)
+  (list/pick show a PR badge per worktree: ⬤ merged, ◆ open, ◇ draft,
+   ⊘ closed. Resolved via gh by branch and cached; needs gh installed.)
 
 Agent Control:
   agent <session> [task]  Start agent on a task in a session
@@ -1709,6 +1838,7 @@ Environment:
   WT_BASE_DIR        Base directory for worktrees (default: ~/worktrees)
   WT_STATUS_DIR      Status file directory (default: ~/.local/state/wt)
   WT_DEFAULT_AGENT   Default agent CLI (default: opencode)
+  WT_PR_TTL          Seconds a cached PR badge stays fresh (default: 900)
 EOF
 }
 

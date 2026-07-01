@@ -550,6 +550,40 @@ test_wt_list() {
     fi
 }
 
+test_pr_badge() {
+    section "PR state badge"
+
+    if [[ -z "$TEST_SESSION" ]]; then
+        pass "skipped (no test session)"
+        return
+    fi
+
+    # pr_state is settable and auto-stamps pr_state_checked_at.
+    "$WT_STATE" set "$TEST_SESSION" --pr-state merged >/dev/null 2>&1
+    if [[ "$(state_field "$TEST_SESSION" pr_state)" == "merged" ]]; then
+        pass "pr_state persists"
+    else
+        fail "pr_state not saved" "got '$(state_field "$TEST_SESSION" pr_state)'"
+    fi
+
+    local checked; checked=$(state_field "$TEST_SESSION" pr_state_checked_at)
+    if [[ "$checked" =~ ^[0-9]+$ && "$checked" -gt 0 ]]; then
+        pass "pr_state_checked_at auto-stamped ($checked)"
+    else
+        fail "pr_state_checked_at not stamped" "got '$checked'"
+    fi
+
+    # A freshly-cached state is within the TTL, so `wt ls` renders the merged
+    # badge from cache and makes no gh call — deterministic, no network needed.
+    local out
+    out=$("$WT_BIN_DIR/wt" ls 2>/dev/null)
+    if echo "$out" | grep -q "⬤"; then
+        pass "merged badge (⬤) shown in ls"
+    else
+        fail "merged badge missing from ls" "$out"
+    fi
+}
+
 test_wt_status() {
     section "wt status"
 
@@ -1060,6 +1094,7 @@ main() {
     test_wt_hook_dual_write
     test_sync_tmux
     test_wt_list
+    test_pr_badge
     test_wt_status
     test_adopt_existing
     test_master_session
