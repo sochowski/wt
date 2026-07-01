@@ -41,16 +41,21 @@ mkdir -p "$WT_BASE_DIR" "$WT_STATUS_DIR" "$WT_CONFIG_DIR"
 #  Live diff view helpers
 # -----------------------------------------------------------------------------
 
-# Print the merge-base of HEAD against the branch's base (origin's default
-# head), or "HEAD" if it can't be resolved. Prints nothing when there's no
-# worktree to diff (master/adopted sessions). Shared by preview_pane and the
-# live diff view so the two can't drift.
+# Print the merge-base of HEAD against the branch's base, or "HEAD" if it can't
+# be resolved. Prints nothing when there's no worktree to diff (master/adopted
+# sessions). Uses the same base resolution as preview_pane — the branch's stored
+# wtBase if it still resolves, else origin's default head — so the live diff
+# view and the preview diffstat agree on what "the base" is.
 diff_merge_base() {
-    local wt_path="$1" base_ref
+    local wt_path="$1" branch base_ref
     [[ -n "$wt_path" && -e "$wt_path/.git" ]] || return 0
-    base_ref=$(git -C "$wt_path" symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null)
-    base_ref=${base_ref#refs/remotes/}
-    [[ -n "$base_ref" ]] || base_ref="origin/main"
+    branch=$(git -C "$wt_path" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+    base_ref=$(git -C "$wt_path" config "branch.${branch}.wtBase" 2>/dev/null || true)
+    if [[ -z "$base_ref" ]] || ! git -C "$wt_path" rev-parse --verify -q "${base_ref}^{commit}" >/dev/null 2>&1; then
+        base_ref=$(git -C "$wt_path" symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null)
+        base_ref=${base_ref#refs/remotes/}
+        [[ -n "$base_ref" ]] || base_ref="origin/main"
+    fi
     git -C "$wt_path" merge-base HEAD "$base_ref" 2>/dev/null || echo HEAD
 }
 
@@ -726,6 +731,11 @@ create_worktree() {
             fi
             echo "Creating branch '$branch' from $base_ref..."
             git -C "$repo_path" worktree add -b "$branch" "$wt_path" "$base_ref"
+            # Remember the fork point so the picker preview can diff against the
+            # branch's real base (not just origin's default head). Skipped for
+            # HEAD-based branches, where origin's default head is the best guess.
+            [[ "$base_ref" != "HEAD" ]] && \
+                git -C "$wt_path" config "branch.${branch}.wtBase" "$base_ref" 2>/dev/null || true
         fi
     else
         echo "Worktree exists at $wt_path, recreating session..."
@@ -926,16 +936,20 @@ pick_repo() {
 
     if [[ -z "$repos" ]]; then
         echo "No git repos found in common locations" >&2
-        echo "Enter repo path manually:" >&2
-        read -r repo_path </dev/tty
+        echo "Enter repo path manually (empty to cancel):" >&2
+        local repo_path=""
+        IFS= read -r repo_path </dev/tty || return 130
+        [[ -n "$repo_path" ]] || return 130
         echo "$repo_path"
-        return
+        return 0
     fi
 
     # Candidates come from the pipe; fzf opens /dev/tty for its UI itself. Do
     # not redirect stdin from /dev/tty here — that would override the pipe and
-    # feed fzf an empty candidate list.
-    echo "$repos" | fzf \
+    # feed fzf an empty candidate list. Capture fzf's exit status so `set -e`
+    # can't kill us on Esc (exit 130); we translate that into a clean cancel.
+    local sel rc=0
+    sel=$(echo "$repos" | fzf \
         "${WT_FZF_VIM_ARGS[@]}" \
         --header="Select repository" \
         --preview='
@@ -945,7 +959,9 @@ pick_repo() {
             echo "=== Recent commits ==="
             git -C {} log --oneline -5 2>/dev/null
         ' \
-        --preview-window=right:50%
+        --preview-window=right:50%) || rc=$?
+    if (( rc != 0 )); then return 130; fi
+    printf '%s\n' "$sel"
 }
 
 # Resolve a repo's default branch. Emits a bare branch name (no origin/ prefix).
@@ -990,8 +1006,9 @@ pick_branch() {
     branches=$(git -C "$repo_path" branch -a --format='%(refname:short)' 2>/dev/null | \
                sed 's|origin/||' | sort -u | grep -v '^HEAD$')
 
-    # Add "create new" option at top
-    local selection
+    # Add "create new" option at top. Capture fzf's exit so Esc (130) becomes a
+    # clean cancel instead of a `set -e` death.
+    local selection rc=0
     selection=$(echo -e "[+ Create new branch]\n$branches" | fzf \
         "${WT_FZF_VIM_ARGS[@]}" \
         --header="Select branch or create new" \
@@ -1007,43 +1024,51 @@ pick_branch() {
                 echo "Branch not yet created locally"
             fi
         ' \
-        --preview-window=right:50%)
+        --preview-window=right:50%) || rc=$?
+    if (( rc != 0 )); then return 130; fi
 
     if [[ "$selection" == "[+ Create new branch]" ]]; then
+        # Read the name a keystroke at a time so Esc cancels cleanly — a plain
+        # `read` would swallow it. Esc, or Enter on an empty line, aborts the
+        # whole flow; any other first key begins the name.
         echo "" >&2
-        echo "Enter new branch name:" >&2
-        local new_branch
-        read -r new_branch </dev/tty
+        printf 'Enter new branch name (Esc to cancel): ' >&2
+        local first=""
+        IFS= read -rsn1 first </dev/tty || return 130
+        if [[ -z "$first" || "$first" == $'\e' ]]; then
+            printf '\n' >&2
+            return 130
+        fi
+        printf '%s' "$first" >&2          # echo the key -s consumed silently
+        local rest=""
+        IFS= read -r rest </dev/tty || true
+        printf '\n' >&2
+        local new_branch="$first$rest"
 
-        # Guard against an empty (or whitespace-only) name — otherwise we'd build
-        # a worktree and tmux session named after nothing.
+        # Guard against a whitespace-only name — otherwise we'd build a worktree
+        # and tmux session named after nothing.
         new_branch="${new_branch#"${new_branch%%[![:space:]]*}"}"  # ltrim
         new_branch="${new_branch%"${new_branch##*[![:space:]]}"}"  # rtrim
         if [[ -z "$new_branch" ]]; then
             echo "Branch name cannot be empty." >&2
-            return 1
+            return 130
         fi
 
-        # Pick a base. The detected default is listed first so fzf lands on it,
-        # and ESC accepts it too (interactive_new fills it in). Include remotes
-        # so remote-only bases are selectable; awk keeps first-seen order (so the
+        # Pick a base. The detected default is listed first so fzf lands on it —
+        # Enter accepts it, Esc cancels the whole flow. Include remotes so
+        # remote-only bases are selectable; awk keeps first-seen order (so the
         # default stays on top) while de-duping local/remote copies of a branch.
-        local base_branch
+        local base_branch base_rc=0
         base_branch=$(
             {
                 [[ -n "$default_branch" ]] && printf '%s\n' "$default_branch"
                 git -C "$repo_path" branch -a --format='%(refname:short)' 2>/dev/null | sed 's|^origin/||'
             } | grep -vx 'HEAD' | grep -v '^$' | awk '!seen[$0]++' \
               | fzf "${WT_FZF_VIM_ARGS[@]}" \
-                    --header="Select base branch (ESC = ${default_branch:-current HEAD})" \
-              || echo ""
-        )
-
-        if [[ -n "$base_branch" ]]; then
-            echo "${new_branch}:${base_branch}"
-        else
-            echo "$new_branch"
-        fi
+                    --header="Select base branch (Enter = ${default_branch:-current HEAD}, Esc cancels)"
+        ) || base_rc=$?
+        if (( base_rc != 0 )); then return 130; fi
+        printf '%s:%s\n' "$new_branch" "$base_branch"
     else
         echo "$selection"
     fi
@@ -1069,14 +1094,16 @@ pick_agent() {
 
     # Candidates come from the pipe; fzf opens /dev/tty for its UI itself. A
     # `</dev/tty` here would override the pipe and give fzf an empty list.
-    local sel
-    sel=$(for a in "${ordered[@]}"; do
+    # Capture fzf's exit before `cut` so Esc (130) survives pipefail and becomes
+    # a clean cancel rather than silently falling back to the default agent.
+    local raw rc=0
+    raw=$(for a in "${ordered[@]}"; do
               local lbl; lbl=$(agent_label "$a")
               [[ "$a" == "$WT_DEFAULT_AGENT" ]] && lbl="$lbl (default)"
               printf '%s\t%s\n' "$a" "$lbl"
-          done | fzf "${WT_FZF_VIM_ARGS[@]}" --delimiter='\t' --with-nth=2 --header="Select agent" | cut -f1)
-
-    printf '%s\n' "${sel:-$WT_DEFAULT_AGENT}"
+          done | fzf "${WT_FZF_VIM_ARGS[@]}" --delimiter='\t' --with-nth=2 --header="Select agent") || rc=$?
+    if (( rc != 0 )); then return 130; fi
+    printf '%s\n' "$(printf '%s' "$raw" | cut -f1)"
 }
 
 # Interactive new worktree creation
@@ -1091,13 +1118,8 @@ interactive_new() {
     # Step 1: Pick repo (fzf, with branch/commit preview)
     if [[ -z "$repo_path" ]]; then
         log "finding repos..."
-        repo_path=$(pick_repo)
+        repo_path=$(pick_repo) || { echo "Cancelled."; return 1; }
         log "repo selection='$repo_path'"
-
-        if [[ -z "$repo_path" ]]; then
-            echo "No repo selected."
-            return 1
-        fi
     fi
 
     # Resolve to absolute path
@@ -1125,13 +1147,9 @@ interactive_new() {
     local base_branch="$default_branch"
     if [[ -z "$branch" ]]; then
         local selection
-        selection=$(pick_branch "$repo_path" "$default_branch")
+        selection=$(pick_branch "$repo_path" "$default_branch") || { echo "Cancelled."; return 1; }
         log "branch selection='$selection'"
 
-        if [[ -z "$selection" ]]; then
-            echo "No branch selected."
-            return 1
-        fi
         branch="${selection%%:*}"
         if [[ "$selection" == *:* ]]; then
             base_branch="${selection#*:}"
@@ -1142,7 +1160,7 @@ interactive_new() {
 
     # Step 4: Pick agent (fzf)
     local agent
-    agent=$(pick_agent)
+    agent=$(pick_agent) || { echo "Cancelled."; return 1; }
 
     local agent_display
     agent_display=$(agent_label "$agent")
@@ -1222,18 +1240,20 @@ revive_worktree_session() {
 #  Session preview (shared by the fzf pickers)
 # -----------------------------------------------------------------------------
 # Rendered inside fzf's preview subprocess. Args: session name, worktree path.
-# Three stacked blocks, sized to fit $FZF_PREVIEW_LINES:
-#   1. a status header (icon · branch · PR · message) from the store,
-#   2. a diffstat of what the branch changed vs its base branch, and
-#   3. the live agent pane, tailed so the freshest output sits at the bottom.
-# The diff comes from git, so it renders for dead/revivable sessions too — the
-# case the old `capture-pane || echo '(no agent pane)'` preview handled worst.
+# The live agent pane fills the top; a bold rule then a compact footer (session
+# header + diffstat) is pinned to the bottom, so the structured summary reads as
+# a distinct block instead of blending into the terminal capture above it. The
+# agent capture is tailed so its freshest line lands right against the rule.
+# Sized to fit $FZF_PREVIEW_LINES. The diff comes from git, so the footer still
+# renders for dead/revivable sessions — the case the old preview handled worst.
 preview_pane() {
     local session="$1" wt_path="${2:-}"
 
-    local dim=$'\033[2m' reset=$'\033[0m'
+    local dim=$'\033[2m' bold=$'\033[1m' rulec=$'\033[1;36m' reset=$'\033[0m'
     local avail="${FZF_PREVIEW_LINES:-40}"
     local cols="${FZF_PREVIEW_COLUMNS:-80}"
+    [[ "$cols" =~ ^[0-9]+$ ]] || cols=80
+    [[ "$avail" =~ ^[0-9]+$ ]] || avail=40
 
     # Best-effort metadata from the store; locals stay empty if it's not there.
     local status="" message="" repo="" branch="" pr="" agent="" opencode_config=""
@@ -1242,49 +1262,72 @@ preview_pane() {
         branch=$(git -C "$wt_path" branch --show-current 2>/dev/null || echo detached)
     fi
 
-    # Build the top blocks (header + diffstat) into a buffer so we can measure
-    # their height and hand the agent capture whatever rows are left.
-    local agent_lbl
-    agent_lbl=$(agent_label "${agent:-$WT_DEFAULT_AGENT}")
-    local top
-    top=$(
-        local icon header
-        icon=$(get_status_icon_ansi "${status:-unknown}")
-        header="${icon} ${branch:-?}"
-        [[ -n "$pr" ]] && header+=" · PR#${pr}"
-        [[ -n "$status" ]] && header+=" · ${status}"
-        printf '%s\n' "$header"
-        [[ -n "$message" ]] && printf '%s%s%s\n' "$dim" "$message" "$reset"
-
-        # Diffstat vs the branch's base (merge-base with origin's default head).
-        # Skip it when there's no worktree to diff (master/adopted sessions).
-        if [[ -n "$wt_path" && -e "$wt_path/.git" ]]; then
-            local base_ref merge_base
+    # Resolve the base the branch forked from, then diff the whole delta since
+    # that fork point. `git diff <merge-base>` compares that commit to the WORK
+    # TREE, so it covers committed *and* uncommitted changes together — commits
+    # keep showing after `git commit`. The base is the branch's stored wtBase if
+    # present (see create_worktree), else origin's default head.
+    local base_label="" stat="" untracked=""
+    if [[ -n "$wt_path" && -e "$wt_path/.git" ]]; then
+        # Prefer the branch's stored base, else origin's default head. Verify the
+        # ref still resolves: a rebase onto a different base, or deleting the base
+        # branch, can leave the stored value dangling — fall back rather than let
+        # merge-base fail into a HEAD-only (committed-changes-hidden) diff.
+        local base_ref merge_base
+        base_ref=$(git -C "$wt_path" config "branch.${branch}.wtBase" 2>/dev/null || true)
+        if [[ -z "$base_ref" ]] || ! git -C "$wt_path" rev-parse --verify -q "${base_ref}^{commit}" >/dev/null 2>&1; then
             base_ref=$(git -C "$wt_path" symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null)
             base_ref=${base_ref#refs/remotes/}
             [[ -n "$base_ref" ]] || base_ref="origin/main"
-            merge_base=$(diff_merge_base "$wt_path")
-
-            printf '%s─── changes vs %s ───%s\n' "$dim" "${base_ref#origin/}" "$reset"
-            local stat
-            stat=$(git -C "$wt_path" -c color.ui=always diff \
-                       --stat="${cols},,12" "$merge_base" 2>/dev/null)
-            if [[ -n "$stat" ]]; then
-                printf '%s\n' "$stat"
-            else
-                printf '%s(no changes yet)%s\n' "$dim" "$reset"
-            fi
         fi
-        printf '%s─── agent (%s) ───%s\n' "$dim" "$agent_lbl" "$reset"
-    )
-    printf '%s\n' "$top"
+        base_label=${base_ref#origin/}
+        merge_base=$(git -C "$wt_path" merge-base HEAD "$base_ref" 2>/dev/null || echo HEAD)
+        # Tracked delta since the fork point (committed + staged + unstaged)...
+        stat=$(git -C "$wt_path" -c color.ui=always diff \
+                   --stat="${cols},,12" "$merge_base" 2>/dev/null)
+        # ...plus brand-new files git diff can't see (untracked, not yet added).
+        untracked=$(git -C "$wt_path" ls-files --others --exclude-standard 2>/dev/null)
+    fi
 
-    # Give the agent pane the remaining rows (minus a little slack), tailing so
-    # the newest output is what survives when the pane is taller than the budget.
-    local top_lines budget cap
-    top_lines=$(printf '%s\n' "$top" | wc -l)
-    budget=$(( avail - top_lines - 1 ))
-    (( budget < 4 )) && budget=4
+    # Footer: bold rule + session header + diffstat. Built into a buffer so we
+    # can measure its height and give the agent capture whatever rows remain.
+    local agent_lbl footer
+    agent_lbl=$(agent_label "${agent:-$WT_DEFAULT_AGENT}")
+    footer=$(
+        local rule icon h
+        printf -v rule '%*s' "$cols" ''
+        printf '%s%s%s\n' "$rulec" "${rule// /━}" "$reset"
+
+        icon=$(get_status_icon_ansi "${status:-unknown}")
+        h="${icon} ${bold}${branch:-?}${reset}"
+        [[ -n "$base_label" ]] && h+="${dim} vs ${base_label}${reset}"
+        [[ -n "$pr" ]] && h+=" · PR#${pr}"
+        [[ -n "$status" ]] && h+=" · ${status}"
+        h+="${dim} · ${agent_lbl}${reset}"
+        printf '%s\n' "$h"
+
+        if [[ -n "$wt_path" && -e "$wt_path/.git" ]]; then
+            [[ -n "$stat" ]] && printf '%s\n' "$stat"
+            if [[ -n "$untracked" ]]; then
+                local green=$'\033[32m' n=0 f
+                while IFS= read -r f; do
+                    n=$((n+1)); (( n > 8 )) && continue
+                    printf ' %s%s%s %s(new)%s\n' "$green" "$f" "$reset" "$dim" "$reset"
+                done <<< "$untracked"
+                (( n > 8 )) && printf ' %s… +%d more new%s\n' "$dim" $(( n - 8 )) "$reset"
+            fi
+            [[ -z "$stat" && -z "$untracked" ]] && printf '%s(no changes yet)%s\n' "$dim" "$reset"
+        fi
+        : # keep the subshell's exit status 0 — a trailing failed test would
+          # make footer=$(...) non-zero and errexit would kill the preview
+    )
+
+    # Agent pane on top, tailed to the rows above the footer so the newest
+    # output survives and lands right against the rule.
+    local footer_lines budget cap
+    footer_lines=$(printf '%s\n' "$footer" | wc -l)
+    budget=$(( avail - footer_lines - 1 ))
+    (( budget < 3 )) && budget=3
 
     cap=$(tmux capture-pane -p -e -t "$session:main.1" 2>/dev/null \
           || tmux capture-pane -p -e -t "$session:agent" 2>/dev/null || true)
@@ -1293,13 +1336,15 @@ preview_pane() {
     else
         printf '%s(session not running — Enter to revive)%s\n' "$dim" "$reset"
     fi
+
+    printf '%s\n' "$footer"
 }
 
 pick_worktree() {
     check_deps
 
     # Rows arrive most-recently-active first (recency ranking in list_worktrees).
-    local selection
+    local selection rc=0
     selection=$(pick_list | fzf \
         "${WT_FZF_VIM_ARGS[@]}" \
         --delimiter=: \
@@ -1307,8 +1352,8 @@ pick_worktree() {
         --header="Select worktree (Enter=switch, Ctrl-D=delete)" \
         --preview="$WT_BIN_DIR/wt preview-pane {1} {2}" \
         --preview-window=right:60% \
-        --bind="ctrl-d:execute(wt delete {1} --force)+reload($WT_BIN_DIR/wt pick-list)" \
-        || true)
+        --bind="ctrl-d:execute(wt delete {1} --force)+reload($WT_BIN_DIR/wt pick-list)") || rc=$?
+    if (( rc == 130 )); then echo "Cancelled." >&2; return 0; fi
 
     if [[ -n "$selection" ]]; then
         local session_name wt_path
@@ -1328,7 +1373,7 @@ pick_worktree() {
 switch_picker() {
     check_deps
 
-    local selection
+    local selection rc=0
     selection=$(pick_list \
         | while IFS=: read -r name path rest; do
               tmux has-session -t "$name" 2>/dev/null && printf '%s:%s:%s\n' "$name" "$path" "$rest"
@@ -1339,8 +1384,8 @@ switch_picker() {
             --with-nth=3 \
             --header="Switch session (recent first)" \
             --preview="$WT_BIN_DIR/wt preview-pane {1} {2}" \
-            --preview-window=right:60% \
-        || true)
+            --preview-window=right:60%) || rc=$?
+    if (( rc == 130 )); then echo "Cancelled." >&2; return 0; fi
 
     if [[ -n "$selection" ]]; then
         local session_name
@@ -1523,7 +1568,7 @@ pr_pick() {
     fi
 
     # List open PRs via gh, let user pick with fzf
-    local selection
+    local selection rc=0
     selection=$(gh pr list --json number,title,headRefName \
         --template '{{range .}}{{.number}}	{{.title}}	{{.headRefName}}{{"\n"}}{{end}}' 2>/dev/null \
         | fzf \
@@ -1531,8 +1576,8 @@ pr_pick() {
             --header="Select PR to open" \
             --delimiter='\t' \
             --with-nth=1,2 \
-            --preview='echo "PR #{1} → branch: {3}"' \
-        || true)
+            --preview='echo "PR #{1} → branch: {3}"') || rc=$?
+    if (( rc == 130 )); then echo "Cancelled." >&2; return 0; fi
 
     if [[ -n "$selection" ]]; then
         local pr_num
@@ -1547,12 +1592,12 @@ pr_pick() {
 delete_pick() {
     check_deps
 
-    local selection
+    local selection rc=0
     selection=$(list_worktrees full | fzf \
         "${WT_FZF_VIM_ARGS[@]}" \
         --ansi \
-        --header="Select worktree to delete" \
-        || true)
+        --header="Select worktree to delete") || rc=$?
+    if (( rc == 130 )); then echo "Cancelled." >&2; return 0; fi
 
     if [[ -n "$selection" ]]; then
         local repo_name branch_name
