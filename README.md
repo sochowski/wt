@@ -1,25 +1,36 @@
 # wt
 
-Worktree manager for multi-agent CLI workflows. Each worktree gets a tmux session with agent + nvim + shell windows, live status tracking, and a native tmux UI.
+`wt` is a tmux and git-worktree manager for running several coding agents side by
+side. Each agent gets its own worktree and its own tmux session (agent, editor,
+and shell windows), plus a live status you can see at a glance, so you always know
+which one is working, which is waiting on you, and which is done.
 
-Supports **Claude**, **Codex**, **Gemini**, and **opencode** — any session can use any agent.
+It works with Claude, Codex, Gemini, and opencode: one session on Claude, the
+next on Codex. The switcher lists whichever session you touched last first, so
+the thing you're waiting on is never buried.
 
-## Features
+## What you get
 
-- One worktree = one tmux session (agent, nvim, shell windows)
-- Multi-agent: Claude, Codex, Gemini, opencode (auto-detects installed agents)
-- MCP profiles: per-session MCP server configuration
-- Env file sync: auto-copy/symlink `.env` files via `.wt/sync` config
-- Recency-ranked switcher: most-recently-active session first, everywhere (`wt ls`, `wt pick`, `prefix+W`)
-- Action menu via `display-menu` for quick session management
-- fzf picker with status info and agent conversation preview
-- Auto-connects Claude to Neovim via claudecode.nvim (`--ide`)
-- Live diff view: nvim boots into diffview.nvim (branch vs base) and auto-refreshes as files change (`WT_DIFF_VIEW`)
-- Status tracking via dual-write (files + tmux session options)
-- PR lookup: find sessions by GitHub PR number
-- Master orchestrator session with its own MCP profile
-- Desktop notifications when agent needs attention
-- Cross-platform (macOS / Linux)
+- **A session per worktree.** `wt new` cuts the branch, adds the worktree, and
+  opens a tmux session with the agent, editor, and shell windows already running.
+- **Status at a glance.** Each session reports whether its agent is working,
+  idle, waiting for input, or errored. `wt ls`, the fzf picker, and the tmux
+  status bar all read the same live state.
+- **PR badges.** `wt ls` and `wt pick` mark each worktree merged, open, draft, or
+  closed, resolved from `gh` and cached.
+- **Any agent, per session.** wt auto-detects which CLIs are installed and you
+  choose one when you create the session.
+- **Scoped MCP servers.** Worktree sessions get one set of MCP servers, the
+  master session another, driven by profiles you keep in `~/.config/wt`.
+- **Env files that follow the worktree.** A `.wt/sync` file copies or symlinks
+  `.env` and friends into each new worktree, which git won't do for you.
+- **Live diff in the editor.** nvim boots into a diffview of your branch against
+  its base and refreshes as files change.
+- **A master session** with its own MCP profile, for orchestrating work across
+  the others.
+- **Desktop notifications** when an agent needs your attention.
+
+Runs on macOS and Linux.
 
 ## Install
 
@@ -29,6 +40,7 @@ git clone https://github.com/youruser/wt.git ~/src/wt
 ```
 
 The installer will:
+- Build the `wt-state` store binary (`state/` → `bin/wt-state`) and migrate any existing state
 - Symlink scripts to `~/bin/`
 - Set up tmux config at `~/.config/wt/tmux-wt.conf`
 - Add tmux source line and status bar to `~/.tmux.conf`
@@ -38,7 +50,7 @@ The installer will:
   - Codex: `~/.codex/config.toml`
   - opencode: `~/.config/opencode/plugins/wt-status.js`
 
-Requires: git, tmux, fzf, jq, and at least one agent CLI ([Claude Code](https://github.com/anthropics/claude-code), [Codex](https://github.com/openai/codex), [Gemini CLI](https://github.com/google/gemini-cli), or [opencode](https://opencode.ai/))
+Requires: git, tmux, fzf, jq, go (to build `wt-state`), and at least one agent CLI ([Claude Code](https://github.com/anthropics/claude-code), [Codex](https://github.com/openai/codex), [Gemini CLI](https://github.com/google/gemini-cli), or [opencode](https://opencode.ai/))
 
 Optional: [gh](https://cli.github.com/) (for PR lookup), [claudecode.nvim](https://github.com/anthropics/claudecode.nvim) (for Claude IDE integration), [diffview.nvim](https://github.com/sindrets/diffview.nvim) + a file watcher ([watchexec](https://github.com/watchexec/watchexec), [entr](https://eradman.com/entrproject/), or `inotifywait`) for the live diff view
 
@@ -47,11 +59,17 @@ Optional: [gh](https://cli.github.com/) (for PR lookup), [claudecode.nvim](https
 ```bash
 # Session management
 wt new                                # Interactive: pick repo, branch, agent
-wt new ~/code feature-x              # Direct: create worktree
+wt new ~/code feature-x              # Direct: create worktree (background)
+wt new ~/code feature-x --switch      # Create and switch to it
 wt new ~/code feature-x --agent codex # Use specific agent
 wt pick                               # fzf picker (? to toggle preview)
+wt switch <session>                   # Switch to a session (alias: s)
 wt ls                                 # List sessions with status
-wt delete <session>                   # Delete session and worktree
+wt delete <session>                   # Delete session and worktree (alias: rm)
+wt delete-pick                        # Interactive delete picker (fzf)
+
+# Agent control
+wt agent <session> [task]             # Start agent on a task in a session (alias: claude)
 
 # Master session
 wt master                             # Create/attach master session
@@ -63,6 +81,7 @@ wt pr 42                              # Find session for PR #42
 wt pr-pick                            # Interactive PR picker (fzf + gh)
 
 # Status
+wt status <session>                   # Print a session's status
 wt sync-tmux                          # Restore tmux options after restart
 ```
 
@@ -83,6 +102,22 @@ wt sync-tmux                          # Restore tmux options after restart
 | `⊘` | input | Agent is waiting for your input (yellow) |
 | `✗` | error | Agent encountered an error (red) |
 | `◆` | master | Master orchestrator session |
+
+## PR Badges
+
+`wt ls` and `wt pick` show a PR-state badge per worktree, resolved via `gh` from
+the session's branch and cached in the state store. Requires `gh` installed and
+authenticated; sessions with no associated PR show no badge.
+
+| Icon | State | Color |
+|------|-------|-------|
+| `⬤` | merged | magenta |
+| `◆` | open | green |
+| `◇` | draft | gray |
+| `⊘` | closed (not merged) | red |
+
+Cached badges stay fresh for `WT_PR_TTL` seconds (default 900) before wt
+re-queries `gh`.
 
 ## MCP Profiles
 
@@ -121,6 +156,19 @@ For OpenCode, wt generates the equivalent runtime config:
 }
 ```
 
+## Tool Permissions (Claude)
+
+Seed every new worktree and master session with a default set of allowed tools
+so Claude doesn't re-prompt for the same permissions in each session. Create
+`~/.config/wt/claude-allowed-tools.json` as a JSON array of tool rules:
+
+```json
+["Read", "Edit", "Bash(npm run *)", "Bash(git status)"]
+```
+
+wt merges these into the session's `.claude/settings.local.json` on creation,
+preserving any keys already present.
+
 ## Env File Sync
 
 Worktrees don't inherit gitignored files like `.env`. Add a `.wt/sync` file to any repo to automatically copy or symlink env files into each new worktree on creation.
@@ -133,14 +181,14 @@ copy backend/.env
 symlink webapp/.env
 ```
 
-- `copy` — copies the file from the primary repo checkout (isolated per worktree)
-- `symlink` — symlinks to the primary checkout (stays in sync, changes affect the source)
+- `copy` copies the file out of the primary repo checkout, so each worktree gets its own isolated copy.
+- `symlink` links back to the primary checkout, so the file stays in sync and edits affect the source.
 
-Files missing from the primary repo are skipped with a warning. Files that already exist in the worktree are left untouched. `.wt/sync` itself is safe to commit — it contains no secrets.
+Files missing from the primary repo are skipped with a warning, and files that already exist in the worktree are left untouched. `.wt/sync` holds no secrets, so it's safe to commit.
 
 ## Example Setup
 
-Here's how one setup looks in practice — a master orchestrator that handles customer support triage and dispatches coding tasks to child worktree sessions.
+One way to use the master session: point it at your customer-support queue and let it dispatch coding tasks to child worktrees. Here's how that setup fits together.
 
 ### MCP profiles
 
@@ -218,13 +266,16 @@ Workflow:
 
 ```
 Agent hook event
-  ├── wt-hook writes ~/.local/state/wt/<session>.status
+  ├── wt-hook writes session state via wt-state (SQLite: ~/.local/state/wt/wt.db)
   ├── wt-hook writes tmux @wt-* session options
   └── wt-hook calls tmux refresh-client -S (instant redraw)
 
+wt-state → Go binary, authoritative SQLite session store (status, agent, PR
+           state, timestamps); tmux options are a fast-read mirror for the UI
+
 prefix+W → fzf popup (wt switch) lists live sessions, most-recently-active first
 prefix+w → display-menu launches wt subcommands in popups
-Status bar → wt-tmux-status aggregates counts from .status files
+Status bar → wt-tmux-status aggregates status counts from wt-state
 ```
 
 ## Files
@@ -235,8 +286,14 @@ Status bar → wt-tmux-status aggregates counts from .status files
 | `bin/wt-hook` | Agent hook handler |
 | `bin/wt-tmux-status` | Tmux status bar segment |
 | `bin/wt-agent-launch` | Multi-agent launcher with per-agent logic |
+| `bin/wt-bind-menu` | Builds the `prefix+w` action menu from live sessions |
+| `bin/wt-diff-watch` | Watches the worktree and refreshes the nvim diff view |
+| `bin/wt-state` | Go+SQLite session store (built from `state/`, gitignored) |
 | `bin/claude-ide` | Backward-compat wrapper for wt-agent-launch |
+| `state/` | `wt-state` Go source (SQLite store + migrations) |
 | `config/tmux-wt.conf` | Tmux keybindings and hooks |
+| `config/wt-menu.conf` | `prefix+w` action-menu definition |
+| `config/wt-diff.lua` | nvim config for the live diffview |
 | `config/claude-hooks.json` | Claude Code hook configuration |
 | `config/hooks-gemini.json` | Gemini CLI hook configuration |
 | `config/opencode-wt-plugin.js` | opencode status plugin |
@@ -246,10 +303,16 @@ Status bar → wt-tmux-status aggregates counts from .status files
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `WT_BASE_DIR` | `~/worktrees` | Base directory for worktrees |
-| `WT_STATUS_DIR` | `~/.local/state/wt` | Status file directory |
+| `WT_STATUS_DIR` | `~/.local/state/wt` | State directory (holds `wt.db`, logs, nvim sockets) |
+| `WT_CONFIG_DIR` | `~/.config/wt` | Config directory (MCP profiles, allowed-tools) |
+| `WT_DB` | `$WT_STATUS_DIR/wt.db` | Path to the SQLite state file |
+| `WT_STATE` | `<bin>/wt-state` | Path to the `wt-state` binary |
+| `WT_LOG_FILE` | `$WT_STATUS_DIR/wt.log` | Log file path |
 | `WT_DEFAULT_AGENT` | `opencode` | Default agent CLI (opencode, claude, codex, gemini) |
 | `WT_DIFF_VIEW` | `1` | Boot session nvim into the live diffview.nvim diff; set `0` to disable |
 | `WT_NVIM_SOCK_DIR` | `$WT_STATUS_DIR/nvim-sockets` | Where per-session nvim RPC sockets live |
+| `WT_FZF_VIM` | `0` | Set `1` for vim-style modal keybindings in the fzf pickers |
+| `WT_PR_TTL` | `900` | Seconds a cached PR badge stays fresh before re-querying `gh` |
 
 ## License
 
