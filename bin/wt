@@ -855,16 +855,20 @@ pick_repo() {
 
     if [[ -z "$repos" ]]; then
         echo "No git repos found in common locations" >&2
-        echo "Enter repo path manually:" >&2
-        read -r repo_path </dev/tty
+        echo "Enter repo path manually (empty to cancel):" >&2
+        local repo_path=""
+        IFS= read -r repo_path </dev/tty || return 130
+        [[ -n "$repo_path" ]] || return 130
         echo "$repo_path"
-        return
+        return 0
     fi
 
     # Candidates come from the pipe; fzf opens /dev/tty for its UI itself. Do
     # not redirect stdin from /dev/tty here — that would override the pipe and
-    # feed fzf an empty candidate list.
-    echo "$repos" | fzf \
+    # feed fzf an empty candidate list. Capture fzf's exit status so `set -e`
+    # can't kill us on Esc (exit 130); we translate that into a clean cancel.
+    local sel rc=0
+    sel=$(echo "$repos" | fzf \
         "${WT_FZF_VIM_ARGS[@]}" \
         --header="Select repository" \
         --preview='
@@ -874,7 +878,9 @@ pick_repo() {
             echo "=== Recent commits ==="
             git -C {} log --oneline -5 2>/dev/null
         ' \
-        --preview-window=right:50%
+        --preview-window=right:50%) || rc=$?
+    if (( rc != 0 )); then return 130; fi
+    printf '%s\n' "$sel"
 }
 
 # Resolve a repo's default branch. Emits a bare branch name (no origin/ prefix).
@@ -919,8 +925,9 @@ pick_branch() {
     branches=$(git -C "$repo_path" branch -a --format='%(refname:short)' 2>/dev/null | \
                sed 's|origin/||' | sort -u | grep -v '^HEAD$')
 
-    # Add "create new" option at top
-    local selection
+    # Add "create new" option at top. Capture fzf's exit so Esc (130) becomes a
+    # clean cancel instead of a `set -e` death.
+    local selection rc=0
     selection=$(echo -e "[+ Create new branch]\n$branches" | fzf \
         "${WT_FZF_VIM_ARGS[@]}" \
         --header="Select branch or create new" \
@@ -936,43 +943,51 @@ pick_branch() {
                 echo "Branch not yet created locally"
             fi
         ' \
-        --preview-window=right:50%)
+        --preview-window=right:50%) || rc=$?
+    if (( rc != 0 )); then return 130; fi
 
     if [[ "$selection" == "[+ Create new branch]" ]]; then
+        # Read the name a keystroke at a time so Esc cancels cleanly — a plain
+        # `read` would swallow it. Esc, or Enter on an empty line, aborts the
+        # whole flow; any other first key begins the name.
         echo "" >&2
-        echo "Enter new branch name:" >&2
-        local new_branch
-        read -r new_branch </dev/tty
+        printf 'Enter new branch name (Esc to cancel): ' >&2
+        local first=""
+        IFS= read -rsn1 first </dev/tty || return 130
+        if [[ -z "$first" || "$first" == $'\e' ]]; then
+            printf '\n' >&2
+            return 130
+        fi
+        printf '%s' "$first" >&2          # echo the key -s consumed silently
+        local rest=""
+        IFS= read -r rest </dev/tty || true
+        printf '\n' >&2
+        local new_branch="$first$rest"
 
-        # Guard against an empty (or whitespace-only) name — otherwise we'd build
-        # a worktree and tmux session named after nothing.
+        # Guard against a whitespace-only name — otherwise we'd build a worktree
+        # and tmux session named after nothing.
         new_branch="${new_branch#"${new_branch%%[![:space:]]*}"}"  # ltrim
         new_branch="${new_branch%"${new_branch##*[![:space:]]}"}"  # rtrim
         if [[ -z "$new_branch" ]]; then
             echo "Branch name cannot be empty." >&2
-            return 1
+            return 130
         fi
 
-        # Pick a base. The detected default is listed first so fzf lands on it,
-        # and ESC accepts it too (interactive_new fills it in). Include remotes
-        # so remote-only bases are selectable; awk keeps first-seen order (so the
+        # Pick a base. The detected default is listed first so fzf lands on it —
+        # Enter accepts it, Esc cancels the whole flow. Include remotes so
+        # remote-only bases are selectable; awk keeps first-seen order (so the
         # default stays on top) while de-duping local/remote copies of a branch.
-        local base_branch
+        local base_branch base_rc=0
         base_branch=$(
             {
                 [[ -n "$default_branch" ]] && printf '%s\n' "$default_branch"
                 git -C "$repo_path" branch -a --format='%(refname:short)' 2>/dev/null | sed 's|^origin/||'
             } | grep -vx 'HEAD' | grep -v '^$' | awk '!seen[$0]++' \
               | fzf "${WT_FZF_VIM_ARGS[@]}" \
-                    --header="Select base branch (ESC = ${default_branch:-current HEAD})" \
-              || echo ""
-        )
-
-        if [[ -n "$base_branch" ]]; then
-            echo "${new_branch}:${base_branch}"
-        else
-            echo "$new_branch"
-        fi
+                    --header="Select base branch (Enter = ${default_branch:-current HEAD}, Esc cancels)"
+        ) || base_rc=$?
+        if (( base_rc != 0 )); then return 130; fi
+        printf '%s:%s\n' "$new_branch" "$base_branch"
     else
         echo "$selection"
     fi
@@ -998,14 +1013,16 @@ pick_agent() {
 
     # Candidates come from the pipe; fzf opens /dev/tty for its UI itself. A
     # `</dev/tty` here would override the pipe and give fzf an empty list.
-    local sel
-    sel=$(for a in "${ordered[@]}"; do
+    # Capture fzf's exit before `cut` so Esc (130) survives pipefail and becomes
+    # a clean cancel rather than silently falling back to the default agent.
+    local raw rc=0
+    raw=$(for a in "${ordered[@]}"; do
               local lbl; lbl=$(agent_label "$a")
               [[ "$a" == "$WT_DEFAULT_AGENT" ]] && lbl="$lbl (default)"
               printf '%s\t%s\n' "$a" "$lbl"
-          done | fzf "${WT_FZF_VIM_ARGS[@]}" --delimiter='\t' --with-nth=2 --header="Select agent" | cut -f1)
-
-    printf '%s\n' "${sel:-$WT_DEFAULT_AGENT}"
+          done | fzf "${WT_FZF_VIM_ARGS[@]}" --delimiter='\t' --with-nth=2 --header="Select agent") || rc=$?
+    if (( rc != 0 )); then return 130; fi
+    printf '%s\n' "$(printf '%s' "$raw" | cut -f1)"
 }
 
 # Interactive new worktree creation
@@ -1020,13 +1037,8 @@ interactive_new() {
     # Step 1: Pick repo (fzf, with branch/commit preview)
     if [[ -z "$repo_path" ]]; then
         log "finding repos..."
-        repo_path=$(pick_repo)
+        repo_path=$(pick_repo) || { echo "Cancelled."; return 1; }
         log "repo selection='$repo_path'"
-
-        if [[ -z "$repo_path" ]]; then
-            echo "No repo selected."
-            return 1
-        fi
     fi
 
     # Resolve to absolute path
@@ -1054,13 +1066,9 @@ interactive_new() {
     local base_branch="$default_branch"
     if [[ -z "$branch" ]]; then
         local selection
-        selection=$(pick_branch "$repo_path" "$default_branch")
+        selection=$(pick_branch "$repo_path" "$default_branch") || { echo "Cancelled."; return 1; }
         log "branch selection='$selection'"
 
-        if [[ -z "$selection" ]]; then
-            echo "No branch selected."
-            return 1
-        fi
         branch="${selection%%:*}"
         if [[ "$selection" == *:* ]]; then
             base_branch="${selection#*:}"
@@ -1071,7 +1079,7 @@ interactive_new() {
 
     # Step 4: Pick agent (fzf)
     local agent
-    agent=$(pick_agent)
+    agent=$(pick_agent) || { echo "Cancelled."; return 1; }
 
     local agent_display
     agent_display=$(agent_label "$agent")
@@ -1151,7 +1159,7 @@ pick_worktree() {
     check_deps
 
     # Rows arrive most-recently-active first (recency ranking in list_worktrees).
-    local selection
+    local selection rc=0
     selection=$(pick_list | fzf \
         "${WT_FZF_VIM_ARGS[@]}" \
         --delimiter=: \
@@ -1159,8 +1167,8 @@ pick_worktree() {
         --header="Select worktree (Enter=switch, Ctrl-D=delete, ?=preview)" \
         --preview="tmux capture-pane -t {1}:main.1 -p -e 2>/dev/null || tmux capture-pane -t {1}:agent -p -e 2>/dev/null || echo '(no agent pane)'" \
         --preview-window=right:60% \
-        --bind="ctrl-d:execute(wt delete {1} --force)+reload($WT_BIN_DIR/wt pick-list)" \
-        || true)
+        --bind="ctrl-d:execute(wt delete {1} --force)+reload($WT_BIN_DIR/wt pick-list)") || rc=$?
+    if (( rc == 130 )); then echo "Cancelled." >&2; return 0; fi
 
     if [[ -n "$selection" ]]; then
         local session_name wt_path
@@ -1180,7 +1188,7 @@ pick_worktree() {
 switch_picker() {
     check_deps
 
-    local selection
+    local selection rc=0
     selection=$(pick_list \
         | while IFS=: read -r name path rest; do
               tmux has-session -t "$name" 2>/dev/null && printf '%s:%s:%s\n' "$name" "$path" "$rest"
@@ -1191,8 +1199,8 @@ switch_picker() {
             --with-nth=3 \
             --header="Switch session (recent first, ?=preview)" \
             --preview="tmux capture-pane -t {1}:main.1 -p -e 2>/dev/null || tmux capture-pane -t {1}:agent -p -e 2>/dev/null || echo '(no agent pane)'" \
-            --preview-window=right:60% \
-        || true)
+            --preview-window=right:60%) || rc=$?
+    if (( rc == 130 )); then echo "Cancelled." >&2; return 0; fi
 
     if [[ -n "$selection" ]]; then
         local session_name
@@ -1375,7 +1383,7 @@ pr_pick() {
     fi
 
     # List open PRs via gh, let user pick with fzf
-    local selection
+    local selection rc=0
     selection=$(gh pr list --json number,title,headRefName \
         --template '{{range .}}{{.number}}	{{.title}}	{{.headRefName}}{{"\n"}}{{end}}' 2>/dev/null \
         | fzf \
@@ -1383,8 +1391,8 @@ pr_pick() {
             --header="Select PR to open" \
             --delimiter='\t' \
             --with-nth=1,2 \
-            --preview='echo "PR #{1} → branch: {3}"' \
-        || true)
+            --preview='echo "PR #{1} → branch: {3}"') || rc=$?
+    if (( rc == 130 )); then echo "Cancelled." >&2; return 0; fi
 
     if [[ -n "$selection" ]]; then
         local pr_num
@@ -1399,12 +1407,12 @@ pr_pick() {
 delete_pick() {
     check_deps
 
-    local selection
+    local selection rc=0
     selection=$(list_worktrees full | fzf \
         "${WT_FZF_VIM_ARGS[@]}" \
         --ansi \
-        --header="Select worktree to delete" \
-        || true)
+        --header="Select worktree to delete") || rc=$?
+    if (( rc == 130 )); then echo "Cancelled." >&2; return 0; fi
 
     if [[ -n "$selection" ]]; then
         local repo_name branch_name
