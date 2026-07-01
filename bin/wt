@@ -877,9 +877,41 @@ pick_repo() {
         --preview-window=right:50%
 }
 
+# Resolve a repo's default branch. Emits a bare branch name (no origin/ prefix).
+# Not every clone has origin/HEAD set (added remotes, shallow fetches, older
+# clones), so we can't just trust the symbolic ref — we harden the fallback so
+# the answer is correct on main-repos, master-repos, and anything else.
+detect_default_branch() {
+    local repo_path="$1"
+    local def
+
+    # 1. Remote HEAD, if the symbolic ref is populated locally.
+    def=$(git -C "$repo_path" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')
+    if [[ -n "$def" ]]; then printf '%s\n' "$def"; return; fi
+
+    # 2. Ask the remote to (re)populate origin/HEAD, then retry. We've usually
+    #    just fetched, so this is cheap and authoritative.
+    git -C "$repo_path" remote set-head origin --auto >/dev/null 2>&1 || true
+    def=$(git -C "$repo_path" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')
+    if [[ -n "$def" ]]; then printf '%s\n' "$def"; return; fi
+
+    # 3. Probe the usual suspects on the remote.
+    local cand
+    for cand in main master; do
+        if git -C "$repo_path" show-ref --verify --quiet "refs/remotes/origin/$cand" 2>/dev/null; then
+            printf '%s\n' "$cand"; return
+        fi
+    done
+
+    # 4. Fall back to the current HEAD's branch (or the literal 'main').
+    def=$(git -C "$repo_path" branch --show-current 2>/dev/null)
+    printf '%s\n' "${def:-main}"
+}
+
 # Interactive branch picker (shows existing + option to create new)
 pick_branch() {
     local repo_path="$1"
+    local default_branch="${2:-}"
     check_deps
 
     # Get all branches (local and remote)
@@ -909,13 +941,32 @@ pick_branch() {
     if [[ "$selection" == "[+ Create new branch]" ]]; then
         echo "" >&2
         echo "Enter new branch name:" >&2
+        local new_branch
         read -r new_branch </dev/tty
 
-        # Ask for base branch
-        echo "Base branch (default: current HEAD):" >&2
+        # Guard against an empty (or whitespace-only) name — otherwise we'd build
+        # a worktree and tmux session named after nothing.
+        new_branch="${new_branch#"${new_branch%%[![:space:]]*}"}"  # ltrim
+        new_branch="${new_branch%"${new_branch##*[![:space:]]}"}"  # rtrim
+        if [[ -z "$new_branch" ]]; then
+            echo "Branch name cannot be empty." >&2
+            return 1
+        fi
+
+        # Pick a base. The detected default is listed first so fzf lands on it,
+        # and ESC accepts it too (interactive_new fills it in). Include remotes
+        # so remote-only bases are selectable; awk keeps first-seen order (so the
+        # default stays on top) while de-duping local/remote copies of a branch.
         local base_branch
-        base_branch=$(git -C "$repo_path" branch --format='%(refname:short)' 2>/dev/null | \
-                      fzf "${WT_FZF_VIM_ARGS[@]}" --header="Select base branch (ESC for default)" || echo "")
+        base_branch=$(
+            {
+                [[ -n "$default_branch" ]] && printf '%s\n' "$default_branch"
+                git -C "$repo_path" branch -a --format='%(refname:short)' 2>/dev/null | sed 's|^origin/||'
+            } | grep -vx 'HEAD' | grep -v '^$' | awk '!seen[$0]++' \
+              | fzf "${WT_FZF_VIM_ARGS[@]}" \
+                    --header="Select base branch (ESC = ${default_branch:-current HEAD})" \
+              || echo ""
+        )
 
         if [[ -n "$base_branch" ]]; then
             echo "${new_branch}:${base_branch}"
@@ -991,9 +1042,9 @@ interactive_new() {
     echo "Fetching latest from origin..."
     git -C "$repo_path" fetch origin 2>/dev/null || true
 
-    # Detect default branch
+    # Detect default branch (remote HEAD, hardened for repos where it isn't set)
     local default_branch
-    default_branch=$(git -C "$repo_path" symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||' || echo "main")
+    default_branch=$(detect_default_branch "$repo_path")
 
     # Step 3: Pick or create branch (fzf). pick_branch returns either an existing
     # branch, a new "branch", or "branch:base" when a base was chosen for a new
@@ -1003,7 +1054,7 @@ interactive_new() {
     local base_branch="$default_branch"
     if [[ -z "$branch" ]]; then
         local selection
-        selection=$(pick_branch "$repo_path")
+        selection=$(pick_branch "$repo_path" "$default_branch")
         log "branch selection='$selection'"
 
         if [[ -z "$selection" ]]; then
@@ -1430,6 +1481,7 @@ Status:
 
 Options for 'new':
   --agent <name>        Agent: claude, codex, gemini, opencode (default: \$WT_DEFAULT_AGENT)
+  --base <branch>       Base a new branch off <branch> (default: repo's default branch)
   --start-agent         Start agent immediately after creating session
   --task <task>         Task description for agent
   --force               Skip confirmation prompts
@@ -1509,6 +1561,7 @@ main() {
             local start_agent=false
             local task=""
             local agent="$WT_DEFAULT_AGENT"
+            local base=""             # empty → detect the repo's default branch
             local switch_after=false  # background by default; --switch to jump
 
             # Skip repo/branch args if they look like flags
@@ -1527,6 +1580,7 @@ main() {
                     --start-agent|--start-claude) start_agent=true; shift ;;
                     --task) task="$2"; shift 2 ;;
                     --agent) agent="$2"; shift 2 ;;
+                    --base) base="$2"; shift 2 ;;
                     --switch) switch_after=true; shift ;;
                     *) shift ;;
                 esac
@@ -1536,7 +1590,12 @@ main() {
             if [[ -z "$repo" || -z "$branch" ]]; then
                 interactive_new "$repo" "$branch" "$switch_after"
             else
-                create_worktree "$repo" "$branch" "$start_agent" "$task" "" "$agent" "$switch_after"
+                # Default the base to the repo's detected default branch so a new
+                # branch created here matches the interactive flow's intent rather
+                # than silently forking off whatever HEAD happens to be. (Ignored
+                # by create_worktree when the branch already exists.)
+                [[ -z "$base" ]] && base=$(detect_default_branch "$repo")
+                create_worktree "$repo" "$branch" "$start_agent" "$task" "$base" "$agent" "$switch_after"
             fi
             ;;
         pick|p)
