@@ -340,21 +340,21 @@ test_tmux_options() {
 }
 
 test_diff_view() {
-    section "Live diff view (nvim socket + watcher)"
+    section "Live diff view (fzf browser + watcher)"
 
     if [[ -z "${TMUX:-}" ]]; then
         fail "skipped: not in tmux"
         return
     fi
-    if ! command -v nvim >/dev/null 2>&1; then
-        pass "skipped: nvim not installed"
+    if ! command -v fzf >/dev/null 2>&1; then
+        pass "skipped: fzf not installed"
         return
     fi
 
     local sess="test-wt-repo-diff-branch"
     local wt_path="$WT_BASE_DIR/test-wt-repo/diff-branch"
-    local sock_dir="${WT_NVIM_SOCK_DIR:-$WT_STATUS_DIR/nvim-sockets}"
-    local sock="$sock_dir/$sess.sock"
+    local dir="${WT_DIFF_DIR:-$WT_STATUS_DIR/diff-view}"
+    local portfile="$dir/$sess.port"
 
     "$WT_BIN_DIR/wt" new "$TEST_REPO" diff-branch >/dev/null 2>&1
 
@@ -363,7 +363,7 @@ test_diff_view() {
         return
     fi
 
-    # launch_nvim recorded a watcher pid.
+    # launch_diff_view recorded a watcher pid.
     local pid
     pid=$(tmux show-option -qv -t "$sess" @wt-diff-pid 2>/dev/null || true)
     if [[ -n "$pid" ]]; then
@@ -372,22 +372,22 @@ test_diff_view() {
         fail "@wt-diff-pid not set (watcher not started)"
     fi
 
-    # nvim came up on its listen socket.
+    # fzf came up and published its listen port.
     local i
-    for i in $(seq 1 50); do [[ -S "$sock" ]] && break; sleep 0.1; done
-    if [[ -S "$sock" ]]; then
-        pass "nvim listen socket created"
+    for i in $(seq 1 50); do [[ -f "$portfile" ]] && break; sleep 0.1; done
+    if [[ -f "$portfile" ]] && [[ "$(cat "$portfile" 2>/dev/null)" =~ ^[0-9]+$ ]]; then
+        pass "fzf published listen port ($(cat "$portfile"))"
     else
-        fail "nvim listen socket never appeared" "$sock"
+        fail "fzf port file never appeared / not numeric" "$portfile"
     fi
 
-    # delete tears down the watcher and socket.
+    # delete tears down the watcher and removes the port file.
     "$WT_BIN_DIR/wt" delete "$sess" --force >/dev/null 2>&1 || true
-    if [[ ! -e "$sock" ]] && ! { [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; }; then
-        pass "delete stopped watcher and removed socket"
+    if [[ ! -e "$portfile" ]] && ! { [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; }; then
+        pass "delete stopped watcher and removed port file"
     else
         fail "diff view not cleaned up after delete" \
-            "sock_present=$([[ -e "$sock" ]] && echo yes || echo no) pid=$pid"
+            "port_present=$([[ -e "$portfile" ]] && echo yes || echo no) pid=$pid"
     fi
 
     # Safety net in case delete didn't fully clean up.
