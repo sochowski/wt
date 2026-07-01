@@ -1607,8 +1607,8 @@ main() {
             if [[ -n "${TMUX:-}" ]]; then
                 # Inside tmux: show the action menu
                 tmux display-menu -T " Worktrees " -x C -y C \
-                    "New worktree"       n "display-popup -E -w 80% -h 80% '$HOME/bin/wt new'" \
-                    "New + open"         N "display-popup -E -w 80% -h 80% '$HOME/bin/wt new --switch'" \
+                    "New worktree"       n "display-popup -E -w 80% -h 80% '$HOME/bin/wt new --switch'" \
+                    "New (background)"   N "display-popup -E -w 80% -h 80% '$HOME/bin/wt new'" \
                     "Switch (pick)"      s "display-popup -E -w 100% -h 100% '$HOME/bin/wt pick'" \
                     "Delete..."          d "display-popup -E -w 60% -h 40% '$HOME/bin/wt delete-pick'" \
                     "" \
