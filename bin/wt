@@ -17,6 +17,13 @@ WT_LOG_FILE="${WT_LOG_FILE:-$WT_STATUS_DIR/wt.log}"
 WT_BIN_DIR="$(dirname "$(readlink -f "$0")")"
 WT_DEFAULT_AGENT="${WT_DEFAULT_AGENT:-opencode}"
 
+# Colon-separated (PATH-style) list of directories the repo picker scans for
+# git repos. If set, it fully replaces the built-in defaults below. Each entry
+# is included if it is itself a primary repo, and its immediate children are
+# scanned too (so e.g. WT_REPO_DIRS=$HOME/.config finds both a dotfiles repo at
+# ~/.config and child repos like ~/.config/nvim).
+WT_REPO_DIRS="${WT_REPO_DIRS:-$HOME/gt:$HOME/code:$HOME/projects:$HOME/src:$HOME/dev:$HOME/work:$HOME/workspace:$HOME/repos}"
+
 # wt-state binary: authoritative SQLite-backed session store. Prefer a sibling
 # of this script (handles both repo checkout and ~/bin symlink install); fall
 # back to PATH.
@@ -1000,21 +1007,15 @@ delete_worktree() {
 
 # Find git repos in common locations (depth 1 only for clean list)
 find_git_repos() {
-    local search_dirs=(
-        "$HOME/gt"
-        "$HOME/code"
-        "$HOME/projects"
-        "$HOME/src"
-        "$HOME/dev"
-        "$HOME/work"
-        "$HOME/workspace"
-        "$HOME/repos"
-    )
+    local search_dirs=()
+    IFS=':' read -r -a search_dirs <<< "$WT_REPO_DIRS"
 
     for dir in "${search_dirs[@]}"; do
-        [[ -d "$dir" ]] || continue
-        # Only list immediate children that are primary repos (not worktrees)
-        # .git as directory = primary repo; .git as file = worktree, skip
+        [[ -n "$dir" && -d "$dir" ]] || continue
+        # A primary repo has .git as a directory; a worktree has .git as a file,
+        # which we skip. Include the search dir itself if it is a primary repo
+        # (e.g. a dotfiles repo at ~/.config), then list primary-repo children.
+        [[ -d "$dir/.git" ]] && echo "${dir%/}"
         for child in "$dir"/*/; do
             [[ -d "$child/.git" ]] && echo "${child%/}"
         done
@@ -1815,6 +1816,10 @@ Environment:
   WT_BASE_DIR        Base directory for worktrees (default: ~/worktrees)
   WT_STATUS_DIR      Status file directory (default: ~/.local/state/wt)
   WT_DEFAULT_AGENT   Default agent CLI (default: opencode)
+  WT_REPO_DIRS       Colon-separated dirs the repo picker scans; replaces the
+                     built-in defaults (~/gt:~/code:~/projects:~/src:~/dev:
+                     ~/work:~/workspace:~/repos). Each dir is listed if it is
+                     itself a repo, and its immediate children are scanned.
   WT_PR_TTL          Seconds a cached PR badge stays fresh (default: 900)
 EOF
 }
