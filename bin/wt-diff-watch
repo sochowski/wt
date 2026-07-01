@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# =============================================================================
+#  wt-diff-watch — keep a wt session's nvim diff view live.
+#
+#  Usage: wt-diff-watch <nvim-socket> <worktree-path>
+#
+#  Waits for the nvim RPC socket to appear, then watches the worktree (ignoring
+#  .git) and pokes nvim to run require('wt_diff').refresh() on every change, so
+#  the diffview stays current as the agent (or you) edit files. Exits when the
+#  socket disappears (nvim gone).
+#
+#  Backends, in order of preference: watchexec -> entr -> inotifywait. If none
+#  is installed it exits quietly — the diff view still opens, it just won't
+#  auto-refresh.
+# =============================================================================
+set -euo pipefail
+
+# --- one-shot refresh mode (re-invoked by the watcher backends) --------------
+if [[ "${1:-}" == "--refresh" ]]; then
+    sock="${2:?socket path required}"
+    [[ -S "$sock" ]] || exit 0
+    nvim --server "$sock" --remote-expr \
+        'luaeval("pcall(function() require([[wt_diff]]).refresh() end)")' \
+        >/dev/null 2>&1 || true
+    exit 0
+fi
+
+sock="${1:?socket path required}"
+wt_path="${2:?worktree path required}"
+
+command -v nvim >/dev/null 2>&1 || exit 0
+
+# Wait up to ~30s for nvim to create its listen socket.
+for _ in $(seq 1 300); do
+    [[ -S "$sock" ]] && break
+    sleep 0.1
+done
+[[ -S "$sock" ]] || exit 0
+
+self="$(readlink -f "$0")"
+
+if command -v watchexec >/dev/null 2>&1; then
+    # watchexec ignores VCS dirs / gitignored paths by default.
+    exec watchexec --quiet --debounce 200ms --watch "$wt_path" \
+        --ignore '.git/**' -- "$self" --refresh "$sock"
+elif command -v entr >/dev/null 2>&1; then
+    # entr re-runs on change and exits when the file set changes (-d); loop so
+    # newly created files get picked up, and stop once nvim is gone.
+    while [[ -S "$sock" ]]; do
+        find "$wt_path" -type f -not -path '*/.git/*' 2>/dev/null \
+            | entr -d "$self" --refresh "$sock" || true
+    done
+elif command -v inotifywait >/dev/null 2>&1; then
+    while [[ -S "$sock" ]]; do
+        if inotifywait -q -r -e modify,create,delete,move \
+             --exclude '/\.git/' "$wt_path" >/dev/null 2>&1; then
+            "$self" --refresh "$sock"
+        fi
+    done
+fi

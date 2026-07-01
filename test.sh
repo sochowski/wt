@@ -339,6 +339,62 @@ test_tmux_options() {
     done
 }
 
+test_diff_view() {
+    section "Live diff view (nvim socket + watcher)"
+
+    if [[ -z "${TMUX:-}" ]]; then
+        fail "skipped: not in tmux"
+        return
+    fi
+    if ! command -v nvim >/dev/null 2>&1; then
+        pass "skipped: nvim not installed"
+        return
+    fi
+
+    local sess="test-wt-repo-diff-branch"
+    local wt_path="$WT_BASE_DIR/test-wt-repo/diff-branch"
+    local sock_dir="${WT_NVIM_SOCK_DIR:-$WT_STATUS_DIR/nvim-sockets}"
+    local sock="$sock_dir/$sess.sock"
+
+    "$WT_BIN_DIR/wt" new "$TEST_REPO" diff-branch >/dev/null 2>&1
+
+    if ! tmux has-session -t "$sess" 2>/dev/null; then
+        fail "diff-branch session not created"
+        return
+    fi
+
+    # launch_nvim recorded a watcher pid.
+    local pid
+    pid=$(tmux show-option -qv -t "$sess" @wt-diff-pid 2>/dev/null || true)
+    if [[ -n "$pid" ]]; then
+        pass "@wt-diff-pid recorded ($pid)"
+    else
+        fail "@wt-diff-pid not set (watcher not started)"
+    fi
+
+    # nvim came up on its listen socket.
+    local i
+    for i in $(seq 1 50); do [[ -S "$sock" ]] && break; sleep 0.1; done
+    if [[ -S "$sock" ]]; then
+        pass "nvim listen socket created"
+    else
+        fail "nvim listen socket never appeared" "$sock"
+    fi
+
+    # delete tears down the watcher and socket.
+    "$WT_BIN_DIR/wt" delete "$sess" --force >/dev/null 2>&1 || true
+    if [[ ! -e "$sock" ]] && ! { [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; }; then
+        pass "delete stopped watcher and removed socket"
+    else
+        fail "diff view not cleaned up after delete" \
+            "sock_present=$([[ -e "$sock" ]] && echo yes || echo no) pid=$pid"
+    fi
+
+    # Safety net in case delete didn't fully clean up.
+    git -C "$TEST_REPO" worktree remove "$wt_path" --force 2>/dev/null || true
+    "$WT_STATE" delete "$sess" 2>/dev/null || true
+}
+
 test_status_metadata_recovery() {
     section "Status Metadata Recovery"
 
@@ -999,6 +1055,7 @@ main() {
     test_status_file
     test_status_messages_are_data
     test_tmux_options
+    test_diff_view
     test_status_metadata_recovery
     test_wt_hook_dual_write
     test_sync_tmux
