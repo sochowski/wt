@@ -1155,6 +1155,83 @@ revive_worktree_session() {
     save_session "$session_name"
 }
 
+# -----------------------------------------------------------------------------
+#  Session preview (shared by the fzf pickers)
+# -----------------------------------------------------------------------------
+# Rendered inside fzf's preview subprocess. Args: session name, worktree path.
+# Three stacked blocks, sized to fit $FZF_PREVIEW_LINES:
+#   1. a status header (icon · branch · PR · message) from the store,
+#   2. a diffstat of what the branch changed vs its base branch, and
+#   3. the live agent pane, tailed so the freshest output sits at the bottom.
+# The diff comes from git, so it renders for dead/revivable sessions too — the
+# case the old `capture-pane || echo '(no agent pane)'` preview handled worst.
+preview_pane() {
+    local session="$1" wt_path="${2:-}"
+
+    local dim=$'\033[2m' reset=$'\033[0m'
+    local avail="${FZF_PREVIEW_LINES:-40}"
+    local cols="${FZF_PREVIEW_COLUMNS:-80}"
+
+    # Best-effort metadata from the store; locals stay empty if it's not there.
+    local status="" message="" repo="" branch="" pr="" agent="" opencode_config=""
+    load_session "$session" 2>/dev/null || true
+    if [[ -z "$branch" && -n "$wt_path" ]]; then
+        branch=$(git -C "$wt_path" branch --show-current 2>/dev/null || echo detached)
+    fi
+
+    # Build the top blocks (header + diffstat) into a buffer so we can measure
+    # their height and hand the agent capture whatever rows are left.
+    local agent_lbl
+    agent_lbl=$(agent_label "${agent:-$WT_DEFAULT_AGENT}")
+    local top
+    top=$(
+        local icon header
+        icon=$(get_status_icon_ansi "${status:-unknown}")
+        header="${icon} ${branch:-?}"
+        [[ -n "$pr" ]] && header+=" · PR#${pr}"
+        [[ -n "$status" ]] && header+=" · ${status}"
+        printf '%s\n' "$header"
+        [[ -n "$message" ]] && printf '%s%s%s\n' "$dim" "$message" "$reset"
+
+        # Diffstat vs the branch's base (merge-base with origin's default head).
+        # Skip it when there's no worktree to diff (master/adopted sessions).
+        if [[ -n "$wt_path" && -e "$wt_path/.git" ]]; then
+            local base_ref merge_base
+            base_ref=$(git -C "$wt_path" symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null)
+            base_ref=${base_ref#refs/remotes/}
+            [[ -n "$base_ref" ]] || base_ref="origin/main"
+            merge_base=$(git -C "$wt_path" merge-base HEAD "$base_ref" 2>/dev/null || echo HEAD)
+
+            printf '%s─── changes vs %s ───%s\n' "$dim" "${base_ref#origin/}" "$reset"
+            local stat
+            stat=$(git -C "$wt_path" -c color.ui=always diff \
+                       --stat="${cols},,12" "$merge_base" 2>/dev/null)
+            if [[ -n "$stat" ]]; then
+                printf '%s\n' "$stat"
+            else
+                printf '%s(no changes yet)%s\n' "$dim" "$reset"
+            fi
+        fi
+        printf '%s─── agent (%s) ───%s\n' "$dim" "$agent_lbl" "$reset"
+    )
+    printf '%s\n' "$top"
+
+    # Give the agent pane the remaining rows (minus a little slack), tailing so
+    # the newest output is what survives when the pane is taller than the budget.
+    local top_lines budget cap
+    top_lines=$(printf '%s\n' "$top" | wc -l)
+    budget=$(( avail - top_lines - 1 ))
+    (( budget < 4 )) && budget=4
+
+    cap=$(tmux capture-pane -p -e -t "$session:main.1" 2>/dev/null \
+          || tmux capture-pane -p -e -t "$session:agent" 2>/dev/null || true)
+    if [[ -n "$cap" ]]; then
+        printf '%s\n' "$cap" | tail -n "$budget"
+    else
+        printf '%s(session not running — Enter to revive)%s\n' "$dim" "$reset"
+    fi
+}
+
 pick_worktree() {
     check_deps
 
@@ -1164,8 +1241,8 @@ pick_worktree() {
         "${WT_FZF_VIM_ARGS[@]}" \
         --delimiter=: \
         --with-nth=3 \
-        --header="Select worktree (Enter=switch, Ctrl-D=delete, ?=preview)" \
-        --preview="tmux capture-pane -t {1}:main.1 -p -e 2>/dev/null || tmux capture-pane -t {1}:agent -p -e 2>/dev/null || echo '(no agent pane)'" \
+        --header="Select worktree (Enter=switch, Ctrl-D=delete)" \
+        --preview="$WT_BIN_DIR/wt preview-pane {1} {2}" \
         --preview-window=right:60% \
         --bind="ctrl-d:execute(wt delete {1} --force)+reload($WT_BIN_DIR/wt pick-list)") || rc=$?
     if (( rc == 130 )); then echo "Cancelled." >&2; return 0; fi
@@ -1197,8 +1274,8 @@ switch_picker() {
             "${WT_FZF_VIM_ARGS[@]}" \
             --delimiter=: \
             --with-nth=3 \
-            --header="Switch session (recent first, ?=preview)" \
-            --preview="tmux capture-pane -t {1}:main.1 -p -e 2>/dev/null || tmux capture-pane -t {1}:agent -p -e 2>/dev/null || echo '(no agent pane)'" \
+            --header="Switch session (recent first)" \
+            --preview="$WT_BIN_DIR/wt preview-pane {1} {2}" \
             --preview-window=right:60%) || rc=$?
     if (( rc == 130 )); then echo "Cancelled." >&2; return 0; fi
 
@@ -1463,7 +1540,7 @@ Usage: wt <command> [options]
 Session Management:
   new [repo] [branch]     Create new worktree in the background (interactive if no args)
   new ... --switch        Create and switch to it (default stays in current session)
-  pick, p                 Interactive session picker (fzf, ?=preview)
+  pick, p                 Interactive session picker (fzf, diff + agent preview)
   switch, s <session>     Switch to a session
   list, ls                List all sessions with status
   delete, rm <session>    Delete a session and its worktree
@@ -1514,7 +1591,7 @@ Examples:
   wt new                               Interactive: pick repo, branch, agent
   wt new ~/code feature-x              Create feature-x worktree
   wt new ~/code feature-x --agent codex  Use Codex instead of Claude
-  wt pick                              Switch sessions (? to preview agent)
+  wt pick                              Switch sessions (preview shows diff + agent)
   wt master                            Create/attach master session
   wt master --force                    Replace master session
   wt pr 42                             Find session for PR #42
@@ -1538,8 +1615,8 @@ main() {
             if [[ -n "${TMUX:-}" ]]; then
                 # Inside tmux: show the action menu
                 tmux display-menu -T " Worktrees " -x C -y C \
-                    "New worktree"       n "display-popup -E -w 80% -h 80% '$HOME/bin/wt new'" \
-                    "New + open"         N "display-popup -E -w 80% -h 80% '$HOME/bin/wt new --switch'" \
+                    "New worktree"       n "display-popup -E -w 80% -h 80% '$HOME/bin/wt new --switch'" \
+                    "New (background)"   N "display-popup -E -w 80% -h 80% '$HOME/bin/wt new'" \
                     "Switch (pick)"      s "display-popup -E -w 100% -h 100% '$HOME/bin/wt pick'" \
                     "Delete..."          d "display-popup -E -w 60% -h 40% '$HOME/bin/wt delete-pick'" \
                     "" \
@@ -1611,6 +1688,9 @@ main() {
             ;;
         pick-list)
             pick_list
+            ;;
+        preview-pane)
+            preview_pane "${1:-}" "${2:-}"
             ;;
         switch|s)
             if [[ -n "${1:-}" ]]; then
