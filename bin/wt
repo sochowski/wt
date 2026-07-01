@@ -1284,17 +1284,28 @@ interactive_new() {
 # -----------------------------------------------------------------------------
 # Build rich pick list: session_name:display_string
 pick_list() {
+    local stale_lines="" TAB
+    TAB=$(printf '\t')
     while IFS=: read -r session_name wt_path sess_status; do
-        # load_session populates agent/message/repo/branch (and re-sets wt_path
-        # to the stored value); locals keep the extra fields from leaking.
+        # load_session populates agent/message/repo/branch/pr_state (and re-sets
+        # wt_path to the stored value); locals keep the extra fields from leaking.
         local agent="" message="" repo="" branch="" status="" pr="" opencode_config=""
+        local pr_state="" pr_state_checked_at=""
         load_session "$session_name" || true
-        local icon
+        local icon badge
         icon=$(get_status_icon "${sess_status:-unknown}")
+        badge=$(pr_badge "${pr_state:-}")
         local label
         label=$(agent_label "${agent:-$WT_DEFAULT_AGENT}")
-        echo "${session_name}:${wt_path}:${icon} ${sess_status:-?}  ${label}  ${repo:-?}@${branch:-?}  ${message:-}"
+        # Queue a background PR-state refresh for stale/missing rows so badges
+        # warm up on the next open/reload (the preview refreshes the hovered row
+        # live). Uses the shared cache, so `wt ls` and the picker stay in sync.
+        if [[ -n "$branch" && -n "$wt_path" ]] && is_pr_stale "${pr_state_checked_at:-0}"; then
+            stale_lines+="${session_name}${TAB}${branch}${TAB}${wt_path}"$'\n'
+        fi
+        echo "${session_name}:${wt_path}:${icon} ${sess_status:-?}  ${label}  ${repo:-?}@${branch:-?}${badge:+ $badge}  ${message:-}"
     done < <(list_worktrees simple)
+    refresh_pr_states "$stale_lines"
 }
 
 revive_worktree_session() {
@@ -1474,6 +1485,7 @@ pick_worktree() {
     local selection rc=0
     selection=$(pick_list | fzf \
         "${WT_FZF_VIM_ARGS[@]}" \
+        --ansi \
         --delimiter=: \
         --with-nth=3 \
         --header="Select worktree (Enter=switch, Ctrl-D=delete)" \
@@ -1507,6 +1519,7 @@ switch_picker() {
           done \
         | fzf \
             "${WT_FZF_VIM_ARGS[@]}" \
+            --ansi \
             --delimiter=: \
             --with-nth=3 \
             --header="Switch session (recent first)" \

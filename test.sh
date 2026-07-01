@@ -582,6 +582,15 @@ test_pr_badge() {
     else
         fail "merged badge missing from ls" "$out"
     fi
+
+    # The fzf picker rows (pick-list) carry the same badge in the display field.
+    local picks
+    picks=$("$WT_BIN_DIR/wt" pick-list 2>/dev/null)
+    if echo "$picks" | grep -q "⬤"; then
+        pass "merged badge (⬤) shown in pick-list"
+    else
+        fail "merged badge missing from pick-list" "$picks"
+    fi
 }
 
 test_wt_status() {
