@@ -23,8 +23,62 @@ WT_DEFAULT_AGENT="${WT_DEFAULT_AGENT:-opencode}"
 WT_STATE="${WT_STATE:-$WT_BIN_DIR/wt-state}"
 [[ -x "$WT_STATE" ]] || WT_STATE="wt-state"
 
+# Opt-in vim-style modal keybindings for fzf pickers. Off by default; enable
+# with `export WT_FZF_VIM=1`.
+WT_FZF_VIM="${WT_FZF_VIM:-0}"
+
 # Ensure directories exist
 mkdir -p "$WT_BASE_DIR" "$WT_STATUS_DIR" "$WT_CONFIG_DIR"
+
+# -----------------------------------------------------------------------------
+#  Vim-style modal keybindings for fzf (opt-in via WT_FZF_VIM=1)
+# -----------------------------------------------------------------------------
+# fzf has no native modal mode, so we emulate one with unbind/rebind. Pickers
+# open in NORMAL mode: hjkl navigate and typing does not filter. Press i/a// to
+# enter INSERT mode (type to filter); Esc returns to NORMAL. The prompt shows
+# "[N] " in normal mode and "> " in insert mode.
+#
+# Every picker splices "${WT_FZF_VIM_ARGS[@]}" into its fzf call; the array is
+# empty (a no-op) unless WT_FZF_VIM is enabled.
+WT_FZF_VIM_ARGS=()
+build_fzf_vim_binds() {
+    [[ "$WT_FZF_VIM" == 1 || "$WT_FZF_VIM" == true ]] || return 0
+
+    # Letters with a normal-mode action of their own — excluded from the blanket
+    # "ignore" suppression below so their bindings aren't clobbered.
+    local nav=" i a j k l h g G q "
+    local c
+
+    # Keys released in INSERT mode (so they type) and re-suppressed on Esc: every
+    # printable key that can appear in a query — alnum plus the punctuation found
+    # in branch/session names.
+    local toggle=''
+    for c in {a..z} {A..Z} {0..9}; do toggle+="$c,"; done
+    toggle+='/,-,_,.'
+
+    local nb=''
+    # Suppress every non-nav printable key in NORMAL mode.
+    for c in {a..z} {A..Z} {0..9}; do
+        [[ "$nav" == *" $c "* ]] && continue
+        nb+="$c:ignore,"
+    done
+    nb+='-:ignore,_:ignore,.:ignore,'
+    # Navigation. (Ctrl-d/Ctrl-u are intentionally left to fzf's defaults so they
+    # keep working in insert mode and don't collide with pick_worktree's Ctrl-d.)
+    nb+='j:down,k:up,g:first,G:last,h:abort,l:accept,q:abort,'
+    # Enter INSERT: release the toggle keys, arm Esc to return, flip the prompt.
+    nb+="i:unbind($toggle)+rebind(esc)+change-prompt(> ),"
+    nb+="a:unbind($toggle)+rebind(esc)+change-prompt(> ),"
+    nb+="/:unbind($toggle)+rebind(esc)+change-prompt(> ),"
+    # Esc (armed only in INSERT): re-suppress toggle keys, disarm itself so a
+    # second Esc aborts as usual, restore the prompt.
+    nb+="esc:rebind($toggle)+unbind(esc)+change-prompt([N] ),"
+    # Start in NORMAL: Esc disarmed (aborts), normal-mode prompt.
+    nb+='start:unbind(esc)+change-prompt([N] )'
+
+    WT_FZF_VIM_ARGS=(--bind "$nb")
+}
+build_fzf_vim_binds
 
 # -----------------------------------------------------------------------------
 #  Agent Profiles
@@ -811,6 +865,7 @@ pick_repo() {
     # not redirect stdin from /dev/tty here — that would override the pipe and
     # feed fzf an empty candidate list.
     echo "$repos" | fzf \
+        "${WT_FZF_VIM_ARGS[@]}" \
         --header="Select repository" \
         --preview='
             echo "=== Branches ==="
@@ -835,6 +890,7 @@ pick_branch() {
     # Add "create new" option at top
     local selection
     selection=$(echo -e "[+ Create new branch]\n$branches" | fzf \
+        "${WT_FZF_VIM_ARGS[@]}" \
         --header="Select branch or create new" \
         --preview='
             branch="{}"
@@ -859,7 +915,7 @@ pick_branch() {
         echo "Base branch (default: current HEAD):" >&2
         local base_branch
         base_branch=$(git -C "$repo_path" branch --format='%(refname:short)' 2>/dev/null | \
-                      fzf --header="Select base branch (ESC for default)" || echo "")
+                      fzf "${WT_FZF_VIM_ARGS[@]}" --header="Select base branch (ESC for default)" || echo "")
 
         if [[ -n "$base_branch" ]]; then
             echo "${new_branch}:${base_branch}"
@@ -896,7 +952,7 @@ pick_agent() {
               local lbl; lbl=$(agent_label "$a")
               [[ "$a" == "$WT_DEFAULT_AGENT" ]] && lbl="$lbl (default)"
               printf '%s\t%s\n' "$a" "$lbl"
-          done | fzf --delimiter='\t' --with-nth=2 --header="Select agent" | cut -f1)
+          done | fzf "${WT_FZF_VIM_ARGS[@]}" --delimiter='\t' --with-nth=2 --header="Select agent" | cut -f1)
 
     printf '%s\n' "${sel:-$WT_DEFAULT_AGENT}"
 }
@@ -1046,6 +1102,7 @@ pick_worktree() {
     # Rows arrive most-recently-active first (recency ranking in list_worktrees).
     local selection
     selection=$(pick_list | fzf \
+        "${WT_FZF_VIM_ARGS[@]}" \
         --delimiter=: \
         --with-nth=3 \
         --header="Select worktree (Enter=switch, Ctrl-D=delete, ?=preview)" \
@@ -1078,6 +1135,7 @@ switch_picker() {
               tmux has-session -t "$name" 2>/dev/null && printf '%s:%s:%s\n' "$name" "$path" "$rest"
           done \
         | fzf \
+            "${WT_FZF_VIM_ARGS[@]}" \
             --delimiter=: \
             --with-nth=3 \
             --header="Switch session (recent first, ?=preview)" \
@@ -1270,6 +1328,7 @@ pr_pick() {
     selection=$(gh pr list --json number,title,headRefName \
         --template '{{range .}}{{.number}}	{{.title}}	{{.headRefName}}{{"\n"}}{{end}}' 2>/dev/null \
         | fzf \
+            "${WT_FZF_VIM_ARGS[@]}" \
             --header="Select PR to open" \
             --delimiter='\t' \
             --with-nth=1,2 \
@@ -1291,6 +1350,7 @@ delete_pick() {
 
     local selection
     selection=$(list_worktrees full | fzf \
+        "${WT_FZF_VIM_ARGS[@]}" \
         --ansi \
         --header="Select worktree to delete" \
         || true)
