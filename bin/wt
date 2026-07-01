@@ -204,18 +204,6 @@ trap 'log "EXIT code=$? line=$LINENO cmd=$BASH_COMMAND"' ERR
 # -----------------------------------------------------------------------------
 #  Cross-Platform Helpers
 # -----------------------------------------------------------------------------
-notify() {
-    local title="$1"
-    local message="$2"
-    local urgency="${3:-normal}"  # low, normal, critical
-
-    if [[ "$OSTYPE" == "darwin"* ]]; then
-        osascript -e "display notification \"$message\" with title \"$title\""
-    else
-        notify-send -u "$urgency" "$title" "$message"
-    fi
-}
-
 clipboard_copy() {
     if [[ "$OSTYPE" == "darwin"* ]]; then
         pbcopy
@@ -936,8 +924,6 @@ create_worktree() {
     else
         echo "Created session '$session_name' (still here — 'wt pick' or prefix+W to open it)"
     fi
-
-    notify "Worktree Created" "$repo_name @ $branch"
 }
 
 # Switch to a worktree session
@@ -1006,7 +992,6 @@ delete_worktree() {
     rm -f "$WT_CONFIG_DIR/opencode-mcp/${session_name}.json"
 
     echo "Deleted: $session_name"
-    notify "Worktree Deleted" "$session_name"
 }
 
 # -----------------------------------------------------------------------------
@@ -1633,7 +1618,6 @@ master() {
         --agent "$agent" --opencode-config "$opencode_config" >/dev/null
 
     switch_to "$session"
-    notify "Master Session" "wt-master created ($label)"
 }
 
 # -----------------------------------------------------------------------------
@@ -1747,11 +1731,6 @@ start_agent() {
         return 1
     fi
 
-    local agent
-    agent=$(tmux show-option -qv -t "$session_name" @wt-agent 2>/dev/null || echo "$WT_DEFAULT_AGENT")
-    local label
-    label=$(agent_label "$agent")
-
     # Send agent launch command
     if [[ -n "$task" ]]; then
         tmux send-keys -t "$session_name:main.1" "$WT_BIN_DIR/wt-agent-launch \"$task\"" Enter
@@ -1759,8 +1738,6 @@ start_agent() {
         tmux send-keys -t "$session_name:main.1" "$WT_BIN_DIR/wt-agent-launch" Enter
     fi
     set_status "$session_name" "working" "${task:-Interactive session}"
-
-    notify "$label Started" "$session_name: ${task:-Interactive session}"
 }
 
 # -----------------------------------------------------------------------------
