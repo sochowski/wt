@@ -136,16 +136,48 @@ test_tmux_conf_syntax() {
 test_find_git_repos() {
     section "find_git_repos"
 
-    local output
-    # Extract find_git_repos function and run it standalone (sourcing wt runs main)
-    output=$(bash -c "$(sed -n '/^find_git_repos()/,/^}/p' "$WT_BIN_DIR/wt"); find_git_repos" 2>/dev/null || true)
+    # Build a hermetic search tree so the test doesn't depend on the real home:
+    #   scanroot/               <- itself a primary repo (dotfiles-style)
+    #   scanroot/childrepo/.git <- primary repo child
+    #   scanroot/childtree/.git <- worktree (.git file), must be skipped
+    #   scanroot/notarepo/      <- plain dir, must be skipped
+    local scanroot; scanroot=$(mktemp -d)/scanroot
+    mkdir -p "$scanroot/.git" "$scanroot/childrepo/.git" \
+             "$scanroot/childtree" "$scanroot/notarepo"
+    echo "gitdir: /elsewhere" > "$scanroot/childtree/.git"
 
-    # Should not be empty (user has repos in ~/workspace)
+    local output
+    # Extract find_git_repos function and run it standalone (sourcing wt runs
+    # main), passing WT_REPO_DIRS explicitly since the standalone shell has no
+    # config block.
+    output=$(WT_REPO_DIRS="$scanroot" bash -c "$(sed -n '/^find_git_repos()/,/^}/p' "$WT_BIN_DIR/wt"); find_git_repos" 2>/dev/null || true)
+
     if [[ -n "$output" ]]; then
         local count=$(echo "$output" | wc -l | tr -d ' ')
         pass "found $count repos"
     else
         fail "no repos found"
+    fi
+
+    # The search dir itself is a primary repo, so it must be included.
+    if echo "$output" | grep -qx "$scanroot"; then
+        pass "search dir included when it is itself a repo"
+    else
+        fail "search dir not included when it is itself a repo"
+    fi
+
+    # A primary-repo child must be included.
+    if echo "$output" | grep -qx "$scanroot/childrepo"; then
+        pass "primary-repo child included"
+    else
+        fail "primary-repo child not included"
+    fi
+
+    # A plain non-repo child must not appear.
+    if echo "$output" | grep -qx "$scanroot/notarepo"; then
+        fail "non-repo child should not be listed"
+    else
+        pass "non-repo child skipped"
     fi
 
     # Should NOT contain worktrees (files with .git as file, not directory)
@@ -162,18 +194,21 @@ test_find_git_repos() {
         fail "found $worktree_count worktrees in list (should be filtered)"
     fi
 
-    # Should only have depth-1 children (no deeply nested)
+    # Repos must be either the search dir itself or one of its immediate
+    # children — never more deeply nested.
     local deep_count=0
     while IFS= read -r repo; do
-        local rel="${repo#$HOME/}"
-        local depth=$(echo "$rel" | tr '/' '\n' | wc -l | tr -d ' ')
-        if [[ $depth -gt 2 ]]; then
+        [[ -n "$repo" ]] || continue
+        local rel="${repo#$scanroot}"
+        rel="${rel#/}"
+        # rel is "" (the search dir) or a single path component (a child).
+        if [[ "$rel" == */* ]]; then
             ((deep_count++))
         fi
     done <<< "$output"
 
     if [[ $deep_count -eq 0 ]]; then
-        pass "all repos are top-level (depth 1)"
+        pass "all repos are top-level (search dir or immediate children)"
     else
         fail "$deep_count repos are deeply nested"
     fi
