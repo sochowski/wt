@@ -581,23 +581,23 @@ test_tmux_status_bar() {
 }
 
 test_choose_tree_format() {
-    section "choose-tree Format String"
+    section "Switcher Binding"
 
     if [[ -z "${TMUX:-}" ]]; then
         fail "skipped: not inside tmux"
         return
     fi
 
-    # Test that the format string in tmux-wt.conf is valid by checking
-    # if choose-tree can be invoked (we cancel immediately)
+    # The switcher (prefix+W) is a recency-ranked fzf popup that shells out to
+    # `wt switch`; verify the binding is wired up in the config.
     local conf="$(dirname "$WT_BIN_DIR")/config/tmux-wt.conf"
     local format_line
-    format_line=$(grep 'choose-tree' "$conf" | head -1)
+    format_line=$(grep -E 'bind W .*wt switch' "$conf" | head -1)
 
     if [[ -n "$format_line" ]]; then
-        pass "choose-tree binding found in config"
+        pass "wt switch popup binding found in config"
     else
-        fail "choose-tree binding not found in config"
+        fail "wt switch popup binding not found in config"
     fi
 
     # Verify @wt-icon is readable in format context
@@ -629,8 +629,10 @@ test_display_menu_commands() {
 
     while IFS= read -r cmd; do
         local subcmd="${cmd#wt }"
-        # Check that the subcommand exists in main()
-        if grep -qF "\"$subcmd\"" "$WT_BIN_DIR/wt" || grep -qF "'$subcmd'" "$WT_BIN_DIR/wt" || grep -qF "${subcmd})" "$WT_BIN_DIR/wt"; then
+        # Check that the subcommand exists in main(). The regex handles case
+        # labels where the subcommand is any alias in an alternation, e.g.
+        # `switch|s)` or `list|ls)`, not just a bare `subcmd)`.
+        if grep -qF "\"$subcmd\"" "$WT_BIN_DIR/wt" || grep -qF "'$subcmd'" "$WT_BIN_DIR/wt" || grep -qE "[[:space:]|]${subcmd}[|)]" "$WT_BIN_DIR/wt"; then
             pass "menu cmd '$cmd' has handler in wt"
         else
             fail "menu cmd '$cmd' has no handler in wt"
@@ -675,7 +677,7 @@ test_adopt_existing() {
 
     # Try to create a worktree on main — should adopt the existing checkout.
     # Use a LOCAL session var so we don't clobber the shared $TEST_SESSION that
-    # later tests (choose-tree, delete) still depend on.
+    # later tests (switcher, delete) still depend on.
     local output adopt_session="test-wt-repo-main"
     output=$("$WT_BIN_DIR/wt" new "$TEST_REPO" main 2>&1)
 

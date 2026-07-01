@@ -10,7 +10,7 @@ Supports **Claude**, **Codex**, **Gemini**, and **opencode** — any session can
 - Multi-agent: Claude, Codex, Gemini, opencode (auto-detects installed agents)
 - MCP profiles: per-session MCP server configuration
 - Env file sync: auto-copy/symlink `.env` files via `.wt/sync` config
-- Native tmux UI: `choose-tree` switcher with live status icons
+- Recency-ranked switcher: most-recently-active session first, everywhere (`wt ls`, `wt pick`, `prefix+W`)
 - Action menu via `display-menu` for quick session management
 - fzf picker with status info and agent conversation preview
 - Auto-connects Claude to Neovim via claudecode.nvim (`--ide`)
@@ -69,7 +69,7 @@ wt sync-tmux                          # Restore tmux options after restart
 
 | Key | Action |
 |-----|--------|
-| `prefix + W` | Session switcher (native choose-tree with status icons) |
+| `prefix + W` | Session switcher (fzf popup, most-recently-active first) |
 | `prefix + w` | Action menu (new, switch, delete, PR, master) |
 | `prefix + M` | Jump to master orchestrator session |
 
@@ -221,7 +221,7 @@ Agent hook event
   ├── wt-hook writes tmux @wt-* session options
   └── wt-hook calls tmux refresh-client -S (instant redraw)
 
-prefix+W → choose-tree reads @wt-icon, @wt-status, @wt-message
+prefix+W → fzf popup (wt switch) lists live sessions, most-recently-active first
 prefix+w → display-menu launches wt subcommands in popups
 Status bar → wt-tmux-status aggregates counts from .status files
 ```

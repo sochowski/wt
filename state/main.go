@@ -123,6 +123,7 @@ func cmdList(st *Store, args []string) {
 	fs := flag.NewFlagSet("list", flag.ExitOnError)
 	onlyMaster := fs.Bool("master", false, "only the master row")
 	noMaster := fs.Bool("no-master", false, "exclude the master row")
+	sort := fs.String("sort", "recency", "order: recency (most-recently-active first) or name")
 	_ = fs.Bool("json", false, "output JSON (default)")
 	fs.Parse(args)
 
@@ -133,7 +134,7 @@ func cmdList(st *Store, args []string) {
 	case *noMaster:
 		mode = "exclude"
 	}
-	sessions, err := st.List(mode)
+	sessions, err := st.List(mode, *sort)
 	if err != nil {
 		fatalf("list: %v", err)
 	}
@@ -250,7 +251,7 @@ usage:
                       [--wt-path P] [--pr N] [--agent A]
                       [--opencode-config C] [--is-master 0|1]
   wt-state get <name> [--field COL | --json]
-  wt-state list [--master | --no-master] [--json]
+  wt-state list [--master | --no-master] [--sort recency|name] [--json]
   wt-state counts [--json]
   wt-state delete <name>
   wt-state migrate [--dir DIR]

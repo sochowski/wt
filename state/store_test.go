@@ -148,9 +148,46 @@ func TestMigrateUnescapesLegacy(t *testing.T) {
 	if _, err := st.Migrate(dir); err != nil {
 		t.Fatalf("second Migrate: %v", err)
 	}
-	all, _ := st.List("all")
+	all, _ := st.List("all", "recency")
 	if len(all) != 1 {
 		t.Errorf("expected 1 row after re-migrate, got %d", len(all))
+	}
+}
+
+func TestListRecencyOrder(t *testing.T) {
+	st, clock := newStore(t)
+
+	// Write three sessions at increasing times, out of name order.
+	*clock = 100
+	st.Set("bravo", map[string]string{"status": "idle"})
+	*clock = 300
+	st.Set("alpha", map[string]string{"status": "idle"})
+	*clock = 200
+	st.Set("charlie", map[string]string{"status": "idle"})
+
+	// recency: most-recently-updated first, regardless of name.
+	rec, _ := st.List("all", "recency")
+	gotRec := []string{rec[0].Name, rec[1].Name, rec[2].Name}
+	wantRec := []string{"alpha", "charlie", "bravo"}
+	for i := range wantRec {
+		if gotRec[i] != wantRec[i] {
+			t.Fatalf("recency order = %v, want %v", gotRec, wantRec)
+		}
+	}
+
+	// name: alphabetical.
+	byName, _ := st.List("all", "name")
+	if byName[0].Name != "alpha" || byName[1].Name != "bravo" || byName[2].Name != "charlie" {
+		t.Fatalf("name order = %v", []string{byName[0].Name, byName[1].Name, byName[2].Name})
+	}
+
+	// Tie-break: equal updated_at falls back to name ASC.
+	*clock = 500
+	st.Set("zulu", map[string]string{"status": "idle"})
+	st.Set("delta", map[string]string{"status": "idle"})
+	tie, _ := st.List("all", "recency")
+	if tie[0].Name != "delta" || tie[1].Name != "zulu" {
+		t.Fatalf("tie-break order = %v, want delta before zulu", []string{tie[0].Name, tie[1].Name})
 	}
 }
 
