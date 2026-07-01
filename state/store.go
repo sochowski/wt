@@ -190,9 +190,13 @@ ON CONFLICT(name) DO UPDATE SET
 	return cur, nil
 }
 
-// List returns all sessions ordered by name. master controls inclusion of the
-// master row: "all" (default), "only", or "exclude".
-func (s *Store) List(master string) ([]Session, error) {
+// List returns all sessions. master controls inclusion of the master row:
+// "all" (default), "only", or "exclude". sort controls ordering: "recency"
+// (default) puts the most-recently-active session first (updated_at DESC), with
+// name as a stable tie-break; "name" sorts alphabetically. This is the single
+// ranking used by every wt surface (wt ls, wt pick, the switcher), so they all
+// agree on order.
+func (s *Store) List(master, sort string) ([]Session, error) {
 	q := `SELECT ` + selectCols + ` FROM sessions`
 	switch master {
 	case "only":
@@ -200,7 +204,12 @@ func (s *Store) List(master string) ([]Session, error) {
 	case "exclude":
 		q += ` WHERE is_master = 0`
 	}
-	q += ` ORDER BY name`
+	switch sort {
+	case "name":
+		q += ` ORDER BY name`
+	default: // "recency"
+		q += ` ORDER BY updated_at DESC, name ASC`
+	}
 
 	rows, err := s.db.Query(q)
 	if err != nil {

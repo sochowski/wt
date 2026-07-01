@@ -471,63 +471,74 @@ get_bare_repo() {
 }
 
 # List all worktrees across all repos
+# Render a single worktree row in the requested format (no trailing newline;
+# rows are collected into an array, sorted by recency, then printed).
+render_worktree_row() {
+    local format="$1" session_name="$2" wt_path="$3" status="$4" repo="$5" branch="$6"
+    case "$format" in
+        full)
+            local icon
+            icon=$(get_status_icon_ansi "${status:-unknown}")
+            printf "%s %-20s %-25s %s" "$icon" "${repo:-?}" "${branch:-?}" "${wt_path:-?}"
+            ;;
+        simple)  printf "%s:%s:%s" "$session_name" "${wt_path:-?}" "${status:-unknown}" ;;
+        session) printf "%s" "$session_name" ;;
+    esac
+}
+
+# List worktree sessions, most-recently-active first. Recency is the single
+# ranking shared by every surface (wt ls, wt pick, the switcher): the store's
+# updated_at is the source of truth, with directory mtime as a fallback for
+# on-disk worktrees that were never tracked. Sorting requires buffering all
+# rows, so the list appears once fully assembled rather than streaming in.
 list_worktrees() {
     local format="${1:-full}"
     local seen_sessions=""
+    local -a rows=()
+    local TAB
+    TAB=$(printf '\t')
 
-    # Scan worktrees directory
+    # Fetch store metadata once. TSV columns: name status repo branch wt_path updated_at
+    local store_data
+    store_data=$("$WT_STATE" list --no-master 2>/dev/null \
+        | jq -r '.[] | [.name,.status,.repo,.branch,.wt_path,.updated_at] | @tsv' || true)
+
+    # Phase A: worktrees on disk under WT_BASE_DIR (authoritative for existence).
     if [[ -d "$WT_BASE_DIR" ]]; then
         while IFS= read -r -d '' wt_path; do
-            if [[ -d "$wt_path/.git" ]] || [[ -f "$wt_path/.git" ]]; then
-                local branch repo_name session_name status
-                branch=$(git -C "$wt_path" branch --show-current 2>/dev/null || echo "detached")
-                repo_name=$(basename "$(dirname "$wt_path")")
-                session_name="${repo_name}-${branch//\//-}"
-                status=$(get_status "$session_name")
-                seen_sessions="${seen_sessions}:${session_name}:"
-
-                case "$format" in
-                    full)
-                        local icon
-                        icon=$(get_status_icon_ansi "$status")
-                        printf "%s %-20s %-25s %s\n" "$icon" "$repo_name" "$branch" "$wt_path"
-                        ;;
-                    simple)
-                        echo "$session_name:$wt_path:$status"
-                        ;;
-                    session)
-                        echo "$session_name"
-                        ;;
-                esac
+            [[ -d "$wt_path/.git" || -f "$wt_path/.git" ]] || continue
+            local branch repo_name session_name srow status key
+            branch=$(git -C "$wt_path" branch --show-current 2>/dev/null || echo "detached")
+            repo_name=$(basename "$(dirname "$wt_path")")
+            session_name="${repo_name}-${branch//\//-}"
+            seen_sessions="${seen_sessions}:${session_name}:"
+            # Exact field match (awk, not grep) so repo/branch names with regex
+            # metacharacters like '.' or '+' can't false-match.
+            srow=$(awk -F"$TAB" -v n="$session_name" '$1==n{print; exit}' <<<"$store_data")
+            if [[ -n "$srow" ]]; then
+                status=$(cut -f2 <<<"$srow")
+                key=$(cut -f6 <<<"$srow")
+            else
+                status="unknown"
+                key=$(stat -c %Y "$wt_path" 2>/dev/null || stat -f %m "$wt_path" 2>/dev/null || echo 0)
             fi
+            rows+=("${key:-0}${TAB}$(render_worktree_row "$format" "$session_name" "$wt_path" "$status" "$repo_name" "$branch")")
         done < <(find "$WT_BASE_DIR" -maxdepth 2 -type d -print0 2>/dev/null)
     fi
 
-    # Also include sessions tracked in the store (covers adopted/primary worktrees)
-    local session_name status repo branch wt_path
-    while IFS=$'\t' read -r session_name status repo branch wt_path; do
-        [[ -n "$session_name" ]] || continue
+    # Phase B: store sessions not found on disk (adopted/primary worktrees),
+    # included only when a live tmux session exists.
+    local name status repo branch wt_path updated_at
+    while IFS="$TAB" read -r name status repo branch wt_path updated_at; do
+        [[ -n "$name" ]] || continue
+        [[ "$seen_sessions" == *":${name}:"* ]] && continue
+        tmux has-session -t "$name" 2>/dev/null || continue
+        rows+=("${updated_at:-0}${TAB}$(render_worktree_row "$format" "$name" "${wt_path:-?}" "${status:-unknown}" "${repo:-?}" "${branch:-?}")")
+    done <<<"$store_data"
 
-        # Skip already-seen
-        [[ "$seen_sessions" == *":${session_name}:"* ]] && continue
-
-        # Only include if tmux session exists
-        tmux has-session -t "$session_name" 2>/dev/null || continue
-
-        case "$format" in
-            full)
-                local icon
-                icon=$(get_status_icon_ansi "${status:-unknown}")
-                printf "%s %-20s %-25s %s\n" "$icon" "${repo:-?}" "${branch:-?}" "${wt_path:-?}"
-                ;;
-            simple)
-                echo "$session_name:${wt_path:-?}:${status:-unknown}"
-                ;;
-            session)
-                echo "$session_name"
-                ;;
-        esac
-    done < <("$WT_STATE" list --no-master | jq -r '.[] | [.name,.status,.repo,.branch,.wt_path] | @tsv')
+    # Emit most-recently-active first, then strip the leading recency key.
+    [[ ${#rows[@]} -gt 0 ]] || return 0
+    printf '%s\n' "${rows[@]}" | sort -t"$TAB" -k1,1nr -s | cut -f2-
 }
 
 # Create a new worktree and tmux session
@@ -577,10 +588,19 @@ create_worktree() {
         elif git -C "$repo_path" show-ref --verify --quiet "refs/heads/$branch" 2>/dev/null; then
             git -C "$repo_path" worktree add "$wt_path" "$branch"
         else
-            # Branch doesn't exist — create from origin/<default> or HEAD
+            # Branch doesn't exist — create from the base. Prefer the remote-
+            # tracking ref (origin/<base>), fall back to a local branch of that
+            # name, else current HEAD. This accepts either a remote default like
+            # "main" or a local-only base picked interactively.
             local base_ref="HEAD"
             if [[ -n "$base_branch" ]]; then
-                base_ref="origin/$base_branch"
+                if git -C "$repo_path" show-ref --verify --quiet "refs/remotes/origin/$base_branch" 2>/dev/null; then
+                    base_ref="origin/$base_branch"
+                elif git -C "$repo_path" show-ref --verify --quiet "refs/heads/$base_branch" 2>/dev/null; then
+                    base_ref="$base_branch"
+                else
+                    base_ref="origin/$base_branch"  # let git report the error clearly
+                fi
             fi
             echo "Creating branch '$branch' from $base_ref..."
             git -C "$repo_path" worktree add -b "$branch" "$wt_path" "$base_ref"
@@ -787,6 +807,9 @@ pick_repo() {
         return
     fi
 
+    # Candidates come from the pipe; fzf opens /dev/tty for its UI itself. Do
+    # not redirect stdin from /dev/tty here — that would override the pipe and
+    # feed fzf an empty candidate list.
     echo "$repos" | fzf \
         --header="Select repository" \
         --preview='
@@ -796,7 +819,7 @@ pick_repo() {
             echo "=== Recent commits ==="
             git -C {} log --oneline -5 2>/dev/null
         ' \
-        --preview-window=right:50% </dev/tty
+        --preview-window=right:50%
 }
 
 # Interactive branch picker (shows existing + option to create new)
@@ -825,7 +848,7 @@ pick_branch() {
                 echo "Branch not yet created locally"
             fi
         ' \
-        --preview-window=right:50% </dev/tty)
+        --preview-window=right:50%)
 
     if [[ "$selection" == "[+ Create new branch]" ]]; then
         echo "" >&2
@@ -836,7 +859,7 @@ pick_branch() {
         echo "Base branch (default: current HEAD):" >&2
         local base_branch
         base_branch=$(git -C "$repo_path" branch --format='%(refname:short)' 2>/dev/null | \
-                      fzf --header="Select base branch (ESC for current HEAD)" </dev/tty || echo "")
+                      fzf --header="Select base branch (ESC for default)" || echo "")
 
         if [[ -n "$base_branch" ]]; then
             echo "${new_branch}:${base_branch}"
@@ -848,6 +871,36 @@ pick_branch() {
     fi
 }
 
+# Interactive agent picker (fzf). Emits the chosen agent id on stdout. With one
+# (or zero) agents installed there's nothing to choose, so it returns that agent
+# without prompting. The default agent is listed first so it's preselected.
+pick_agent() {
+    local agents=() a
+    while IFS= read -r a; do agents+=("$a"); done < <(available_agents)
+
+    if [[ ${#agents[@]} -le 1 ]]; then
+        printf '%s\n' "${agents[0]:-$WT_DEFAULT_AGENT}"
+        return
+    fi
+
+    # Order the default first so fzf lands on it; show labels, return the id.
+    local ordered=("$WT_DEFAULT_AGENT")
+    for a in "${agents[@]}"; do
+        [[ "$a" == "$WT_DEFAULT_AGENT" ]] || ordered+=("$a")
+    done
+
+    # Candidates come from the pipe; fzf opens /dev/tty for its UI itself. A
+    # `</dev/tty` here would override the pipe and give fzf an empty list.
+    local sel
+    sel=$(for a in "${ordered[@]}"; do
+              local lbl; lbl=$(agent_label "$a")
+              [[ "$a" == "$WT_DEFAULT_AGENT" ]] && lbl="$lbl (default)"
+              printf '%s\t%s\n' "$a" "$lbl"
+          done | fzf --delimiter='\t' --with-nth=2 --header="Select agent" | cut -f1)
+
+    printf '%s\n' "${sel:-$WT_DEFAULT_AGENT}"
+}
+
 # Interactive new worktree creation
 # Flow: pick repo → pick/create branch (based on origin/main) → create worktree
 interactive_new() {
@@ -857,38 +910,11 @@ interactive_new() {
 
     log "interactive_new start repo_path='$repo_path' branch='$branch'"
 
-    # Step 1: Pick repo
+    # Step 1: Pick repo (fzf, with branch/commit preview)
     if [[ -z "$repo_path" ]]; then
         log "finding repos..."
-
-        local repos=()
-        local i=1
-        echo ""
-        echo "Repositories:"
-        echo "─────────────"
-        while IFS= read -r dir; do
-            repos+=("$dir")
-            printf "  [%d] %s\n" "$i" "$(basename "$dir")"
-            ((i++))
-        done < <(find_git_repos | sort -u)
-        log "found ${#repos[@]} repos"
-
-        if [[ ${#repos[@]} -eq 0 ]]; then
-            echo "  No repos found."
-            echo -n "  Enter repo path: "
-            read -r repo_path </dev/tty
-        else
-            echo ""
-            echo -n "Select [1-$((i-1))]: "
-            read -r selection </dev/tty
-            log "repo selection='$selection'"
-
-            if [[ "$selection" =~ ^[0-9]+$ ]] && [[ $selection -ge 1 ]] && [[ $selection -lt $i ]]; then
-                repo_path="${repos[$((selection-1))]}"
-            else
-                repo_path="$selection"
-            fi
-        fi
+        repo_path=$(pick_repo)
+        log "repo selection='$repo_path'"
 
         if [[ -z "$repo_path" ]]; then
             echo "No repo selected."
@@ -913,82 +939,39 @@ interactive_new() {
     local default_branch
     default_branch=$(git -C "$repo_path" symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||' || echo "main")
 
-    # Step 3: Pick or create branch
+    # Step 3: Pick or create branch (fzf). pick_branch returns either an existing
+    # branch, a new "branch", or "branch:base" when a base was chosen for a new
+    # branch. Absent an explicit base we default to origin/$default_branch, the
+    # flow's stated intent. base_branch is only consulted when the branch doesn't
+    # exist yet, so passing it for an existing branch is harmless.
+    local base_branch="$default_branch"
     if [[ -z "$branch" ]]; then
-        local branches=()
-        local i=1
-        echo ""
-        echo "Branches (new branches based on origin/$default_branch):"
-        echo "────────────────────────────────────────────────────────"
-        echo "  [n] Create new branch"
-        while IFS= read -r b; do
-            branches+=("$b")
-            printf "  [%d] %s\n" "$((i++))" "$b"
-        done < <(git -C "$repo_path" branch --format='%(refname:short)' 2>/dev/null)
-
-        echo ""
-        echo -n "Select or enter branch name: "
-        read -r selection </dev/tty
+        local selection
+        selection=$(pick_branch "$repo_path")
         log "branch selection='$selection'"
 
-        if [[ "$selection" == "n" ]]; then
-            echo -n "New branch name: "
-            read -r branch </dev/tty
-            log "new branch name='$branch'"
-        elif [[ "$selection" =~ ^[0-9]+$ ]] && [[ $selection -ge 1 ]] && [[ $selection -lt $i ]]; then
-            branch="${branches[$((selection-1))]}"
-        else
-            branch="$selection"
-        fi
-
-        if [[ -z "$branch" ]]; then
+        if [[ -z "$selection" ]]; then
             echo "No branch selected."
             return 1
         fi
-    fi
-
-    log "branch=$branch repo_path=$repo_path default_branch=$default_branch"
-
-    # Step 4: Pick agent
-    local agent="$WT_DEFAULT_AGENT"
-    local agents=()
-    while IFS= read -r a; do
-        agents+=("$a")
-    done < <(available_agents)
-
-    if [[ ${#agents[@]} -gt 1 ]]; then
-        local i=1
-        echo ""
-        echo "Agent:"
-        echo "──────"
-        for a in "${agents[@]}"; do
-            local label
-            label=$(agent_label "$a")
-            if [[ "$a" == "$WT_DEFAULT_AGENT" ]]; then
-                printf "  [%d] %s (default)\n" "$i" "$label"
-            else
-                printf "  [%d] %s\n" "$i" "$label"
-            fi
-            ((i++))
-        done
-        echo ""
-        echo -n "Select [1-$((i-1))]: "
-        read -r selection </dev/tty
-        log "agent selection='$selection'"
-
-        if [[ -n "$selection" && "$selection" =~ ^[0-9]+$ ]] && [[ $selection -ge 1 ]] && [[ $selection -lt $i ]]; then
-            agent="${agents[$((selection-1))]}"
+        branch="${selection%%:*}"
+        if [[ "$selection" == *:* ]]; then
+            base_branch="${selection#*:}"
         fi
-    elif [[ ${#agents[@]} -eq 1 ]]; then
-        agent="${agents[0]}"
     fi
+
+    log "branch=$branch repo_path=$repo_path base_branch=$base_branch"
+
+    # Step 4: Pick agent (fzf)
+    local agent
+    agent=$(pick_agent)
 
     local agent_display
     agent_display=$(agent_label "$agent")
 
     echo ""
-    echo "Creating worktree: $repo_name @ $branch (from origin/$default_branch) [$agent_display]"
-    create_worktree "$repo_path" "$branch" false "" "$default_branch" "$agent" "$switch_after"
+    echo "Creating worktree: $repo_name @ $branch (base: origin/$base_branch) [$agent_display]"
+    create_worktree "$repo_path" "$branch" false "" "$base_branch" "$agent" "$switch_after"
 }
 
 # -----------------------------------------------------------------------------
@@ -1060,9 +1043,7 @@ revive_worktree_session() {
 pick_worktree() {
     check_deps
 
-    # Stream rows into fzf as they're produced — the picker opens instantly
-    # and fills in live (with fzf's own spinner) instead of waiting for the
-    # full ~250-worktree scan to finish first.
+    # Rows arrive most-recently-active first (recency ranking in list_worktrees).
     local selection
     selection=$(pick_list | fzf \
         --delimiter=: \
@@ -1081,6 +1062,32 @@ pick_worktree() {
             printf "Session '%s' is not running. Reviving...\n" "$session_name" >/dev/tty
             revive_worktree_session "$session_name" "$wt_path" || return 1
         fi
+        switch_to "$session_name"
+    fi
+}
+
+# Recency-ranked session switcher (bound to prefix+W via a tmux popup). Unlike
+# pick_worktree it only lists sessions with a live tmux session — switching, not
+# reviving — so it shares the exact recency order that choose-tree couldn't.
+switch_picker() {
+    check_deps
+
+    local selection
+    selection=$(pick_list \
+        | while IFS=: read -r name path rest; do
+              tmux has-session -t "$name" 2>/dev/null && printf '%s:%s:%s\n' "$name" "$path" "$rest"
+          done \
+        | fzf \
+            --delimiter=: \
+            --with-nth=3 \
+            --header="Switch session (recent first, ?=preview)" \
+            --preview="tmux capture-pane -t {1}:main.1 -p -e 2>/dev/null || tmux capture-pane -t {1}:agent -p -e 2>/dev/null || echo '(no agent pane)'" \
+            --preview-window=right:60% \
+        || true)
+
+    if [[ -n "$selection" ]]; then
+        local session_name
+        session_name=$(echo "$selection" | cut -d: -f1)
         switch_to "$session_name"
     fi
 }
@@ -1267,7 +1274,7 @@ pr_pick() {
             --delimiter='\t' \
             --with-nth=1,2 \
             --preview='echo "PR #{1} → branch: {3}"' \
-        </dev/tty || true)
+        || true)
 
     if [[ -n "$selection" ]]; then
         local pr_num
@@ -1369,7 +1376,7 @@ Options for 'new':
 
 Tmux Keybindings:
   prefix + w    Action menu (new, switch, delete, PR, master)
-  prefix + W    Session switcher (choose-tree with status icons)
+  prefix + W    Session switcher (fzf popup, most-recently-active first)
   prefix + M    Jump to master session
 
 MCP Profiles:
@@ -1479,7 +1486,11 @@ main() {
             pick_list
             ;;
         switch|s)
-            switch_to "${1:-}"
+            if [[ -n "${1:-}" ]]; then
+                switch_to "$1"
+            else
+                switch_picker
+            fi
             ;;
         delete|rm)
             local force=false
