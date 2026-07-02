@@ -1855,7 +1855,7 @@ main() {
                     "" \
                     "Sync status"        r "run-shell '$HOME/bin/wt sync-tmux'" \
                     "" \
-                    "Quit"               q ""
+                    "Quit (detach)"      q "detach-client"
             else
                 # Outside tmux: attach to existing or start new
                 if tmux list-sessions &>/dev/null; then
