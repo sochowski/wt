@@ -1,0 +1,20 @@
+ANIMATION: idle   (agent state: ○ idle / resting)
+=================================================
+Mood : sleepy. Eyes drooped to ▬. Feet stay planted; the BODY bobs up and
+       settles (breathing). Two "z" drift up-right and fade. No travel.
+Speed : ~2 fps  (≈520 ms per frame, 6-frame loop)
+Eyes  : ▬ ▬
+
+Resting pose (body settled onto feet):
+
+ ▗▄▄▄▄▄▄▄▖
+▟▐ ▬  ▬ ▌▌
+ ▐▄▄▄▄▄▄▄▛
+   ▝▘ ▝▘
+
+Motion per frame (see gen.py for exact values):
+  - body vertical offset cycles: 0, up, up-more, up-more, up, 0
+    (feet DO NOT move — a gap opens at the legs when the body lifts)
+  - z particles: spawn near the head, rise up-and-right over ~3 frames, fade out
+Bash-port note: quantize the body lift to a half-cell (one block row via ▄/▀)
+since terminals can't shift by arbitrary pixels.

@@ -1,0 +1,26 @@
+wt penguin — base sprite (LOCKED)
+=================================
+
+ ▗▄▄▄▄▄▄▄▖
+▟▐ ▬  ▬ ▌▌
+ ▐▄▄▄▄▄▄▄▛
+   ▝▘ ▝▘
+
+Anatomy
+-------
+  ▟           left arm  (flipper, far-left block on the eye row)
+  ▐ ... ▌     body      (hollow box: top ▗▄▖, side walls ▐ ▌, bottom ▐▄▌)
+  ▬  ▬        eyes      (▬ = sleepy/drooped ; ▘ = open/awake)
+  ▌ (col 8)   right arm (vertical flipper, sits INSIDE the body)
+  ▌▛(col 9)   back+tail (right edge running down to the angled tail corner ▛)
+  ▝▘ ▝▘       feet      (two planted feet)
+
+Column map (0-indexed) of the eye row "▟▐ ▬  ▬ ▌▌":
+  0:▟  1:▐  2:·  3:▬  4:·  5:·  6:▬  7:·  8:▌  9:▌
+
+Rendering
+---------
+Drawn with Unicode block-element glyphs. Each glyph is one terminal cell; a
+good terminal tiles them seamlessly (the mockups render them as filled
+rectangles to prove the shape). Half-cell detail is available via block glyphs
+(▀ ▄ ▌ ▐ ▖ ▗ ▘ ▝ ▙ ▟ ▛ ▜), quarter detail via the quadrant glyphs.

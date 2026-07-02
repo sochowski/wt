@@ -1,0 +1,22 @@
+ANIMATION: waddle   (agent state: ● working / active)
+=====================================================
+Mood : busy & bouncy. Eyes open (▘). The body HOPS up (skippy) while the legs
+       alternate: plant one foot low, spring up with both feet off the ground,
+       land on the other foot. In-place (no travel).
+Speed : ~5 fps, bouncy  (durations 190/150/190/150 ms, 4-frame loop)
+Eyes  : ▘ ▘
+
+Base pose:
+
+ ▗▄▄▄▄▄▄▄▖
+▟▐ ▘  ▘ ▌▌
+ ▐▄▄▄▄▄▄▄▛
+   ▝▘ ▝▘
+
+Frame cycle:
+  1. body low,  LEFT foot planted, RIGHT foot lifted
+  2. body HOP up (big), BOTH feet lifted (airborne)
+  3. body low,  RIGHT foot planted, LEFT foot lifted
+  4. body HOP up (big), BOTH feet lifted (airborne)
+Bash-port note: express the hop as a whole-row lift of the body block; feet
+alternate between the ground row and one row up.

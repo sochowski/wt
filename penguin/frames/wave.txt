@@ -1,0 +1,22 @@
+ANIMATION: wave   (agent state: ⊘ needs input / "hey, look at me")
+=================================================================
+Mood : one wing raises and waggles hello. The wing BASE stays inside the body;
+       only a short tip pokes above the top edge and tilts side to side.
+       Feet planted, body still.
+Speed : ~4.5 fps  (≈220 ms per frame, 4-frame loop)
+Eyes  : ▘ ▘
+
+Pose (left wing raised — the resting left arm ▟ is gone; it's the wing that's up):
+
+    ▙                 <- tip pokes just above the body, waggles ▙ <-> ▟
+ ▗▄▄▄▄▄▄▄▖
+ ▐▐ ▘  ▘ ▌▌           <- wing base ▐ tucked inside body at col 1
+ ▐▄▄▄▄▄▄▄▛
+   ▝▘ ▝▘
+
+Frame cycle: tip alternates ▙, ▟, ▙, ▟  (a little hello-waggle)
+Notes:
+  - Mirror to the RIGHT wing for a right-hand wave (raise the col-8 arm instead).
+  - Keep the wing base INSIDE the body outline; only the tip shows above.
+Bash-port note: the tip is one glyph on the row directly above the body top;
+waggle by swapping the tip glyph (▙/▟) — keep it cell-aligned.
