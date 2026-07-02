@@ -2,13 +2,26 @@
 
 # wt
 
+**tmux + git worktrees for running coding agents in parallel.**
+
 <img src="assets/wt-hero.png" alt="wt — run several coding agents side by side, each in its own git worktree and tmux session" width="720">
+
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+&nbsp;
+![Shell: bash](https://img.shields.io/badge/shell-bash-1f425f.svg)
+&nbsp;
+![Requires: tmux](https://img.shields.io/badge/requires-tmux-1BB91F.svg)
+
+**[Install](#install)** &nbsp;&bull;&nbsp;
+**[Usage](#usage)** &nbsp;&bull;&nbsp;
+**[Keybindings](#tmux-keybindings)** &nbsp;&bull;&nbsp;
+**[MCP Profiles](#mcp-profiles)** &nbsp;&bull;&nbsp;
+**[Example Setup](#example-setup)**
 
 </div>
 
-`wt` is a tmux and git-worktree manager for running several coding agents side by
-side. Each agent gets its own worktree and its own tmux session (agent, editor,
-and shell windows), plus a live status you can see at a glance, so you always know
+Each agent gets its own worktree and its own tmux session — agent, editor, and
+shell windows — plus a live status you can see at a glance, so you always know
 which one is working, which is waiting on you, and which is done.
 
 It works with Claude, Codex, Gemini, and opencode: one session on Claude, the
