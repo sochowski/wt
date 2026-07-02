@@ -1,4 +1,10 @@
+<div align="center">
+
 # wt
+
+<img src="assets/wt-hero.png" alt="wt — run several coding agents side by side, each in its own git worktree and tmux session" width="720">
+
+</div>
 
 `wt` is a tmux and git-worktree manager for running several coding agents side by
 side. Each agent gets its own worktree and its own tmux session (agent, editor,
