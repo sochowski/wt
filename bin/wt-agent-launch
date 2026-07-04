@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  wt-agent-launch - Multi-agent launcher for worktree sessions
-#  Reads @wt-agent from current tmux session to pick the right CLI
-#  For Claude: auto-connects to the right Neovim via IDE lock files
-#  For Codex/Gemini/opencode: launches the binary directly
+#  Reads @wt-agent from the current tmux session, asks wt-state for a launch
+#  plan (binary + args + env), then execs it. All per-agent quirks (Claude's
+#  Neovim IDE locks, opencode's config resolution) live in the wt-state agent
+#  registry — this script just gathers tmux context and runs the plan.
 # =============================================================================
 
 set -euo pipefail
@@ -16,85 +17,36 @@ WT_LAUNCH_DIR="$(dirname "$(readlink -f "$0")")"
 WT_STATE="${WT_STATE:-$WT_LAUNCH_DIR/wt-state}"
 [[ -x "$WT_STATE" ]] || WT_STATE="wt-state"
 
-# Determine which agent to launch
+# Determine which agent to launch and gather tmux-side context for the plan.
 AGENT="${WT_DEFAULT_AGENT:-opencode}"
 local_session=""
-status_opencode_config=""
+opencode_candidate=""
 if [[ -n "${TMUX:-}" ]]; then
     local_session=$(tmux display-message -p '#{session_name}' 2>/dev/null || true)
     if [[ -n "$local_session" ]]; then
         tmux_agent=$(tmux show-option -qv -t "$local_session" @wt-agent 2>/dev/null || true)
-        if [[ -n "$tmux_agent" ]]; then
-            AGENT="$tmux_agent"
-        fi
+        opencode_candidate=$(tmux show-option -qv -t "$local_session" @wt-opencode-config 2>/dev/null || true)
         if json=$("$WT_STATE" get "$local_session" --json 2>/dev/null); then
-            agent=$(jq -r '.agent' <<<"$json")
-            opencode_config=$(jq -r '.opencode_config' <<<"$json")
-            [[ -z "$tmux_agent" && -n "$agent" ]] && AGENT="$agent"
-            status_opencode_config="$opencode_config"
+            [[ -z "$tmux_agent" ]] && tmux_agent=$(jq -r '.agent // ""' <<<"$json")
+            [[ -z "$opencode_candidate" ]] && opencode_candidate=$(jq -r '.opencode_config // ""' <<<"$json")
         fi
+        [[ -n "$tmux_agent" ]] && AGENT="$tmux_agent"
     fi
 fi
 
-if [[ "$AGENT" == "opencode" && -z "${OPENCODE_CONFIG:-}" && -n "${TMUX:-}" ]]; then
-    if [[ -n "$local_session" ]]; then
-        opencode_config=$(tmux show-option -qv -t "$local_session" @wt-opencode-config 2>/dev/null || true)
-        [[ -z "$opencode_config" ]] && opencode_config="$status_opencode_config"
-        [[ -z "$opencode_config" && -f "$WT_CONFIG_DIR/opencode-mcp/${local_session}.json" ]] && opencode_config="$WT_CONFIG_DIR/opencode-mcp/${local_session}.json"
-        [[ -n "$opencode_config" ]] && export OPENCODE_CONFIG="$opencode_config"
-    fi
+# Ask the registry how to launch. The plan may perform side effects (e.g.
+# reconciling Claude IDE locks) and emits shell we eval: WT_LAUNCH_BINARY,
+# WT_LAUNCH_ARGS (array), and any `export`ed env (e.g. OPENCODE_CONFIG).
+WT_LAUNCH_BINARY=""
+WT_LAUNCH_ARGS=()
+if plan=$("$WT_STATE" agent "$AGENT" launch-plan --sh \
+            --session "$local_session" \
+            --opencode-config "$opencode_candidate" \
+            --config-dir "$WT_CONFIG_DIR" 2>/dev/null); then
+    eval "$plan"
 fi
 
-case "$AGENT" in
-    claude)
-        # Clean up stale IDE lock files (dead neovim processes)
-        CLAUDE_IDE_DIR="${HOME}/.claude/ide"
-        if [[ -d "$CLAUDE_IDE_DIR" ]]; then
-            for lock_file in "$CLAUDE_IDE_DIR"/*.lock; do
-                [[ -f "$lock_file" ]] || continue
-                pid=$(grep -o '"pid":[0-9]*' "$lock_file" | grep -o '[0-9]*')
-                if [[ -n "$pid" ]] && ! kill -0 "$pid" 2>/dev/null; then
-                    rm -f "$lock_file"
-                fi
-            done
+# Fall back to exec'ing the agent name directly if the plan came back empty.
+[[ -n "$WT_LAUNCH_BINARY" ]] || WT_LAUNCH_BINARY="$AGENT"
 
-            # Restore any locks orphaned by previous hide/restore mechanism
-            if [[ -d "$CLAUDE_IDE_DIR/.hidden" ]]; then
-                for lock_file in "$CLAUDE_IDE_DIR/.hidden"/*.lock; do
-                    [[ -f "$lock_file" ]] || continue
-                    mv "$lock_file" "$CLAUDE_IDE_DIR/"
-                done
-                rmdir "$CLAUDE_IDE_DIR/.hidden" 2>/dev/null || true
-            fi
-        fi
-
-        # Let Claude auto-detect the right neovim via CWD matching
-        lock_count=0
-        if [[ -d "$CLAUDE_IDE_DIR" ]]; then
-            lock_count=$(find "$CLAUDE_IDE_DIR" -maxdepth 1 -name "*.lock" -type f 2>/dev/null | wc -l)
-        fi
-
-        if [[ $lock_count -eq 0 ]]; then
-            exec claude "$@"
-        else
-            exec claude --ide "$@"
-        fi
-        ;;
-
-    codex)
-        exec codex "$@"
-        ;;
-
-    gemini)
-        exec gemini "$@"
-        ;;
-
-    opencode)
-        exec opencode "$@"
-        ;;
-
-    *)
-        # Unknown agent — try to exec it directly
-        exec "$AGENT" "$@"
-        ;;
-esac
+exec "$WT_LAUNCH_BINARY" "${WT_LAUNCH_ARGS[@]}" "$@"

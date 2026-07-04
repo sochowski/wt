@@ -10,10 +10,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN_DIR="$HOME/bin"
 CONFIG_DIR="$HOME/.config/wt"
-CLAUDE_SETTINGS="$HOME/.claude/settings.json"
-GEMINI_SETTINGS="$HOME/.gemini/settings.json"
-CODEX_CONFIG="$HOME/.codex/config.toml"
-OPENCODE_PLUGIN_DIR="$HOME/.config/opencode/plugins"
 
 echo "Installing wt - Worktree Manager for Multi-Agent CLI"
 echo "====================================================="
@@ -145,90 +141,11 @@ echo "  wt-menu.conf -> $target"
 # -----------------------------------------------------------------------------
 #  Merge Agent Hooks
 # -----------------------------------------------------------------------------
+# The per-agent wiring (which config format, which file, idempotency) lives in
+# the wt-state agent registry. install-hooks iterates every installed agent and
+# applies its hook spec, reading templates from config/.
 echo "Configuring agent hooks..."
-
-if command -v jq &>/dev/null; then
-    # --- Claude ---
-    if command -v claude &>/dev/null; then
-        mkdir -p "$HOME/.claude"
-        if [[ -f "$CLAUDE_SETTINGS" ]]; then
-            jq -s '.[0] * .[1]' "$CLAUDE_SETTINGS" "$SCRIPT_DIR/config/claude-hooks.json" > "$CLAUDE_SETTINGS.tmp"
-            mv "$CLAUDE_SETTINGS.tmp" "$CLAUDE_SETTINGS"
-            echo "  Claude: merged hooks into $CLAUDE_SETTINGS"
-        else
-            cp "$SCRIPT_DIR/config/claude-hooks.json" "$CLAUDE_SETTINGS"
-            echo "  Claude: created $CLAUDE_SETTINGS"
-        fi
-    else
-        echo "  Claude: not installed, skipping hooks"
-    fi
-
-    # --- Gemini ---
-    if command -v gemini &>/dev/null; then
-        mkdir -p "$HOME/.gemini"
-        if [[ -f "$GEMINI_SETTINGS" ]]; then
-            jq -s '.[0] * .[1]' "$GEMINI_SETTINGS" "$SCRIPT_DIR/config/hooks-gemini.json" > "$GEMINI_SETTINGS.tmp"
-            mv "$GEMINI_SETTINGS.tmp" "$GEMINI_SETTINGS"
-            echo "  Gemini: merged hooks into $GEMINI_SETTINGS"
-        else
-            cp "$SCRIPT_DIR/config/hooks-gemini.json" "$GEMINI_SETTINGS"
-            echo "  Gemini: created $GEMINI_SETTINGS"
-        fi
-    else
-        echo "  Gemini: not installed, skipping hooks"
-    fi
-
-    # --- Codex ---
-    if command -v codex &>/dev/null; then
-        mkdir -p "$HOME/.codex"
-        if [[ -f "$CODEX_CONFIG" ]]; then
-            if ! grep -q 'wt-hook' "$CODEX_CONFIG" 2>/dev/null; then
-                cat >> "$CODEX_CONFIG" <<'TOML'
-
-[notify]
-command = "$HOME/bin/wt-hook stop"
-TOML
-                echo "  Codex: added notify hook to $CODEX_CONFIG"
-            else
-                echo "  Codex: hooks already configured"
-            fi
-        else
-            cat > "$CODEX_CONFIG" <<'TOML'
-[notify]
-command = "$HOME/bin/wt-hook stop"
-TOML
-            echo "  Codex: created $CODEX_CONFIG"
-        fi
-    else
-        echo "  Codex: not installed, skipping hooks"
-    fi
-else
-    echo "  Warning: jq not found. Please manually merge hook configs."
-    echo "  Install jq with:"
-    if [[ "$OSTYPE" == "darwin"* ]]; then
-        echo "    brew install jq"
-    else
-        echo "    pacman -S jq"
-    fi
-fi
-
-# --- opencode ---
-if command -v opencode &>/dev/null; then
-    mkdir -p "$OPENCODE_PLUGIN_DIR"
-    target="$OPENCODE_PLUGIN_DIR/wt-status.js"
-
-    if [[ -L "$target" ]]; then
-        rm "$target"
-    elif [[ -e "$target" ]]; then
-        echo "  Warning: $target exists and is not a symlink, backing up..."
-        mv "$target" "$target.bak"
-    fi
-
-    ln -s "$SCRIPT_DIR/config/opencode-wt-plugin.js" "$target"
-    echo "  opencode: installed status plugin at $target"
-else
-    echo "  opencode: not installed, skipping plugin"
-fi
+"$SCRIPT_DIR/bin/wt-state" agents install-hooks --template-dir "$SCRIPT_DIR/config"
 
 # -----------------------------------------------------------------------------
 #  Check PATH

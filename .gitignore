@@ -10,3 +10,5 @@
 
 # Compiled wt-state binary (built by install.sh)
 /bin/wt-state
+# Stray binary if someone runs `go build` inside state/ (module name)
+/state/wtstate

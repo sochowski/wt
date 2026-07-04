@@ -203,7 +203,7 @@ notify() {
 }
 
 # -----------------------------------------------------------------------------
-#  Agent Label
+#  Agent / Branch Labels
 # -----------------------------------------------------------------------------
 get_branch() {
     local session_name="${1:-}"
@@ -212,22 +212,15 @@ get_branch() {
     echo "${branch:-$session_name}"
 }
 
+# The agent's name is its display string. Read it from the store, falling back
+# to the default agent.
 get_agent_label() {
     local session_name="${1:-}"
     local agent=""
-
-    # Try to read the agent from the store
     if [[ -n "$session_name" ]]; then
         agent=$("$WT_STATE" get "$session_name" --field agent 2>/dev/null || true)
     fi
-
-    case "${agent:-$WT_DEFAULT_AGENT}" in
-        claude) echo "Claude" ;;
-        codex)  echo "Codex" ;;
-        gemini) echo "Gemini" ;;
-        opencode) echo "opencode" ;;
-        *)      echo "${agent:-$WT_DEFAULT_AGENT}" ;;
-    esac
+    echo "${agent:-$WT_DEFAULT_AGENT}"
 }
 
 # -----------------------------------------------------------------------------

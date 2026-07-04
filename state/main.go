@@ -26,6 +26,17 @@ func main() {
 		return
 	}
 
+	// Agent-registry commands are pure metadata/filesystem work and never touch
+	// the session store, so dispatch them before opening (and creating) the DB.
+	switch cmd {
+	case "agents":
+		cmdAgents(args)
+		return
+	case "agent":
+		cmdAgent(args)
+		return
+	}
+
 	st, err := Open(dbPath())
 	if err != nil {
 		fatalf("open db: %v", err)
@@ -248,9 +259,9 @@ func printJSON(v any) {
 }
 
 func usage() {
-	fmt.Fprint(os.Stderr, `wt-state — SQLite-backed wt session store
+	fmt.Fprint(os.Stderr, `wt-state — SQLite session store + agent registry for wt
 
-usage:
+session store:
   wt-state set <name> [--status S] [--message M] [--repo R] [--branch B]
                       [--wt-path P] [--pr N] [--agent A]
                       [--opencode-config C] [--is-master 0|1]
@@ -261,9 +272,17 @@ usage:
   wt-state delete <name>
   wt-state migrate [--dir DIR]
 
+agent registry:
+  wt-state agents list [--available] [--json]
+  wt-state agents install-hooks --template-dir DIR [--home DIR]
+  wt-state agent <name> [--field name|binary|launch|installed | --json]
+  wt-state agent <name> launch-plan [--session S] [--opencode-config C] [--sh|--json]
+  wt-state agent <name> session-setup --dir WT --session S --config-dir C [--template-dir DIR]
+
 env:
   WT_STATUS_DIR   state dir (default ~/.local/state/wt); holds wt.db
   WT_DB           override full path to the SQLite file
+  WT_CONFIG_DIR   wt config dir (allow-list, mcp profiles); session-setup fallback
 `)
 }
 

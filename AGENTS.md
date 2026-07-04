@@ -14,12 +14,18 @@ test a change. Use one of the two isolated harnesses below.
   `WT_BASE_DIR` (worktrees), `WT_STATUS_DIR` (state), `WT_CONFIG_DIR`, `WT_LOG_FILE`,
   `WT_STATE` (path to the state binary), `WT_DEFAULT_AGENT`.
 - `bin/wt-agent-launch`, `bin/wt-hook`, `bin/wt-bind-menu`, `bin/wt-tmux-status` — helpers.
-- `state/` — Go `wt-state` binary: SQLite session store. Honors `WT_STATUS_DIR` / `WT_DB`.
+- `state/` — Go `wt-state` binary: SQLite session store **and** the agent
+  registry. `agents.go` is the single source of truth for each agent (binary,
+  hook install format, launch style, per-session setup); the `agent`/`agents`
+  subcommands expose it to the bash callers. Adding an agent = one entry there
+  plus its hook template under `config/`. Honors `WT_STATUS_DIR` / `WT_DB`.
   Built into `bin/wt-state` (gitignored) by `install.sh`.
 - `install.sh` — symlinks `bin/*` into `~/bin`, merges hooks into `~/.claude`,
-  `~/.gemini`, `~/.codex`, edits `~/.tmux.conf`, builds `wt-state`. Derives
-  **everything** from `$HOME` — the basis of the staging harness below.
-- `config/` — tmux config, menu config, agent hook templates.
+  `~/.gemini`, `~/.codex` via `wt-state agents install-hooks`, edits
+  `~/.tmux.conf`, builds `wt-state`. Derives **everything** from `$HOME` — the
+  basis of the staging harness below.
+- `config/` — tmux config, menu config, agent hook templates (read by
+  `install-hooks`; the opencode plugin stays a live symlink into the checkout).
 
 ## Testing changes e2e
 
