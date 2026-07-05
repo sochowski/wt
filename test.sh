@@ -925,7 +925,7 @@ test_opencode_plugin() {
 test_opencode_mcp_config() {
     section "opencode MCP Config"
 
-    local tmp_dir tmp_config target out funcs
+    local tmp_dir tmp_config target out
     tmp_dir=$(mktemp -d)
     tmp_config="$tmp_dir/wt-config"
     target="$tmp_dir/worktree"
@@ -948,15 +948,13 @@ test_opencode_mcp_config() {
 }
 JSON
 
-    funcs="$({
-        sed -n '/^ensure_mcp_profile()/,/^}/p' "$WT_BIN_DIR/wt"
-        sed -n '/^write_opencode_mcp_config()/,/^}/p' "$WT_BIN_DIR/wt"
-        sed -n '/^configure_mcp_profile()/,/^}/p' "$WT_BIN_DIR/wt"
-    })"
+    # session-setup is the real path bin/wt drives: seed .mcp.json from the
+    # profile and generate the opencode config. It prints the config path.
+    out=$("$WT_STATE" agent opencode session-setup \
+            --dir "$target" --session test-session \
+            --config-dir "$tmp_config" --profile default 2>/dev/null || true)
 
-    out=$(WT_CONFIG_DIR="$tmp_config" bash -c "log(){ :; }; $funcs; configure_mcp_profile '$target' opencode default test-session" 2>/dev/null || true)
-
-    if [[ -f "$out" ]]; then
+    if [[ -n "$out" && -f "$out" ]]; then
         pass "generated opencode MCP config"
     else
         fail "opencode MCP config not generated" "$out"
@@ -982,17 +980,26 @@ JSON
 test_agent_profiles() {
     section "Agent Profiles"
 
-    # Extract and test agent_binary function
-    local claude_bin codex_bin gemini_bin opencode_bin
-    claude_bin=$(bash -c "$(sed -n '/^agent_binary()/,/^}/p' "$WT_BIN_DIR/wt"); agent_binary claude")
-    codex_bin=$(bash -c "$(sed -n '/^agent_binary()/,/^}/p' "$WT_BIN_DIR/wt"); agent_binary codex")
-    gemini_bin=$(bash -c "$(sed -n '/^agent_binary()/,/^}/p' "$WT_BIN_DIR/wt"); agent_binary gemini")
-    opencode_bin=$(bash -c "$(sed -n '/^agent_binary()/,/^}/p' "$WT_BIN_DIR/wt"); agent_binary opencode")
+    # Binary lookup comes from the wt-state registry now.
+    local a bin
+    for a in claude codex gemini opencode; do
+        bin=$("$WT_STATE" agent "$a" --field binary 2>/dev/null)
+        [[ "$bin" == "$a" ]] && pass "agent binary $a = $a" || fail "agent binary $a = $bin"
+    done
 
-    [[ "$claude_bin" == "claude" ]] && pass "agent_binary claude = claude" || fail "agent_binary claude = $claude_bin"
-    [[ "$codex_bin" == "codex" ]] && pass "agent_binary codex = codex" || fail "agent_binary codex = $codex_bin"
-    [[ "$gemini_bin" == "gemini" ]] && pass "agent_binary gemini = gemini" || fail "agent_binary gemini = $gemini_bin"
-    [[ "$opencode_bin" == "opencode" ]] && pass "agent_binary opencode = opencode" || fail "agent_binary opencode = $opencode_bin"
+    # The full roster is listed in registry order.
+    local list
+    list=$("$WT_STATE" agents list 2>/dev/null | tr '\n' ' ')
+    if [[ "$list" == *claude* && "$list" == *codex* && "$list" == *gemini* && "$list" == *opencode* ]]; then
+        pass "agents list includes all four"
+    else
+        fail "agents list = $list"
+    fi
+
+    # Unknown agents fall back to their own name as the binary.
+    local unk
+    unk=$("$WT_STATE" agent frobnicate --field binary 2>/dev/null)
+    [[ "$unk" == "frobnicate" ]] && pass "unknown agent binary = name" || fail "unknown agent binary = $unk"
 
     if grep -q 'WT_DEFAULT_AGENT="${WT_DEFAULT_AGENT:-opencode}"' "$WT_BIN_DIR/wt"; then
         pass "default agent = opencode"
@@ -1000,17 +1007,80 @@ test_agent_profiles() {
         fail "default agent is not opencode"
     fi
 
-    # Test agent_label
-    local claude_label codex_label gemini_label opencode_label
-    claude_label=$(bash -c "$(sed -n '/^agent_label()/,/^}/p' "$WT_BIN_DIR/wt"); agent_label claude")
-    codex_label=$(bash -c "$(sed -n '/^agent_label()/,/^}/p' "$WT_BIN_DIR/wt"); agent_label codex")
-    gemini_label=$(bash -c "$(sed -n '/^agent_label()/,/^}/p' "$WT_BIN_DIR/wt"); agent_label gemini")
-    opencode_label=$(bash -c "$(sed -n '/^agent_label()/,/^}/p' "$WT_BIN_DIR/wt"); agent_label opencode")
+    # An agent's name is its display string — there is no separate label.
+    local name
+    name=$("$WT_STATE" agent claude --field name 2>/dev/null)
+    [[ "$name" == "claude" ]] && pass "agent name is display label" || fail "agent name = $name"
+}
 
-    [[ "$claude_label" == "Claude" ]] && pass "agent_label claude = Claude" || fail "agent_label claude = $claude_label"
-    [[ "$codex_label" == "Codex" ]] && pass "agent_label codex = Codex" || fail "agent_label codex = $codex_label"
-    [[ "$gemini_label" == "Gemini" ]] && pass "agent_label gemini = Gemini" || fail "agent_label gemini = $gemini_label"
-    [[ "$opencode_label" == "opencode" ]] && pass "agent_label opencode = opencode" || fail "agent_label opencode = $opencode_label"
+# Verify the launch plan the registry emits for each agent.
+test_agent_launch_plan() {
+    section "Agent Launch Plan"
+
+    # Claude with no IDE locks → bare binary, no --ide.
+    local plan
+    plan=$("$WT_STATE" agent claude launch-plan --sh --home "$(mktemp -d)" 2>/dev/null)
+    if grep -q "WT_LAUNCH_BINARY='claude'" <<<"$plan" && grep -q 'WT_LAUNCH_ARGS=()' <<<"$plan"; then
+        pass "claude launch-plan: bare binary when no IDE lock"
+    else
+        fail "claude launch-plan unexpected" "$plan"
+    fi
+
+    # Unknown agent → exec its own name directly.
+    plan=$("$WT_STATE" agent frobnicate launch-plan --sh 2>/dev/null)
+    grep -q "WT_LAUNCH_BINARY='frobnicate'" <<<"$plan" \
+        && pass "unknown agent launch-plan execs its name" \
+        || fail "unknown launch-plan unexpected" "$plan"
+}
+
+# Guard the hook wiring: tool data arrives on stdin, not via a made-up env var,
+# and installs are surgical + idempotent + versioned.
+test_hook_format_and_install() {
+    section "Hook Format & Install"
+
+    local cfg_dir="$(dirname "$WT_BIN_DIR")/config"
+
+    # The $CLAUDE_TOOL_NAME / $TOOL_NAME env vars don't exist — commands must not
+    # reference them (wt-hook parses tool_name from stdin JSON instead).
+    if grep -q 'CLAUDE_TOOL_NAME\|\$TOOL_NAME' "$cfg_dir/claude-hooks.json" "$cfg_dir/hooks-gemini.json" 2>/dev/null; then
+        fail "hook templates still reference a bogus tool-name env var"
+    else
+        pass "hook templates pass no bogus tool-name env var"
+    fi
+
+    # wt-hook reads tool_name from stdin JSON (regression guard for the fix).
+    if grep -q 'tool_name' "$WT_BIN_DIR/wt-hook"; then
+        pass "wt-hook parses tool_name from stdin"
+    else
+        fail "wt-hook does not parse tool_name from stdin"
+    fi
+
+    # Surgical + idempotent install: seed a settings file with a foreign hook and
+    # a legacy wt entry; install twice; expect the legacy entry gone, the foreign
+    # one kept, and exactly one wt entry (no duplicates).
+    local hd; hd=$(mktemp -d)
+    mkdir -p "$hd/.claude"
+    cat > "$hd/.claude/settings.json" <<'JSON'
+{ "model": "x", "hooks": { "PreToolUse": [
+  {"matcher":"","hooks":[{"type":"command","command":"/opt/foreign/hook"}]},
+  {"matcher":"","hooks":[{"type":"command","command":"$HOME/bin/wt-hook pre-tool $CLAUDE_TOOL_NAME"}]}
+]}}
+JSON
+    "$WT_STATE" agents install-hooks --template-dir "$cfg_dir" --home "$hd" --state-dir "$hd/state" >/dev/null 2>&1
+    "$WT_STATE" agents install-hooks --template-dir "$cfg_dir" --home "$hd" --state-dir "$hd/state" >/dev/null 2>&1
+
+    local foreign wt_entries legacy model
+    model=$(jq -r '.model' "$hd/.claude/settings.json")
+    foreign=$(jq '[.hooks.PreToolUse[].hooks[].command | select(. == "/opt/foreign/hook")] | length' "$hd/.claude/settings.json")
+    wt_entries=$(jq '[.hooks.PreToolUse[].hooks[].command | select(test("wt-hook"))] | length' "$hd/.claude/settings.json")
+    legacy=$(jq '[.hooks.PreToolUse[].hooks[].command | select(test("CLAUDE_TOOL_NAME"))] | length' "$hd/.claude/settings.json")
+
+    [[ "$model" == "x" ]] && pass "install preserves foreign settings keys" || fail "foreign key lost"
+    [[ "$foreign" == "1" ]] && pass "install preserves foreign hooks" || fail "foreign hook count = $foreign"
+    [[ "$wt_entries" == "1" ]] && pass "install is idempotent (one wt entry)" || fail "wt entry count = $wt_entries"
+    [[ "$legacy" == "0" ]] && pass "install cleans up legacy wt entries" || fail "legacy entries remain = $legacy"
+
+    rm -rf "$hd"
 }
 
 test_install_script() {
@@ -1118,6 +1188,8 @@ main() {
     test_opencode_plugin
     test_opencode_mcp_config
     test_agent_profiles
+    test_agent_launch_plan
+    test_hook_format_and_install
     test_install_script
     test_find_git_repos
     test_create_worktree

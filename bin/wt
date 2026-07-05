@@ -175,34 +175,14 @@ build_fzf_vim_binds
 # -----------------------------------------------------------------------------
 #  Agent Profiles
 # -----------------------------------------------------------------------------
+# The registry lives in wt-state; these are thin wrappers over it. An agent's
+# name is its display string everywhere — there is no separate label.
 agent_binary() {
-    case "$1" in
-        claude) echo "claude" ;;
-        codex)  echo "codex" ;;
-        gemini) echo "gemini" ;;
-        opencode) echo "opencode" ;;
-        *)      echo "$1" ;;
-    esac
-}
-
-agent_label() {
-    case "$1" in
-        claude) echo "Claude" ;;
-        codex)  echo "Codex" ;;
-        gemini) echo "Gemini" ;;
-        opencode) echo "opencode" ;;
-        *)      echo "$1" ;;
-    esac
+    "$WT_STATE" agent "$1" --field binary 2>/dev/null || echo "$1"
 }
 
 available_agents() {
-    for agent in claude codex gemini opencode; do
-        local bin
-        bin=$(agent_binary "$agent")
-        if command -v "$bin" &>/dev/null; then
-            echo "$agent"
-        fi
-    done
+    "$WT_STATE" agents list --available 2>/dev/null
 }
 
 # -----------------------------------------------------------------------------
@@ -298,149 +278,15 @@ sync_env_files() {
     return 0
 }
 
-# Apply allowed tools from ~/.config/wt/claude-allowed-tools.json
-# Merges into <dir>/.claude/settings.local.json (preserving existing keys)
-apply_allowed_tools() {
-    local target_dir="$1"
-    local tools_file="$WT_CONFIG_DIR/claude-allowed-tools.json"
-
-    [[ -f "$tools_file" ]] || return 0
-
-    local settings_dir="$target_dir/.claude"
-    local settings_file="$settings_dir/settings.local.json"
-    mkdir -p "$settings_dir"
-
-    if [[ -f "$settings_file" ]]; then
-        # Merge: add/replace permissions.allow, preserve everything else
-        python3 -c "
-import json, sys
-with open(sys.argv[1]) as f: settings = json.load(f)
-with open(sys.argv[2]) as f: tools = json.load(f)
-settings.setdefault('permissions', {})['allow'] = tools
-with open(sys.argv[1], 'w') as f: json.dump(settings, f, indent=2); f.write('\n')
-" "$settings_file" "$tools_file"
-    else
-        # Create new settings file with just permissions.allow
-        python3 -c "
-import json, sys
-with open(sys.argv[1]) as f: tools = json.load(f)
-with open(sys.argv[2], 'w') as f: json.dump({'permissions': {'allow': tools}}, f, indent=2); f.write('\n')
-" "$tools_file" "$settings_file"
-    fi
-    log "Applied allowed tools → $settings_file"
-}
-
-ensure_mcp_profile() {
-    local target_dir="$1"
-    local profile_name="$2"
-    local target_mcp="$target_dir/.mcp.json"
-
-    if [[ -f "$target_mcp" ]]; then
-        echo "$target_mcp"
-        return 0
-    fi
-
-    local mcp_profile="$WT_CONFIG_DIR/mcp-profiles/${profile_name}.json"
-    if [[ -f "$mcp_profile" ]]; then
-        cp "$mcp_profile" "$target_mcp"
-        log "Copied MCP profile: $profile_name → $target_mcp"
-        echo "$target_mcp"
-    fi
-}
-
-write_opencode_mcp_config() {
-    local source_file="$1"
-    local output_file="$2"
-
-    [[ -f "$source_file" ]] || return 1
-    mkdir -p "$(dirname "$output_file")"
-
-    python3 - "$source_file" "$output_file" <<'PY'
-import json
-import os
-import sys
-
-source, output = sys.argv[1], sys.argv[2]
-
-with open(source) as f:
-    config = json.load(f)
-
-
-def as_command(value, args):
-    if isinstance(value, list):
-        command = list(value)
-    else:
-        command = [value]
-    if isinstance(args, list):
-        command.extend(args)
-    return command
-
-
-def convert_server(server):
-    server = dict(server)
-    server_type = server.get("type")
-
-    if "url" in server:
-        converted = {"type": "remote", "url": server["url"]}
-        for key in ("enabled", "headers", "oauth", "timeout"):
-            if key in server:
-                converted[key] = server[key]
-        return converted
-
-    if "command" in server:
-        converted = {
-            "type": "local",
-            "command": as_command(server["command"], server.get("args")),
-        }
-        environment = server.get("environment", server.get("env"))
-        if environment is not None:
-            converted["environment"] = environment
-        for key in ("enabled", "timeout"):
-            if key in server:
-                converted[key] = server[key]
-        return converted
-
-    if server_type in ("http", "sse"):
-        server["type"] = "remote"
-    elif server_type == "stdio":
-        server["type"] = "local"
-        if "env" in server and "environment" not in server:
-            server["environment"] = server.pop("env")
-    return server
-
-
-if isinstance(config.get("mcp"), dict):
-    mcp = config["mcp"]
-else:
-    servers = config.get("mcpServers", {})
-    mcp = {name: convert_server(server) for name, server in servers.items()}
-
-if not mcp:
-    sys.exit(2)
-
-os.makedirs(os.path.dirname(output), exist_ok=True)
-with open(output, "w") as f:
-    json.dump({"$schema": "https://opencode.ai/config.json", "mcp": mcp}, f, indent=2)
-    f.write("\n")
-PY
-}
-
-configure_mcp_profile() {
-    local target_dir="$1"
-    local agent="$2"
-    local profile_name="$3"
-    local session_name="$4"
-
-    local mcp_file
-    mcp_file=$(ensure_mcp_profile "$target_dir" "$profile_name" || true)
-
-    if [[ "$agent" == "opencode" && -n "$mcp_file" ]]; then
-        local opencode_config="$WT_CONFIG_DIR/opencode-mcp/${session_name}.json"
-        if write_opencode_mcp_config "$mcp_file" "$opencode_config"; then
-            log "Generated opencode MCP config: $opencode_config"
-            echo "$opencode_config"
-        fi
-    fi
+# Prepare a worktree for an agent: seed .mcp.json from the profile, apply the
+# Claude allow-list, generate the opencode config. Delegates to the registry in
+# wt-state (which owns the per-agent steps) and echoes the opencode config path
+# (empty for agents that don't use one).
+agent_session_setup() {
+    local target_dir="$1" agent="$2" profile_name="$3" session_name="$4"
+    "$WT_STATE" agent "$agent" session-setup \
+        --dir "$target_dir" --session "$session_name" \
+        --config-dir "$WT_CONFIG_DIR" --profile "$profile_name" 2>/dev/null
 }
 
 derive_status_metadata() {
@@ -859,12 +705,7 @@ create_worktree() {
         echo "Session already exists, attaching..."
     else
         local opencode_config=""
-        opencode_config=$(configure_mcp_profile "$wt_path" "$agent" "default" "$session_name" || true)
-
-        # Apply default-allowed tools for Claude sessions
-        if [[ "$agent" == "claude" ]]; then
-            apply_allowed_tools "$wt_path"
-        fi
+        opencode_config=$(agent_session_setup "$wt_path" "$agent" "default" "$session_name" || true)
 
         # Sync env files from primary repo (.wt/sync)
         sync_env_files "$repo_path" "$wt_path"
@@ -884,9 +725,6 @@ create_worktree() {
         # Select agent pane (right pane of main window)
         tmux select-window -t "$session_name:main"
         tmux select-pane -t "$session_name:main.1"
-
-        local agent_display
-        agent_display=$(agent_label "$agent")
 
         # Persist initial session state with full metadata
         status=idle
@@ -1200,7 +1038,7 @@ pick_agent() {
     # a clean cancel rather than silently falling back to the default agent.
     local raw rc=0
     raw=$(for a in "${ordered[@]}"; do
-              local lbl; lbl=$(agent_label "$a")
+              local lbl="$a"
               [[ "$a" == "$WT_DEFAULT_AGENT" ]] && lbl="$lbl (default)"
               printf '%s\t%s\n' "$a" "$lbl"
           done | fzf "${WT_FZF_VIM_ARGS[@]}" --delimiter='\t' --with-nth=2 --header="Select agent") || rc=$?
@@ -1264,11 +1102,8 @@ interactive_new() {
     local agent
     agent=$(pick_agent) || { echo "Cancelled."; return 1; }
 
-    local agent_display
-    agent_display=$(agent_label "$agent")
-
     echo ""
-    echo "Creating worktree: $repo_name @ $branch (base: origin/$base_branch) [$agent_display]"
+    echo "Creating worktree: $repo_name @ $branch (base: origin/$base_branch) [$agent]"
     create_worktree "$repo_path" "$branch" false "" "$base_branch" "$agent" "$switch_after"
 }
 
@@ -1284,8 +1119,7 @@ pick_list() {
         load_session "$session_name" || true
         local icon
         icon=$(get_status_icon "${sess_status:-unknown}")
-        local label
-        label=$(agent_label "${agent:-$WT_DEFAULT_AGENT}")
+        local label="${agent:-$WT_DEFAULT_AGENT}"
         echo "${session_name}:${wt_path}:${icon} ${sess_status:-?}  ${label}  ${repo:-?}@${branch:-?}  ${message:-}"
     done < <(list_worktrees simple)
 }
@@ -1310,10 +1144,7 @@ revive_worktree_session() {
     agent="${agent:-$WT_DEFAULT_AGENT}"
 
     echo "Reviving tmux session: $session_name"
-    opencode_config=$(configure_mcp_profile "$wt_path" "$agent" "default" "$session_name" || true)
-    if [[ "$agent" == "claude" ]]; then
-        apply_allowed_tools "$wt_path"
-    fi
+    opencode_config=$(agent_session_setup "$wt_path" "$agent" "default" "$session_name" || true)
 
     tmux new-session -d -s "$session_name" -c "$wt_path" -n main
     launch_nvim "$session_name" "$wt_path"
@@ -1409,7 +1240,7 @@ preview_pane() {
     # Footer: bold rule + session header + diffstat. Built into a buffer so we
     # can measure its height and give the agent capture whatever rows remain.
     local agent_lbl footer
-    agent_lbl=$(agent_label "${agent:-$WT_DEFAULT_AGENT}")
+    agent_lbl="${agent:-$WT_DEFAULT_AGENT}"
     footer=$(
         local rule icon h
         printf -v rule '%*s' "$cols" ''
@@ -1579,21 +1410,14 @@ master() {
 
     local bin
     bin=$(agent_binary "$agent")
-    local label
-    label=$(agent_label "$agent")
 
-    echo "Creating master session ($label)..."
+    echo "Creating master session ($agent)..."
 
     # Set up master working directory with MCP profile
     local master_dir="$WT_BASE_DIR/.master"
     mkdir -p "$master_dir"
     local opencode_config=""
-    opencode_config=$(configure_mcp_profile "$master_dir" "$agent" "master" "$session" || true)
-
-    # Apply default-allowed tools for Claude master sessions
-    if [[ "$agent" == "claude" ]]; then
-        apply_allowed_tools "$master_dir"
-    fi
+    opencode_config=$(agent_session_setup "$master_dir" "$agent" "master" "$session" || true)
 
     tmux new-session -d -s "$session" -c "$master_dir" -n agent
     tmux new-window -t "$session" -n shell -c "$HOME"
