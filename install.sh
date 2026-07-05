@@ -121,6 +121,16 @@ fi
 ln -s "$SCRIPT_DIR/config/tmux-wt.conf" "$target"
 echo "  tmux-wt.conf -> $target"
 
+# tmux-panes.conf — dwm/i3-style pane keybindings (sourced by tmux-wt.conf)
+target="$CONFIG_DIR/tmux-panes.conf"
+if [[ -L "$target" ]]; then
+    rm "$target"
+elif [[ -e "$target" ]]; then
+    mv "$target" "$target.bak"
+fi
+ln -s "$SCRIPT_DIR/config/tmux-panes.conf" "$target"
+echo "  tmux-panes.conf -> $target"
+
 # -----------------------------------------------------------------------------
 #  Symlink menu config
 # -----------------------------------------------------------------------------
