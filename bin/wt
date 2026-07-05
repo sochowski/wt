@@ -846,6 +846,65 @@ delete_worktree() {
     echo "Deleted: $session_name"
 }
 
+# Sweep a session: kill its tmux session — reaping the agent CLI (hundreds of MB)
+# and the diff-view watcher — to reclaim memory, while KEEPING the worktree and
+# the wt-state row. Unlike delete_worktree, nothing on disk is removed: the
+# session stays listed by `wt ls` (Phase A finds the on-disk worktree) with an
+# "offline" status, and can be resumed later.
+sweep_session() {
+    local session_name="$1"
+
+    if [[ -z "$session_name" ]]; then
+        echo "Usage: wt sweep <session>" >&2
+        return 1
+    fi
+
+    # Must be a known wt session (get exits non-zero when absent), so what we
+    # leave behind is actually recoverable from state.
+    if ! "$WT_STATE" get "$session_name" >/dev/null 2>&1; then
+        echo "Not a wt session: $session_name" >&2
+        return 1
+    fi
+
+    # The master session has no worktree to anchor a resume; leave it be.
+    if [[ "$("$WT_STATE" get "$session_name" --field is_master 2>/dev/null)" == "1" ]]; then
+        echo "Refusing to sweep the master session." >&2
+        return 1
+    fi
+
+    # Nothing to reclaim if it's already offline with no live session.
+    if [[ "$("$WT_STATE" get "$session_name" --field status 2>/dev/null)" == "offline" ]] \
+        && ! tmux has-session -t "$session_name" 2>/dev/null; then
+        echo "$session_name is already offline."
+        return 0
+    fi
+
+    # Stop the diff-view watcher first: it reads @wt-diff-pid, which vanishes
+    # with the tmux session.
+    stop_diff_view "$session_name"
+
+    if tmux has-session -t "$session_name" 2>/dev/null; then
+        # If we're attached to the target, switch away so the kill doesn't drop
+        # the client (mirrors master()).
+        if [[ -n "${TMUX:-}" ]] \
+            && [[ "$(tmux display-message -p '#{session_name}' 2>/dev/null || true)" == "$session_name" ]]; then
+            local other
+            other=$(tmux list-sessions -F '#{session_name}' 2>/dev/null \
+                | grep -v "^${session_name}$" | head -1 || true)
+            [[ -n "$other" ]] && tmux switch-client -t "$other" 2>/dev/null || true
+        fi
+        tmux kill-session -t "$session_name"
+    fi
+
+    # Mark offline; the worktree and row stay intact for resume. NOTE: the
+    # `resetting` branch derives "offline" at render time (never stores it) and
+    # keeps the true last status. When these merge, reconcile: drop this write
+    # in favour of the derived render so the last real status is preserved.
+    "$WT_STATE" set "$session_name" --status offline >/dev/null 2>&1 || true
+
+    echo "Swept $session_name (agent stopped, worktree kept)."
+}
+
 # -----------------------------------------------------------------------------
 #  Interactive Repo/Branch Pickers (fzf-based)
 # -----------------------------------------------------------------------------
@@ -1589,6 +1648,7 @@ Session Management:
   list, ls                List all sessions with status
   delete, rm <session>    Delete a session and its worktree
   delete-pick             Interactive delete picker (fzf)
+  sweep <session>         Stop a session's agent to free memory (keeps worktree)
 
 Master Session:
   master                  Create/attach master orchestrator session
@@ -1758,6 +1818,9 @@ main() {
             ;;
         delete-pick)
             delete_pick
+            ;;
+        sweep)
+            sweep_session "${1:-}"
             ;;
         master)
             local agent="$WT_DEFAULT_AGENT"
