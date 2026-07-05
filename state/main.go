@@ -274,7 +274,8 @@ session store:
 
 agent registry:
   wt-state agents list [--available] [--json]
-  wt-state agents install-hooks --template-dir DIR [--home DIR]
+  wt-state agents install-hooks --template-dir DIR [--home DIR] [--state-dir DIR]
+  wt-state agents hooks-status [--state-dir DIR] [--json]
   wt-state agent <name> [--field name|binary|launch|installed | --json]
   wt-state agent <name> launch-plan [--session S] [--opencode-config C] [--sh|--json]
   wt-state agent <name> session-setup --dir WT --session S --config-dir C [--template-dir DIR]

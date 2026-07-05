@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$HOME/bin/wt-hook pre-tool $TOOL_NAME"
+            "command": "$HOME/bin/wt-hook pre-tool"
           }
         ]
       }

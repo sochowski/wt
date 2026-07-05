@@ -21,8 +21,10 @@ func cmdAgents(args []string) {
 		cmdAgentsList(rest)
 	case "install-hooks":
 		cmdAgentsInstallHooks(rest)
+	case "hooks-status":
+		cmdAgentsHooksStatus(rest)
 	default:
-		fatalf("agents: unknown subcommand %q (try: list, install-hooks)", sub)
+		fatalf("agents: unknown subcommand %q (try: list, install-hooks, hooks-status)", sub)
 	}
 }
 

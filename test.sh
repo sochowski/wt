@@ -1033,6 +1033,56 @@ test_agent_launch_plan() {
         || fail "unknown launch-plan unexpected" "$plan"
 }
 
+# Guard the hook wiring: tool data arrives on stdin, not via a made-up env var,
+# and installs are surgical + idempotent + versioned.
+test_hook_format_and_install() {
+    section "Hook Format & Install"
+
+    local cfg_dir="$(dirname "$WT_BIN_DIR")/config"
+
+    # The $CLAUDE_TOOL_NAME / $TOOL_NAME env vars don't exist — commands must not
+    # reference them (wt-hook parses tool_name from stdin JSON instead).
+    if grep -q 'CLAUDE_TOOL_NAME\|\$TOOL_NAME' "$cfg_dir/claude-hooks.json" "$cfg_dir/hooks-gemini.json" 2>/dev/null; then
+        fail "hook templates still reference a bogus tool-name env var"
+    else
+        pass "hook templates pass no bogus tool-name env var"
+    fi
+
+    # wt-hook reads tool_name from stdin JSON (regression guard for the fix).
+    if grep -q 'tool_name' "$WT_BIN_DIR/wt-hook"; then
+        pass "wt-hook parses tool_name from stdin"
+    else
+        fail "wt-hook does not parse tool_name from stdin"
+    fi
+
+    # Surgical + idempotent install: seed a settings file with a foreign hook and
+    # a legacy wt entry; install twice; expect the legacy entry gone, the foreign
+    # one kept, and exactly one wt entry (no duplicates).
+    local hd; hd=$(mktemp -d)
+    mkdir -p "$hd/.claude"
+    cat > "$hd/.claude/settings.json" <<'JSON'
+{ "model": "x", "hooks": { "PreToolUse": [
+  {"matcher":"","hooks":[{"type":"command","command":"/opt/foreign/hook"}]},
+  {"matcher":"","hooks":[{"type":"command","command":"$HOME/bin/wt-hook pre-tool $CLAUDE_TOOL_NAME"}]}
+]}}
+JSON
+    "$WT_STATE" agents install-hooks --template-dir "$cfg_dir" --home "$hd" --state-dir "$hd/state" >/dev/null 2>&1
+    "$WT_STATE" agents install-hooks --template-dir "$cfg_dir" --home "$hd" --state-dir "$hd/state" >/dev/null 2>&1
+
+    local foreign wt_entries legacy model
+    model=$(jq -r '.model' "$hd/.claude/settings.json")
+    foreign=$(jq '[.hooks.PreToolUse[].hooks[].command | select(. == "/opt/foreign/hook")] | length' "$hd/.claude/settings.json")
+    wt_entries=$(jq '[.hooks.PreToolUse[].hooks[].command | select(test("wt-hook"))] | length' "$hd/.claude/settings.json")
+    legacy=$(jq '[.hooks.PreToolUse[].hooks[].command | select(test("CLAUDE_TOOL_NAME"))] | length' "$hd/.claude/settings.json")
+
+    [[ "$model" == "x" ]] && pass "install preserves foreign settings keys" || fail "foreign key lost"
+    [[ "$foreign" == "1" ]] && pass "install preserves foreign hooks" || fail "foreign hook count = $foreign"
+    [[ "$wt_entries" == "1" ]] && pass "install is idempotent (one wt entry)" || fail "wt entry count = $wt_entries"
+    [[ "$legacy" == "0" ]] && pass "install cleans up legacy wt entries" || fail "legacy entries remain = $legacy"
+
+    rm -rf "$hd"
+}
+
 test_install_script() {
     section "Install Script"
 
@@ -1139,6 +1189,7 @@ main() {
     test_opencode_mcp_config
     test_agent_profiles
     test_agent_launch_plan
+    test_hook_format_and_install
     test_install_script
     test_find_git_repos
     test_create_worktree

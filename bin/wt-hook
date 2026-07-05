@@ -287,8 +287,11 @@ handle_tool_use() {
         return
     fi
 
-    # When agent uses tools, it's actively working
-    set_status "$session_name" "working" "Using $tool_name"
+    # When agent uses tools, it's actively working. The tool name is best-effort
+    # (parsed from the hook payload); fall back to a generic message without it.
+    local message="Working"
+    [[ -n "$tool_name" ]] && message="Using $tool_name"
+    set_status "$session_name" "working" "$message"
 }
 
 handle_error() {
@@ -309,9 +312,14 @@ main() {
     local hook_type="${1:-}"
     local extra="${2:-}"
 
-    # Read stdin (Claude passes JSON context)
-    local stdin_data
+    # Agents pass event context as JSON on stdin (Claude, Gemini, opencode);
+    # there is no $CLAUDE_TOOL_NAME/$TOOL_NAME env var, so the tool name must be
+    # read from the payload's `tool_name` field, not a command-line argument.
+    local stdin_data tool_name="$extra"
     stdin_data=$(read_stdin)
+    if [[ -z "$tool_name" && -n "$stdin_data" ]] && command -v jq >/dev/null 2>&1; then
+        tool_name=$(jq -r '.tool_name // empty' <<<"$stdin_data" 2>/dev/null || true)
+    fi
 
     case "$hook_type" in
         session-start)
@@ -324,7 +332,7 @@ main() {
             handle_notification "$extra"
             ;;
         pre-tool|post-tool)
-            handle_tool_use "$extra"
+            handle_tool_use "$tool_name"
             ;;
         error)
             handle_error

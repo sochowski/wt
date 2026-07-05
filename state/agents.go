@@ -34,12 +34,17 @@ const (
 	setupOpencodeMCP  = "opencode-mcp"  // translate .mcp.json into an opencode config
 )
 
+// hookMarker identifies wt-owned hook entries inside an agent's own config, so
+// install-hooks can replace them cleanly (removing stale/duplicate entries)
+// instead of blindly appending. Every hook command we install references it.
+const hookMarker = "wt-hook"
+
 // HookSpec declares how an agent's status hooks are installed into $HOME.
 type HookSpec struct {
 	Format   string // one of hook* above
 	Template string // filename under the template dir (config/)
 	Target   string // path relative to home, e.g. ".claude/settings.json"
-	Marker   string // toml-append idempotency probe (substring to look for)
+	Version  int    // bump when the template's format changes; drives updates
 }
 
 // Agent is one CLI agent wt can drive.
@@ -56,26 +61,26 @@ var registry = []Agent{
 	{
 		Name:   "claude",
 		Binary: "claude",
-		Hook:   HookSpec{Format: hookJSONMerge, Template: "claude-hooks.json", Target: ".claude/settings.json"},
+		Hook:   HookSpec{Format: hookJSONMerge, Template: "claude-hooks.json", Target: ".claude/settings.json", Version: 1},
 		Launch: launchClaudeIDE,
 		Setup:  []string{setupAllowedTools},
 	},
 	{
 		Name:   "codex",
 		Binary: "codex",
-		Hook:   HookSpec{Format: hookTOMLAppend, Template: "codex-notify.toml", Target: ".codex/config.toml", Marker: "wt-hook"},
+		Hook:   HookSpec{Format: hookTOMLAppend, Template: "codex-notify.toml", Target: ".codex/config.toml", Version: 1},
 		Launch: launchDirect,
 	},
 	{
 		Name:   "gemini",
 		Binary: "gemini",
-		Hook:   HookSpec{Format: hookJSONMerge, Template: "hooks-gemini.json", Target: ".gemini/settings.json"},
+		Hook:   HookSpec{Format: hookJSONMerge, Template: "hooks-gemini.json", Target: ".gemini/settings.json", Version: 1},
 		Launch: launchDirect,
 	},
 	{
 		Name:   "opencode",
 		Binary: "opencode",
-		Hook:   HookSpec{Format: hookSymlinkPlugin, Template: "opencode-wt-plugin.js", Target: ".config/opencode/plugins/wt-status.js"},
+		Hook:   HookSpec{Format: hookSymlinkPlugin, Template: "opencode-wt-plugin.js", Target: ".config/opencode/plugins/wt-status.js", Version: 1},
 		Launch: launchOpencode,
 		Setup:  []string{setupOpencodeMCP},
 	},

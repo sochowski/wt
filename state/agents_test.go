@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -20,61 +21,135 @@ func TestLookupAgentKnownAndFallback(t *testing.T) {
 	}
 }
 
-func TestInstallJSONMergeCreateAndMerge(t *testing.T) {
+// A minimal Claude-style hook template with a wt-owned command.
+const jsonHookTemplate = `{"hooks":{
+	"PreToolUse":[{"matcher":"","hooks":[{"type":"command","command":"$HOME/bin/wt-hook pre-tool"}]}],
+	"Stop":[{"matcher":"","hooks":[{"type":"command","command":"$HOME/bin/wt-hook stop"}]}]
+}}`
+
+// countWtEntries returns how many wt-owned entries exist under an event.
+func countWtEntries(t *testing.T, target, event string) int {
+	t.Helper()
+	root := readAny(t, target).(map[string]any)
+	hooks, _ := root["hooks"].(map[string]any)
+	arr, _ := hooks[event].([]any)
+	n := 0
+	for _, e := range arr {
+		if entryIsWtOwned(e) {
+			n++
+		}
+	}
+	return n
+}
+
+func TestInstallJSONManagedCreateAndIdempotent(t *testing.T) {
 	dir := t.TempDir()
 	tmpl := filepath.Join(dir, "tmpl.json")
-	writeFile(t, tmpl, `{"hooks":{"Stop":[1]},"a":1}`)
+	writeFile(t, tmpl, jsonHookTemplate)
 	target := filepath.Join(dir, "settings.json")
 
 	// Create when absent.
-	if _, err := installJSONMerge(tmpl, target); err != nil {
+	if err := installJSONManaged(tmpl, target); err != nil {
 		t.Fatal(err)
 	}
-	got := readAny(t, target)
-	want := map[string]any{"hooks": map[string]any{"Stop": []any{float64(1)}}, "a": float64(1)}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("create: got %v want %v", got, want)
+	if got := countWtEntries(t, target, "PreToolUse"); got != 1 {
+		t.Fatalf("create: PreToolUse wt entries = %d, want 1", got)
 	}
 
-	// Merge: preserve existing keys, template wins on conflicts (arrays replaced).
-	writeFile(t, target, `{"a":99,"keep":true,"hooks":{"Start":[9]}}`)
-	if _, err := installJSONMerge(tmpl, target); err != nil {
+	// Re-run must not duplicate our entries.
+	if err := installJSONManaged(tmpl, target); err != nil {
 		t.Fatal(err)
 	}
-	got = readAny(t, target)
-	want = map[string]any{
-		"a":    float64(1),
-		"keep": true,
-		"hooks": map[string]any{
-			"Start": []any{float64(9)},
-			"Stop":  []any{float64(1)},
-		},
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("merge: got %v want %v", got, want)
+	if got := countWtEntries(t, target, "Stop"); got != 1 {
+		t.Fatalf("idempotent: Stop wt entries = %d, want 1", got)
 	}
 }
 
-func TestInstallTOMLAppendIdempotent(t *testing.T) {
+func TestInstallJSONManagedPreservesForeignAndCleansLegacy(t *testing.T) {
+	dir := t.TempDir()
+	tmpl := filepath.Join(dir, "tmpl.json")
+	writeFile(t, tmpl, jsonHookTemplate)
+	target := filepath.Join(dir, "settings.json")
+
+	// Existing file: a foreign hook we must keep, our own on a foreign key,
+	// and a legacy wt entry under an event no longer in the template.
+	writeFile(t, target, `{
+		"model": "x",
+		"hooks": {
+			"PreToolUse": [{"matcher":"","hooks":[{"type":"command","command":"/usr/bin/other-tool"}]}],
+			"PostToolUse": [{"matcher":"","hooks":[{"type":"command","command":"$HOME/bin/wt-hook post-tool legacy"}]}]
+		}
+	}`)
+
+	if err := installJSONManaged(tmpl, target); err != nil {
+		t.Fatal(err)
+	}
+	root := readAny(t, target).(map[string]any)
+
+	// Foreign top-level key preserved.
+	if root["model"] != "x" {
+		t.Fatalf("model not preserved: %v", root)
+	}
+	// Legacy wt entry under PostToolUse removed (and the emptied event dropped).
+	if _, has := root["hooks"].(map[string]any)["PostToolUse"]; has {
+		t.Fatalf("legacy PostToolUse not cleaned: %v", root["hooks"])
+	}
+	// Foreign PreToolUse hook kept alongside exactly one fresh wt entry.
+	pre := root["hooks"].(map[string]any)["PreToolUse"].([]any)
+	if len(pre) != 2 {
+		t.Fatalf("PreToolUse should have foreign + wt entry, got %d: %v", len(pre), pre)
+	}
+	if got := countWtEntries(t, target, "PreToolUse"); got != 1 {
+		t.Fatalf("PreToolUse wt entries = %d, want 1", got)
+	}
+}
+
+func TestInstallJSONManagedRejectsNonObject(t *testing.T) {
+	dir := t.TempDir()
+	tmpl := filepath.Join(dir, "tmpl.json")
+	writeFile(t, tmpl, jsonHookTemplate)
+	target := filepath.Join(dir, "settings.json")
+	writeFile(t, target, `[1,2,3]`) // not an object
+	if err := installJSONManaged(tmpl, target); err == nil {
+		t.Fatalf("expected error on non-object settings file")
+	}
+}
+
+func TestInstallTOMLManagedBlockReplace(t *testing.T) {
 	dir := t.TempDir()
 	tmpl := filepath.Join(dir, "notify.toml")
 	writeFile(t, tmpl, "[notify]\ncommand = \"$HOME/bin/wt-hook stop\"\n")
 	target := filepath.Join(dir, "config.toml")
 	writeFile(t, target, "[model]\nname = \"x\"\n")
 
-	if _, err := installTOMLAppend(tmpl, target, "wt-hook"); err != nil {
+	if err := installTOMLManaged(tmpl, target, 1); err != nil {
 		t.Fatal(err)
 	}
 	first := readFile(t, target)
-	if !contains(first, "[notify]") || !contains(first, "[model]") {
-		t.Fatalf("append lost content: %q", first)
+	if !contains(first, "[notify]") || !contains(first, "[model]") || !contains(first, tomlBlockBegin) {
+		t.Fatalf("block install lost content: %q", first)
 	}
-	// Second run is a no-op because the marker is present.
-	if _, err := installTOMLAppend(tmpl, target, "wt-hook"); err != nil {
+
+	// Re-running at the same version replaces the block in place (no growth).
+	if err := installTOMLManaged(tmpl, target, 1); err != nil {
 		t.Fatal(err)
 	}
-	if readFile(t, target) != first {
-		t.Fatalf("second append not idempotent")
+	if got := readFile(t, target); got != first {
+		t.Fatalf("re-install not idempotent:\n--- first ---\n%s\n--- second ---\n%s", first, got)
+	}
+	if n := countSubstr(readFile(t, target), tomlBlockBegin); n != 1 {
+		t.Fatalf("expected exactly one managed block, got %d", n)
+	}
+
+	// A version bump rewrites the block (new version marker present).
+	if err := installTOMLManaged(tmpl, target, 2); err != nil {
+		t.Fatal(err)
+	}
+	if !contains(readFile(t, target), "(v2)") {
+		t.Fatalf("version bump not reflected: %q", readFile(t, target))
+	}
+	if n := countSubstr(readFile(t, target), tomlBlockBegin); n != 1 {
+		t.Fatalf("version bump left %d blocks, want 1", n)
 	}
 }
 
@@ -89,7 +164,7 @@ func TestInstallSymlinkPluginReplacesAndBacksUp(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeFile(t, target, "old")
-	if _, err := installSymlinkPlugin(src, target); err != nil {
+	if err := installSymlinkPlugin(src, target); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(target + ".bak"); err != nil {
@@ -99,7 +174,7 @@ func TestInstallSymlinkPluginReplacesAndBacksUp(t *testing.T) {
 		t.Fatalf("target is not a symlink")
 	}
 	// Re-running replaces the symlink cleanly (no second backup).
-	if _, err := installSymlinkPlugin(src, target); err != nil {
+	if err := installSymlinkPlugin(src, target); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -253,6 +328,10 @@ func readAny(t *testing.T, path string) any {
 		t.Fatal(err)
 	}
 	return v
+}
+
+func countSubstr(s, sub string) int {
+	return strings.Count(s, sub)
 }
 
 func contains(s, sub string) bool {
