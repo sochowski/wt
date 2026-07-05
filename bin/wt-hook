@@ -189,6 +189,8 @@ notify() {
     local message="$2"
     local urgency="${3:-normal}"
     local context="${4:-}"        # worktree/branch, prefixed onto the summary
+    local session="${5:-}"        # tmux session name; carried so the notif
+                                  # manager can jump straight back to this agent
 
     # App stays "wt"; the worktree goes in the summary so picker rows read
     # "wt: <branch> · <title> — <message>" and stay scannable by worktree.
@@ -198,7 +200,9 @@ notify() {
     if [[ "$OSTYPE" == "darwin"* ]]; then
         osascript -e "display notification \"$message\" with title \"$summary\"" 2>/dev/null || true
     else
-        notify-send -a wt -u "$urgency" "$summary" "$message" 2>/dev/null || true
+        # -c stashes the session in the freedesktop category, which dunst keeps
+        # in history (custom hints don't survive there); wtgoto reads it back.
+        notify-send -a wt -u "$urgency" ${session:+-c "$session"} "$summary" "$message" 2>/dev/null || true
     fi
 }
 
@@ -271,7 +275,7 @@ handle_notification() {
     case "$notification_type" in
         idle_prompt|permission_prompt)
             set_status "$session_name" "input" "Waiting for input"
-            notify "$label needs input" "Waiting for your response" "normal" "$branch"
+            notify "$label needs input" "Waiting for your response" "normal" "$branch" "$session_name"
             ;;
         *)
             # Other notifications don't change status
@@ -301,7 +305,7 @@ handle_error() {
         label=$(get_agent_label "$session_name")
         branch=$(get_branch "$session_name")
         set_status "$session_name" "error" "$label encountered an error"
-        notify "$label error" "Something went wrong" "critical" "$branch"
+        notify "$label error" "Something went wrong" "critical" "$branch" "$session_name"
     fi
 }
 
