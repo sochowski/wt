@@ -309,12 +309,16 @@ func TestResumeArgs(t *testing.T) {
 	gemini := lookupAgent("gemini")
 	home := t.TempDir()
 
-	// Rung 1: a captured id resumes the exact conversation via the agent's flag.
-	if got := resumeArgs(claude, "sess-123", home); !reflect.DeepEqual(got, []string{"--resume", "sess-123"}) {
-		t.Fatalf("claude id: %v", got)
-	}
+	// opencode has no ProjectsDir to probe, so its id passes through as-is.
 	if got := resumeArgs(opencode, "ses_abc", home); !reflect.DeepEqual(got, []string{"--session", "ses_abc"}) {
 		t.Fatalf("opencode id: %v", got)
+	}
+
+	// Claude id with NO transcript on disk is a phantom (SessionStart mints ids
+	// for sessions that may never materialize) -> not used; with no cwd session
+	// either, fresh launch.
+	if got := resumeArgs(claude, "sess-123", home); got != nil {
+		t.Fatalf("claude phantom id: want nil, got %v", got)
 	}
 
 	// Rung 3: no id and no prior cwd session -> fresh launch (nil).
@@ -330,7 +334,6 @@ func TestResumeArgs(t *testing.T) {
 		t.Fatalf("gemini: want nil, got %v", got)
 	}
 
-	// Rung 2: no id, but a prior session exists for the cwd -> --continue.
 	cwd, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
@@ -339,9 +342,22 @@ func TestResumeArgs(t *testing.T) {
 	if err := os.MkdirAll(projDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
+
+	// Rung 2: phantom id but another session exists for the cwd -> --continue
+	// (recovers the real conversation instead of failing on the phantom).
 	writeFile(t, filepath.Join(projDir, "abc.jsonl"), "{}")
+	if got := resumeArgs(claude, "sess-123", home); !reflect.DeepEqual(got, []string{"--continue"}) {
+		t.Fatalf("claude phantom-id fallback: %v", got)
+	}
+	// No id at all, cwd session exists -> --continue.
 	if got := resumeArgs(claude, "", home); !reflect.DeepEqual(got, []string{"--continue"}) {
 		t.Fatalf("claude cwd-continue: %v", got)
+	}
+
+	// Rung 1: the id's transcript exists -> exact-id resume.
+	writeFile(t, filepath.Join(projDir, "sess-123.jsonl"), "{}")
+	if got := resumeArgs(claude, "sess-123", home); !reflect.DeepEqual(got, []string{"--resume", "sess-123"}) {
+		t.Fatalf("claude id: %v", got)
 	}
 }
 

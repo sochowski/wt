@@ -55,13 +55,57 @@ if [[ "$RESUME" == "1" ]]; then
     plan_flags+=(--resume --resume-session-id "$resume_session_id")
 fi
 
-WT_LAUNCH_BINARY=""
-WT_LAUNCH_ARGS=()
-if plan=$("$WT_STATE" agent "$AGENT" launch-plan "${plan_flags[@]}" 2>/dev/null); then
-    eval "$plan"
+# Resolve a launch plan into WT_LAUNCH_BINARY / WT_LAUNCH_ARGS (empty plan →
+# exec the agent name directly, mirroring the old bash fallback).
+resolve_plan() {
+    WT_LAUNCH_BINARY=""
+    WT_LAUNCH_ARGS=()
+    local plan
+    if plan=$("$WT_STATE" agent "$AGENT" launch-plan "$@" 2>/dev/null); then
+        eval "$plan"
+    fi
+    [[ -n "$WT_LAUNCH_BINARY" ]] || WT_LAUNCH_BINARY="$AGENT"
+}
+
+resolve_plan "${plan_flags[@]}"
+
+if [[ "$RESUME" != "1" ]]; then
+    exec "$WT_LAUNCH_BINARY" "${WT_LAUNCH_ARGS[@]}" "$@"
 fi
 
-# Fall back to exec'ing the agent name directly if the plan came back empty.
-[[ -n "$WT_LAUNCH_BINARY" ]] || WT_LAUNCH_BINARY="$AGENT"
+# Resume mode: a resume invocation can fail fast — a stale/foreign session id,
+# or Claude's session lookup itself erroring on the first run after boot
+# ("Invalid session ID: unknown error"). Don't leave the pane dead on it: if an
+# attempt exits nonzero within seconds (an immediate rejection, not a real
+# session the user later closed), retry one rung down the ladder:
+#   exact-id resume → cwd-latest resume (id dropped) → fresh launch.
+attempted=" "
+run_attempt() {
+    local key="${WT_LAUNCH_BINARY} ${WT_LAUNCH_ARGS[*]-}"
+    # Skip attempts that resolve to a command line we already tried (e.g. no
+    # captured id, so rung 1 and rung 2 are the same --continue invocation).
+    [[ "$attempted" == *" ${key} "* ]] && return 1
+    attempted+="${key} "
 
+    local start=$SECONDS rc=0
+    "$WT_LAUNCH_BINARY" "${WT_LAUNCH_ARGS[@]}" "$@" || rc=$?
+    (( rc == 0 )) && exit 0
+    # Ran for a while before failing: a real session, not a rejected resume.
+    (( SECONDS - start >= 10 )) && exit "$rc"
+    echo "wt-agent-launch: '${key}' exited ${rc} immediately; trying next resume fallback..." >&2
+    return 1
+}
+
+# Rung 1: the plan already resolved above (exact-id when captured + on disk).
+run_attempt "$@" || true
+
+# Rung 2: same plan minus the captured id → the agent's cwd-latest resume.
+resolve_plan --sh --session "$local_session" \
+    --opencode-config "$opencode_candidate" --config-dir "$WT_CONFIG_DIR" \
+    --resume --resume-session-id ""
+run_attempt "$@" || true
+
+# Rung 3: fresh launch, no resume at all.
+resolve_plan --sh --session "$local_session" \
+    --opencode-config "$opencode_candidate" --config-dir "$WT_CONFIG_DIR"
 exec "$WT_LAUNCH_BINARY" "${WT_LAUNCH_ARGS[@]}" "$@"
