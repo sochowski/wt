@@ -1,5 +1,16 @@
 {
   "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/bin/wt-hook session-start"
+          }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
         "matcher": "",

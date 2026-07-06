@@ -239,12 +239,44 @@ read_stdin() {
 }
 
 handle_session_start() {
+    local sid_arg="${1:-}" stdin_json="${2:-}"
     local session_name
     if session_name=$(get_session_name); then
         local label
         label=$(get_agent_label "$session_name")
         set_status "$session_name" "working" "$label started"
+
+        # Capture the agent's native session id so a later revive can resume the
+        # exact conversation (launch-plan --resume) rather than only the
+        # cwd-latest fallback. opencode passes it as an arg; Claude delivers it
+        # on stdin as JSON (.session_id). Best-effort: an empty id is fine.
+        local sid="$sid_arg"
+        if [[ -z "$sid" && -n "$stdin_json" ]] && command -v jq >/dev/null 2>&1; then
+            sid=$(jq -r '.session_id // empty' <<<"$stdin_json" 2>/dev/null || true)
+        fi
+        if [[ -n "$sid" ]]; then
+            "$WT_STATE" set "$session_name" --agent-session-id "$sid" >/dev/null 2>&1 || true
+        fi
     fi
+}
+
+# Opportunistically backfill agent_session_id from a mid-session hook. Claude
+# puts session_id on the stdin of every hook, so a session already running when
+# these hooks were installed captures its id on its next tool use / stop — no
+# restart needed. Unlike session-start (which is authoritative and always
+# writes), this writes only when nothing is stored yet, so a hot hook like
+# pre-tool can't clobber a fresh conversation's id and doesn't rewrite on every
+# call. Agents that pass no stdin (opencode) simply no-op here.
+backfill_session_id() {
+    local stdin_json="${1:-}" sid session_name cur
+    [[ -n "$stdin_json" ]] || return 0
+    command -v jq >/dev/null 2>&1 || return 0
+    sid=$(jq -r '.session_id // empty' <<<"$stdin_json" 2>/dev/null || true)
+    [[ -n "$sid" ]] || return 0
+    session_name=$(get_session_name) || return 0
+    cur=$("$WT_STATE" get "$session_name" --field agent_session_id 2>/dev/null || true)
+    [[ -z "$cur" ]] || return 0
+    "$WT_STATE" set "$session_name" --agent-session-id "$sid" >/dev/null 2>&1 || true
 }
 
 handle_stop() {
@@ -321,9 +353,14 @@ main() {
         tool_name=$(jq -r '.tool_name // empty' <<<"$stdin_data" 2>/dev/null || true)
     fi
 
+    # session-start captures the id authoritatively; every other hook backfills
+    # it (empty-only) so a session already running at install time is picked up
+    # without a restart.
+    [[ "$hook_type" != "session-start" ]] && backfill_session_id "$stdin_data"
+
     case "$hook_type" in
         session-start)
-            handle_session_start
+            handle_session_start "$extra" "$stdin_data"
             ;;
         stop)
             handle_stop

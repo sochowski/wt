@@ -40,6 +40,23 @@ func TestSetPreservesUnsetFields(t *testing.T) {
 	}
 }
 
+func TestAgentSessionIDRoundTrips(t *testing.T) {
+	st, _ := newStore(t)
+
+	got, err := st.Set("s", map[string]string{"agent_session_id": "abc-123"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.AgentSessionID != "abc-123" {
+		t.Fatalf("agent_session_id = %q, want abc-123", got.AgentSessionID)
+	}
+	// A status update must preserve the captured id (revive reads it later).
+	after, _ := st.Set("s", map[string]string{"status": "offline"})
+	if after.AgentSessionID != "abc-123" {
+		t.Errorf("agent_session_id not preserved: %q", after.AgentSessionID)
+	}
+}
+
 func TestStatusChangedAtOnlyOnChange(t *testing.T) {
 	st, clock := newStore(t)
 

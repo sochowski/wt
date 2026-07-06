@@ -416,6 +416,7 @@ get_status_icon() {
         idle)    echo "○" ;;
         input)   echo "⊘" ;;
         error)   echo "✗" ;;
+        offline) echo "◌" ;;
         *)       echo "?" ;;
     esac
 }
@@ -428,6 +429,7 @@ get_status_icon_ansi() {
         idle)    echo -e "\033[34m○\033[0m" ;;  # blue
         input)   echo -e "\033[33m⊘\033[0m" ;;  # yellow
         error)   echo -e "\033[31m✗\033[0m" ;;  # red
+        offline) echo -e "\033[90m◌\033[0m" ;;  # gray — on disk, no live tmux session
         *)       echo -e "\033[90m?\033[0m" ;;  # gray
     esac
 }
@@ -596,6 +598,12 @@ list_worktrees() {
                 status="unknown"
                 key=$(stat -c %Y "$wt_path" 2>/dev/null || stat -f %m "$wt_path" 2>/dev/null || echo 0)
             fi
+            # A worktree on disk with no live tmux session is "offline": the DB's
+            # last-known status (e.g. "working" pre-reboot, or a swept session)
+            # is stale until revived. Derived here, never persisted, so reviving
+            # restores the real status with no DB write — and so `wt sweep` no
+            # longer needs to store "offline".
+            tmux has-session -t "$session_name" 2>/dev/null || status="offline"
             if [[ "$format" == full ]] && is_pr_stale "$pr_checked"; then
                 stale_lines+="${session_name}${TAB}${branch}${TAB}${wt_path}"$'\n'
             fi
@@ -872,9 +880,9 @@ sweep_session() {
         return 1
     fi
 
-    # Nothing to reclaim if it's already offline with no live session.
-    if [[ "$("$WT_STATE" get "$session_name" --field status 2>/dev/null)" == "offline" ]] \
-        && ! tmux has-session -t "$session_name" 2>/dev/null; then
+    # Nothing to reclaim if there's no live session — it already renders as
+    # offline (offline is derived from tmux liveness, not a stored status).
+    if ! tmux has-session -t "$session_name" 2>/dev/null; then
         echo "$session_name is already offline."
         return 0
     fi
@@ -896,12 +904,10 @@ sweep_session() {
         tmux kill-session -t "$session_name"
     fi
 
-    # Mark offline; the worktree and row stay intact for resume. NOTE: the
-    # `resetting` branch derives "offline" at render time (never stores it) and
-    # keeps the true last status. When these merge, reconcile: drop this write
-    # in favour of the derived render so the last real status is preserved.
-    "$WT_STATE" set "$session_name" --status offline >/dev/null 2>&1 || true
-
+    # The worktree and row stay intact for resume. "offline" is derived at
+    # render time from the absence of a live tmux session (see list_worktrees),
+    # so there's no status write here — the row keeps its true last status,
+    # which revive restores.
     echo "Swept $session_name (agent stopped, worktree kept)."
 }
 
@@ -1212,10 +1218,14 @@ revive_worktree_session() {
     tmux select-window -t "$session_name:main"
     tmux select-pane -t "$session_name:main.1"
 
-    tmux set-option -qt "$session_name" @wt-status  "${status:-idle}"
-    tmux set-option -qt "$session_name" @wt-message "${message:-Ready}"
+    status="working"
+    message="Resuming ${agent}..."
+
+    tmux set-option -qt "$session_name" @wt-status  "$status"
+    tmux set-option -qt "$session_name" @wt-message "$message"
     tmux set-option -qt "$session_name" @wt-repo    "$repo"
     tmux set-option -qt "$session_name" @wt-branch  "$branch"
+    tmux set-option -qt "$session_name" @wt-wt-path "$wt_path"
     tmux set-option -qt "$session_name" @wt-pr      "$pr"
     tmux set-option -qt "$session_name" @wt-agent   "$agent"
     tmux set-option -qt "$session_name" @wt-opencode-config "$opencode_config"
@@ -1223,9 +1233,19 @@ revive_worktree_session() {
         tmux set-environment -t "$session_name" OPENCODE_CONFIG "$opencode_config"
     fi
 
-    status="${status:-idle}"
-    message="${message:-Ready}"
+    # Persist before launching so the agent's own session-start hook (which
+    # reads the store) sees the revived row, and so wt-agent-launch can look up
+    # this session's captured agent_session_id.
     save_session "$session_name"
+
+    # Relaunch the agent, resuming its prior conversation when possible. Without
+    # this, revive left a dead agent pane (panes existed but nothing ran).
+    # --resume degrades gracefully in the launch plan: exact-id → cwd-latest →
+    # fresh. Wait for nvim's IDE server first so Claude's --ide autodetect finds
+    # it, mirroring create_worktree.
+    echo "Waiting for Neovim IDE server to start..."
+    sleep 2
+    tmux send-keys -t "$session_name:main.1" "$WT_BIN_DIR/wt-agent-launch --resume" Enter
 }
 
 # -----------------------------------------------------------------------------
