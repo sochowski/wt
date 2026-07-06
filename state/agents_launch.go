@@ -89,15 +89,38 @@ func resolveOpencodeConfig(candidate, configDir, session string) string {
 // resumeArgs applies the resume capability ladder for an agent (see ResumeSpec):
 // captured id → cwd-latest → nothing (fresh launch). Returns the args to add to
 // the launch plan, or nil when the agent can't resume.
+//
+// The captured id is used only when its transcript actually exists for this
+// cwd. Claude's SessionStart hook mints a session_id the moment the binary
+// starts, but a session the user immediately /resume's away from (or exits
+// without chatting) never writes a transcript — resuming such a phantom id
+// fails with "Invalid session ID". A stored id we can't see on disk is treated
+// as stale and the ladder drops to cwd-latest, which recovers the real
+// conversation. Agents with no ProjectsDir (opencode's store is keyed by an
+// opaque project hash) can't be probed, so their id passes through as-is.
 func resumeArgs(a Agent, sessionID, home string) []string {
 	r := a.Resume
 	if sessionID != "" && r.IDFlag != "" {
-		return []string{r.IDFlag, sessionID}
+		if r.ProjectsDir == "" || cwdTranscriptExists(home, r.ProjectsDir, sessionID) {
+			return []string{r.IDFlag, sessionID}
+		}
 	}
 	if len(r.ContinueArgs) > 0 && r.ProjectsDir != "" && cwdHasProjectSession(home, r.ProjectsDir) {
 		return append([]string(nil), r.ContinueArgs...)
 	}
 	return nil
+}
+
+// cwdTranscriptExists reports whether a specific session id has a transcript
+// stored for the current working directory's project dir.
+func cwdTranscriptExists(home, projectsRel, sessionID string) bool {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return false
+	}
+	path := filepath.Join(home, projectsRel, mangleProjectPath(cwd), sessionID+".jsonl")
+	st, err := os.Stat(path)
+	return err == nil && !st.IsDir()
 }
 
 // cwdHasProjectSession reports whether the agent has a prior session stored for
