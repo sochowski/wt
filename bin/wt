@@ -423,15 +423,17 @@ get_status_icon() {
 
 # ANSI-colored icon for terminal output (list, pick commands)
 get_status_icon_ansi() {
-    local status="$1"
+    local status="$1" __out="${2:-}" val
     case "$status" in
-        working) echo -e "\033[32m●\033[0m" ;;  # green
-        idle)    echo -e "\033[34m○\033[0m" ;;  # blue
-        input)   echo -e "\033[33m⊘\033[0m" ;;  # yellow
-        error)   echo -e "\033[31m✗\033[0m" ;;  # red
-        offline) echo -e "\033[90m◌\033[0m" ;;  # gray — on disk, no live tmux session
-        *)       echo -e "\033[90m?\033[0m" ;;  # gray
+        working) val=$'\033[32m●\033[0m' ;;  # green
+        idle)    val=$'\033[34m○\033[0m' ;;  # blue
+        input)   val=$'\033[33m⊘\033[0m' ;;  # yellow
+        error)   val=$'\033[31m✗\033[0m' ;;  # red
+        offline) val=$'\033[90m◌\033[0m' ;;  # gray — on disk, no live tmux session
+        *)       val=$'\033[90m?\033[0m' ;;  # gray
     esac
+    # With an out-var name, assign in-process (no subshell); otherwise print.
+    if [[ -n "$__out" ]]; then printf -v "$__out" '%s' "$val"; else printf '%s\n' "$val"; fi
 }
 
 # -----------------------------------------------------------------------------
@@ -469,24 +471,50 @@ pr_state_lookup() {
 # Colored one-glyph badge for a PR state, for the ls/pick surfaces. Empty string
 # for none/unknown so worktrees without a PR stay visually quiet.
 pr_badge() {
+    local __out="${2:-}" val
     case "$1" in
-        merged) echo -e "\033[35m⬤\033[0m" ;;  # magenta — merged
-        open)   echo -e "\033[32m◆\033[0m" ;;  # green — open
-        draft)  echo -e "\033[90m◇\033[0m" ;;  # gray — draft
-        closed) echo -e "\033[31m⊘\033[0m" ;;  # red — closed, not merged
-        *)       echo "" ;;
+        merged) val=$'\033[35m⬤\033[0m' ;;  # magenta — merged
+        open)   val=$'\033[32m◆\033[0m' ;;  # green — open
+        draft)  val=$'\033[90m◇\033[0m' ;;  # gray — draft
+        closed) val=$'\033[31m⊘\033[0m' ;;  # red — closed, not merged
+        *)       val="" ;;
     esac
+    if [[ -n "$__out" ]]; then printf -v "$__out" '%s' "$val"; else printf '%s\n' "$val"; fi
 }
 
 # True (stale) when a cached PR state is missing, malformed, or older than the
 # TTL and should be refetched from gh.
 is_pr_stale() {
-    local checked="${1:-0}"
+    local checked="${1:-0}" now="${2:-}"
     [[ "$checked" =~ ^[0-9]+$ ]] || return 0
     (( checked == 0 )) && return 0
-    local now
-    now=$(date +%s)
+    # Callers in a loop pass a precomputed `now` to avoid forking date per row.
+    [[ -n "$now" ]] || now=$(date +%s)
     (( now - checked >= WT_PR_TTL ))
+}
+
+# Read a worktree's current branch WITHOUT forking git (the hot path in
+# list_worktrees runs this per on-disk worktree). Resolves $wt/.git — a real dir
+# for a primary checkout, or a "gitdir: <path>" pointer file for a linked
+# worktree — then parses HEAD. Assigns the branch to the named out-var, or ""
+# for a detached HEAD / unreadable ref (caller substitutes "detached"), matching
+# `git branch --show-current` semantics. Pure bash file reads: no subprocess.
+read_worktree_branch() {
+    local wt="$1" __out="$2" dotgit="$1/.git" gitdir="" head="" line=""
+    if [[ -d "$dotgit" ]]; then
+        gitdir="$dotgit"
+    elif [[ -f "$dotgit" ]]; then
+        IFS= read -r line < "$dotgit" || line=""
+        gitdir="${line#gitdir: }"
+        [[ "$gitdir" == /* ]] || gitdir="$wt/$gitdir"   # pointer may be relative
+    else
+        printf -v "$__out" '%s' ""; return 0
+    fi
+    if [[ -r "$gitdir/HEAD" ]]; then IFS= read -r head < "$gitdir/HEAD" || true; fi
+    case "$head" in
+        "ref: refs/heads/"*) printf -v "$__out" '%s' "${head#ref: refs/heads/}" ;;
+        *)                   printf -v "$__out" '%s' "" ;;  # detached / unreadable
+    esac
 }
 
 # Refresh cached PR states for the given "session<TAB>branch<TAB>wt_path" lines,
@@ -540,19 +568,19 @@ get_bare_repo() {
 # Render a single worktree row in the requested format (no trailing newline;
 # rows are collected into an array, sorted by recency, then printed).
 render_worktree_row() {
-    local format="$1" session_name="$2" wt_path="$3" status="$4" repo="$5" branch="$6" pr_state="${7:-}"
+    local __out="$1" format="$2" session_name="$3" wt_path="$4" status="$5" repo="$6" branch="$7" pr_state="${8:-}"
     case "$format" in
         full)
             local icon badge
-            icon=$(get_status_icon_ansi "${status:-unknown}")
+            get_status_icon_ansi "${status:-unknown}" icon
             # One-char PR cell; a space keeps the wt_path column aligned across
             # rows even though the colored glyph and space differ in byte width.
-            badge=$(pr_badge "$pr_state")
+            pr_badge "$pr_state" badge
             [[ -n "$badge" ]] || badge=" "
-            printf "%s %-20s %-25s %s %s" "$icon" "${repo:-?}" "${branch:-?}" "$badge" "${wt_path:-?}"
+            printf -v "$__out" "%s %-20s %-25s %s %s" "$icon" "${repo:-?}" "${branch:-?}" "$badge" "${wt_path:-?}"
             ;;
-        simple)  printf "%s:%s:%s" "$session_name" "${wt_path:-?}" "${status:-unknown}" ;;
-        session) printf "%s" "$session_name" ;;
+        simple)  printf -v "$__out" "%s:%s:%s" "$session_name" "${wt_path:-?}" "${status:-unknown}" ;;
+        session) printf -v "$__out" "%s" "$session_name" ;;
     esac
 }
 
@@ -563,7 +591,6 @@ render_worktree_row() {
 # rows, so the list appears once fully assembled rather than streaming in.
 list_worktrees() {
     local format="${1:-full}"
-    local seen_sessions=""
     local -a rows=()
     local stale_lines=""   # "session<TAB>branch<TAB>wt_path" per worktree needing a PR refresh
     local TAB SEP
@@ -581,29 +608,52 @@ list_worktrees() {
         | jq -r '.[] | [.name,.status,.repo,.branch,.wt_path,.updated_at,.pr_state,.pr_state_checked_at] | @tsv' \
         | tr '\t' '\037' || true)
 
+    # Index the store once into name-keyed maps. Phase A then resolves each
+    # worktree's row with in-process array reads instead of an awk + four cut
+    # subprocesses per worktree — the dominant cost when many worktrees exist.
+    local -A s_have s_status s_key s_prstate s_prchecked
+    local _n _st _rp _br _wp _ua _ps _pc
+    while IFS="$SEP" read -r _n _st _rp _br _wp _ua _ps _pc; do
+        [[ -n "$_n" ]] || continue
+        s_have["$_n"]=1
+        s_status["$_n"]="$_st"; s_key["$_n"]="$_ua"
+        s_prstate["$_n"]="$_ps"; s_prchecked["$_n"]="$_pc"
+    done <<<"$store_data"
+
+    # Snapshot live tmux sessions with a single call; membership below is an
+    # array read, not a `tmux has-session` fork per row.
+    local -A live
+    local _s
+    while IFS= read -r _s; do
+        [[ -n "$_s" ]] && live["$_s"]=1
+    done < <(tmux list-sessions -F '#{session_name}' 2>/dev/null)
+
+    # One clock read shared by every is_pr_stale check in this listing.
+    local now=""
+    [[ "$format" == full ]] && now=$(date +%s)
+
+    local -A seen
+
     # Phase A: worktrees on disk under WT_BASE_DIR (authoritative for existence).
     if [[ -d "$WT_BASE_DIR" ]]; then
         while IFS= read -r -d '' wt_path; do
             [[ -d "$wt_path/.git" || -f "$wt_path/.git" ]] || continue
-            local branch repo_name session_name srow status key pr_state pr_checked
-            # --show-current SUCCEEDS with empty output on a detached HEAD, so
-            # the `||` never fires — guard emptiness explicitly or the session
-            # name degenerates to "repo-" (a prefix of every real repo session).
-            branch=$(git -C "$wt_path" branch --show-current 2>/dev/null || true)
+            local branch repo_name parent session_name status key pr_state pr_checked row_str
+            # HEAD reads empty on a detached HEAD; guard emptiness explicitly or
+            # the session name degenerates to "repo-" (a prefix of every real
+            # repo session). read_worktree_branch avoids forking git per row.
+            read_worktree_branch "$wt_path" branch
             [[ -n "$branch" ]] || branch="detached"
-            repo_name=$(basename "$(dirname "$wt_path")")
+            parent="${wt_path%/*}"; repo_name="${parent##*/}"   # basename "$(dirname …)"
             session_name="${repo_name}-${branch//\//-}"
-            seen_sessions="${seen_sessions}:${session_name}:"
-            # Exact field match (awk, not grep) so repo/branch names with regex
-            # metacharacters like '.' or '+' can't false-match.
-            srow=$(awk -F"$SEP" -v n="$session_name" '$1==n{print; exit}' <<<"$store_data")
+            seen["$session_name"]=1
             pr_state=""
             pr_checked=0
-            if [[ -n "$srow" ]]; then
-                status=$(cut -d"$SEP" -f2 <<<"$srow")
-                key=$(cut -d"$SEP" -f6 <<<"$srow")
-                pr_state=$(cut -d"$SEP" -f7 <<<"$srow")
-                pr_checked=$(cut -d"$SEP" -f8 <<<"$srow")
+            if [[ -n "${s_have[$session_name]:-}" ]]; then
+                status="${s_status[$session_name]}"
+                key="${s_key[$session_name]}"
+                pr_state="${s_prstate[$session_name]}"
+                pr_checked="${s_prchecked[$session_name]}"
             else
                 status="unknown"
                 key=$(stat -c %Y "$wt_path" 2>/dev/null || stat -f %m "$wt_path" 2>/dev/null || echo 0)
@@ -613,25 +663,28 @@ list_worktrees() {
             # is stale until revived. Derived here, never persisted, so reviving
             # restores the real status with no DB write — and so `wt sweep` no
             # longer needs to store "offline".
-            tmux has-session -t "=$session_name" 2>/dev/null || status="offline"
-            if [[ "$format" == full ]] && is_pr_stale "$pr_checked"; then
+            [[ -n "${live[$session_name]:-}" ]] || status="offline"
+            if [[ "$format" == full ]] && is_pr_stale "$pr_checked" "$now"; then
                 stale_lines+="${session_name}${TAB}${branch}${TAB}${wt_path}"$'\n'
             fi
-            rows+=("${key:-0}${TAB}$(render_worktree_row "$format" "$session_name" "$wt_path" "$status" "$repo_name" "$branch" "$pr_state")")
+            render_worktree_row row_str "$format" "$session_name" "$wt_path" "$status" "$repo_name" "$branch" "$pr_state"
+            rows+=("${key:-0}${TAB}${row_str}")
         done < <(find "$WT_BASE_DIR" -maxdepth 2 -type d -print0 2>/dev/null)
     fi
 
     # Phase B: store sessions not found on disk (adopted/primary worktrees),
-    # included only when a live tmux session exists.
-    local name status repo branch wt_path updated_at pr_state pr_checked
+    # included only when a live tmux session exists. Iterated in store order
+    # (updated_at DESC, name ASC) so ties render deterministically.
+    local name status repo branch wt_path updated_at pr_state pr_checked row_str
     while IFS="$SEP" read -r name status repo branch wt_path updated_at pr_state pr_checked; do
         [[ -n "$name" ]] || continue
-        [[ "$seen_sessions" == *":${name}:"* ]] && continue
-        tmux has-session -t "=$name" 2>/dev/null || continue
-        if [[ "$format" == full && -n "$wt_path" ]] && is_pr_stale "$pr_checked"; then
+        [[ -n "${seen[$name]:-}" ]] && continue
+        [[ -n "${live[$name]:-}" ]] || continue
+        if [[ "$format" == full && -n "$wt_path" ]] && is_pr_stale "$pr_checked" "$now"; then
             stale_lines+="${name}${TAB}${branch}${TAB}${wt_path}"$'\n'
         fi
-        rows+=("${updated_at:-0}${TAB}$(render_worktree_row "$format" "$name" "${wt_path:-?}" "${status:-unknown}" "${repo:-?}" "${branch:-?}" "$pr_state")")
+        render_worktree_row row_str "$format" "$name" "${wt_path:-?}" "${status:-unknown}" "${repo:-?}" "${branch:-?}" "$pr_state"
+        rows+=("${updated_at:-0}${TAB}${row_str}")
     done <<<"$store_data"
 
     # Kick off a detached, parallel refresh of any stale PR states so badges are
