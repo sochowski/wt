@@ -88,7 +88,7 @@ launch_nvim() {
     local session_name="$1" wt_path="$2"
 
     if [[ "$WT_DIFF_VIEW" != "1" ]] || ! command -v nvim >/dev/null 2>&1; then
-        tmux send-keys -t "$session_name:main" "nvim" Enter
+        tmux send-keys -t "=$session_name:main" "nvim" Enter
         return
     fi
 
@@ -103,7 +103,7 @@ launch_nvim() {
     # the plugin and open the diff.
     cmd=$(printf 'WT_DIFF_BASE=%q WT_DIFF_TOOL=%q nvim --listen %q -c %q' \
                  "$base" "$WT_DIFF_TOOL" "$sock" "luafile $lua")
-    tmux send-keys -t "$session_name:main" "$cmd" Enter
+    tmux send-keys -t "=$session_name:main" "$cmd" Enter
 
     # Watcher: refreshes the view on file changes. Only meaningful when there's
     # a diffable worktree; it self-exits when the socket disappears.
@@ -292,7 +292,7 @@ agent_session_setup() {
 derive_status_metadata() {
     local session_name="$1"
 
-    if tmux has-session -t "$session_name" 2>/dev/null; then
+    if tmux has-session -t "=$session_name" 2>/dev/null; then
         [[ -z "$repo" ]] && repo=$(tmux show-option -qv -t "$session_name" @wt-repo 2>/dev/null || true)
         [[ -z "$branch" ]] && branch=$(tmux show-option -qv -t "$session_name" @wt-branch 2>/dev/null || true)
         [[ -z "$wt_path" ]] && wt_path=$(tmux show-option -qv -t "$session_name" @wt-wt-path 2>/dev/null || true)
@@ -387,7 +387,7 @@ set_status() {
     save_session "$session_name"
 
     # Write tmux user options for live display
-    if tmux has-session -t "$session_name" 2>/dev/null; then
+    if tmux has-session -t "=$session_name" 2>/dev/null; then
         local icon
         icon=$(get_status_icon "$status")
         tmux set-option -qt "$session_name" @wt-status  "$status"
@@ -399,7 +399,7 @@ set_status() {
         tmux set-option -qt "$session_name" @wt-agent   "$agent"
         tmux set-option -qt "$session_name" @wt-opencode-config "$opencode_config"
         if [[ -n "$opencode_config" ]]; then
-            tmux set-environment -t "$session_name" OPENCODE_CONFIG "$opencode_config"
+            tmux set-environment -t "=$session_name" OPENCODE_CONFIG "$opencode_config"
         fi
         tmux refresh-client -S 2>/dev/null || true
     fi
@@ -586,7 +586,11 @@ list_worktrees() {
         while IFS= read -r -d '' wt_path; do
             [[ -d "$wt_path/.git" || -f "$wt_path/.git" ]] || continue
             local branch repo_name session_name srow status key pr_state pr_checked
-            branch=$(git -C "$wt_path" branch --show-current 2>/dev/null || echo "detached")
+            # --show-current SUCCEEDS with empty output on a detached HEAD, so
+            # the `||` never fires — guard emptiness explicitly or the session
+            # name degenerates to "repo-" (a prefix of every real repo session).
+            branch=$(git -C "$wt_path" branch --show-current 2>/dev/null || true)
+            [[ -n "$branch" ]] || branch="detached"
             repo_name=$(basename "$(dirname "$wt_path")")
             session_name="${repo_name}-${branch//\//-}"
             seen_sessions="${seen_sessions}:${session_name}:"
@@ -609,7 +613,7 @@ list_worktrees() {
             # is stale until revived. Derived here, never persisted, so reviving
             # restores the real status with no DB write — and so `wt sweep` no
             # longer needs to store "offline".
-            tmux has-session -t "$session_name" 2>/dev/null || status="offline"
+            tmux has-session -t "=$session_name" 2>/dev/null || status="offline"
             if [[ "$format" == full ]] && is_pr_stale "$pr_checked"; then
                 stale_lines+="${session_name}${TAB}${branch}${TAB}${wt_path}"$'\n'
             fi
@@ -623,7 +627,7 @@ list_worktrees() {
     while IFS="$SEP" read -r name status repo branch wt_path updated_at pr_state pr_checked; do
         [[ -n "$name" ]] || continue
         [[ "$seen_sessions" == *":${name}:"* ]] && continue
-        tmux has-session -t "$name" 2>/dev/null || continue
+        tmux has-session -t "=$name" 2>/dev/null || continue
         if [[ "$format" == full && -n "$wt_path" ]] && is_pr_stale "$pr_checked"; then
             stale_lines+="${name}${TAB}${branch}${TAB}${wt_path}"$'\n'
         fi
@@ -660,7 +664,7 @@ create_worktree() {
     local session_name="${repo_name}-${safe_branch}"
 
     # Check if worktree already exists on disk
-    if [[ -d "$wt_path" ]] && tmux has-session -t "$session_name" 2>/dev/null; then
+    if [[ -d "$wt_path" ]] && tmux has-session -t "=$session_name" 2>/dev/null; then
         echo "Worktree already exists at $wt_path"
         [[ "$switch_after" == "true" ]] && switch_to "$session_name"
         return
@@ -715,7 +719,7 @@ create_worktree() {
     # Create tmux session
     echo "Creating tmux session: $session_name"
 
-    if tmux has-session -t "$session_name" 2>/dev/null; then
+    if tmux has-session -t "=$session_name" 2>/dev/null; then
         echo "Session already exists, attaching..."
     else
         local opencode_config=""
@@ -731,14 +735,14 @@ create_worktree() {
         launch_nvim "$session_name" "$wt_path"
 
         # Split right for agent pane
-        tmux split-window -h -t "$session_name:main" -c "$wt_path"
+        tmux split-window -h -t "=$session_name:main" -c "$wt_path"
 
         # Create shell window
-        tmux new-window -t "$session_name" -n shell -c "$wt_path"
+        tmux new-window -t "=$session_name" -n shell -c "$wt_path"
 
         # Select agent pane (right pane of main window)
-        tmux select-window -t "$session_name:main"
-        tmux select-pane -t "$session_name:main.1"
+        tmux select-window -t "=$session_name:main"
+        tmux select-pane -t "=$session_name:main.1"
 
         # Persist initial session state with full metadata
         status=idle
@@ -759,9 +763,9 @@ create_worktree() {
         tmux set-option -qt "$session_name" @wt-agent   "$agent"
         tmux set-option -qt "$session_name" @wt-opencode-config "$opencode_config"
         if [[ -n "$opencode_config" ]]; then
-            tmux set-environment -t "$session_name" OPENCODE_CONFIG "$opencode_config"
+            tmux set-environment -t "=$session_name" OPENCODE_CONFIG "$opencode_config"
         else
-            tmux set-environment -u -t "$session_name" OPENCODE_CONFIG 2>/dev/null || true
+            tmux set-environment -u -t "=$session_name" OPENCODE_CONFIG 2>/dev/null || true
         fi
 
         # Wait for nvim/claudecode.nvim to start WebSocket server
@@ -771,14 +775,14 @@ create_worktree() {
         # Start agent via wt-agent-launch
         if [[ "$start_agent" == "true" ]]; then
             if [[ -n "$task" ]]; then
-                tmux send-keys -t "$session_name:main.1" "$WT_BIN_DIR/wt-agent-launch \"$task\"" Enter
+                tmux send-keys -t "=$session_name:main.1" "$WT_BIN_DIR/wt-agent-launch \"$task\"" Enter
             else
-                tmux send-keys -t "$session_name:main.1" "$WT_BIN_DIR/wt-agent-launch" Enter
+                tmux send-keys -t "=$session_name:main.1" "$WT_BIN_DIR/wt-agent-launch" Enter
             fi
             set_status "$session_name" "working" "${task:-Interactive session}"
         else
             # Start agent for when user wants it
-            tmux send-keys -t "$session_name:main.1" "$WT_BIN_DIR/wt-agent-launch" Enter
+            tmux send-keys -t "=$session_name:main.1" "$WT_BIN_DIR/wt-agent-launch" Enter
         fi
     fi
 
@@ -796,15 +800,15 @@ create_worktree() {
 switch_to() {
     local session_name="$1"
 
-    if ! tmux has-session -t "$session_name" 2>/dev/null; then
+    if ! tmux has-session -t "=$session_name" 2>/dev/null; then
         echo "Session '$session_name' does not exist"
         return 1
     fi
 
     if [[ -n "${TMUX:-}" ]]; then
-        tmux switch-client -t "$session_name"
+        tmux switch-client -t "=$session_name"
     else
-        tmux attach-session -t "$session_name"
+        tmux attach-session -t "=$session_name"
     fi
 }
 
@@ -837,8 +841,8 @@ delete_worktree() {
     stop_diff_view "$session_name"
 
     # Kill tmux session
-    if tmux has-session -t "$session_name" 2>/dev/null; then
-        tmux kill-session -t "$session_name"
+    if tmux has-session -t "=$session_name" 2>/dev/null; then
+        tmux kill-session -t "=$session_name"
     fi
 
     # Remove worktree
@@ -888,7 +892,7 @@ sweep_session() {
 
     # Nothing to reclaim if there's no live session — it already renders as
     # offline (offline is derived from tmux liveness, not a stored status).
-    if ! tmux has-session -t "$session_name" 2>/dev/null; then
+    if ! tmux has-session -t "=$session_name" 2>/dev/null; then
         echo "$session_name is already offline."
         return 0
     fi
@@ -897,7 +901,7 @@ sweep_session() {
     # with the tmux session.
     stop_diff_view "$session_name"
 
-    if tmux has-session -t "$session_name" 2>/dev/null; then
+    if tmux has-session -t "=$session_name" 2>/dev/null; then
         # If we're attached to the target, switch away so the kill doesn't drop
         # the client (mirrors master()).
         if [[ -n "${TMUX:-}" ]] \
@@ -905,9 +909,9 @@ sweep_session() {
             local other
             other=$(tmux list-sessions -F '#{session_name}' 2>/dev/null \
                 | grep -v "^${session_name}$" | head -1 || true)
-            [[ -n "$other" ]] && tmux switch-client -t "$other" 2>/dev/null || true
+            [[ -n "$other" ]] && tmux switch-client -t "=$other" 2>/dev/null || true
         fi
-        tmux kill-session -t "$session_name"
+        tmux kill-session -t "=$session_name"
     fi
 
     # The worktree and row stay intact for resume. "offline" is derived at
@@ -1208,7 +1212,8 @@ revive_worktree_session() {
     load_session "$session_name" || true
     wt_path="$2"  # the passed path is authoritative for revival, not the stored one
 
-    branch="${branch:-$(git -C "$wt_path" branch --show-current 2>/dev/null || echo detached)}"
+    branch="${branch:-$(git -C "$wt_path" branch --show-current 2>/dev/null || true)}"
+    [[ -n "$branch" ]] || branch="detached"  # --show-current is empty (not failing) on detached HEAD
     if [[ -z "$repo" || "$repo" == "?" ]]; then
         repo=$(basename "$(dirname "$wt_path")")
     fi
@@ -1219,10 +1224,10 @@ revive_worktree_session() {
 
     tmux new-session -d -s "$session_name" -c "$wt_path" -n main
     launch_nvim "$session_name" "$wt_path"
-    tmux split-window -h -t "$session_name:main" -c "$wt_path"
-    tmux new-window -t "$session_name" -n shell -c "$wt_path"
-    tmux select-window -t "$session_name:main"
-    tmux select-pane -t "$session_name:main.1"
+    tmux split-window -h -t "=$session_name:main" -c "$wt_path"
+    tmux new-window -t "=$session_name" -n shell -c "$wt_path"
+    tmux select-window -t "=$session_name:main"
+    tmux select-pane -t "=$session_name:main.1"
 
     status="working"
     message="Resuming ${agent}..."
@@ -1236,7 +1241,7 @@ revive_worktree_session() {
     tmux set-option -qt "$session_name" @wt-agent   "$agent"
     tmux set-option -qt "$session_name" @wt-opencode-config "$opencode_config"
     if [[ -n "$opencode_config" ]]; then
-        tmux set-environment -t "$session_name" OPENCODE_CONFIG "$opencode_config"
+        tmux set-environment -t "=$session_name" OPENCODE_CONFIG "$opencode_config"
     fi
 
     # Persist before launching so the agent's own session-start hook (which
@@ -1251,7 +1256,7 @@ revive_worktree_session() {
     # it, mirroring create_worktree.
     echo "Waiting for Neovim IDE server to start..."
     sleep 2
-    tmux send-keys -t "$session_name:main.1" "$WT_BIN_DIR/wt-agent-launch --resume" Enter
+    tmux send-keys -t "=$session_name:main.1" "$WT_BIN_DIR/wt-agent-launch --resume" Enter
 }
 
 # -----------------------------------------------------------------------------
@@ -1278,7 +1283,8 @@ preview_pane() {
     local pr_state="" pr_state_checked_at=""
     load_session "$session" 2>/dev/null || true
     if [[ -z "$branch" && -n "$wt_path" ]]; then
-        branch=$(git -C "$wt_path" branch --show-current 2>/dev/null || echo detached)
+        branch=$(git -C "$wt_path" branch --show-current 2>/dev/null || true)
+        [[ -n "$branch" ]] || branch="detached"  # empty (not failing) on detached HEAD
     fi
 
     # Resolve the base the branch forked from, then diff the whole delta since
@@ -1365,8 +1371,8 @@ preview_pane() {
     budget=$(( avail - footer_lines - 1 ))
     (( budget < 3 )) && budget=3
 
-    cap=$(tmux capture-pane -p -e -t "$session:main.1" 2>/dev/null \
-          || tmux capture-pane -p -e -t "$session:agent" 2>/dev/null || true)
+    cap=$(tmux capture-pane -p -e -t "=$session:main.1" 2>/dev/null \
+          || tmux capture-pane -p -e -t "=$session:agent" 2>/dev/null || true)
     if [[ -n "$cap" ]]; then
         printf '%s\n' "$cap" | tail -n "$budget"
     else
@@ -1395,7 +1401,7 @@ pick_worktree() {
         local session_name wt_path
         session_name=$(echo "$selection" | cut -d: -f1)
         wt_path=$(echo "$selection" | cut -d: -f2)
-        if ! tmux has-session -t "$session_name" 2>/dev/null; then
+        if ! tmux has-session -t "=$session_name" 2>/dev/null; then
             printf "Session '%s' is not running. Reviving...\n" "$session_name" >/dev/tty
             revive_worktree_session "$session_name" "$wt_path" || return 1
         fi
@@ -1412,7 +1418,7 @@ switch_picker() {
     local selection rc=0
     selection=$(pick_list \
         | while IFS=: read -r name path rest; do
-              tmux has-session -t "$name" 2>/dev/null && printf '%s:%s:%s\n' "$name" "$path" "$rest"
+              tmux has-session -t "=$name" 2>/dev/null && printf '%s:%s:%s\n' "$name" "$path" "$rest"
           done \
         | fzf \
             "${WT_FZF_VIM_ARGS[@]}" \
@@ -1442,7 +1448,7 @@ sync_tmux() {
     # \x1f is non-whitespace, so read preserves empty fields positionally.
     local name status message repo branch wt_path pr agent opencode_config is_master icon
     while IFS=$'\037' read -r name status message repo branch wt_path pr agent opencode_config is_master; do
-        tmux has-session -t "$name" 2>/dev/null || continue
+        tmux has-session -t "=$name" 2>/dev/null || continue
 
         if [[ "$is_master" == "1" ]]; then
             tmux set-option -qt "$name" @wt-master  "1"
@@ -1465,7 +1471,7 @@ sync_tmux() {
             tmux set-option -qt "$name" @wt-opencode-config "${opencode_config:-}"
         fi
         if [[ -n "${opencode_config:-}" ]]; then
-            tmux set-environment -t "$name" OPENCODE_CONFIG "$opencode_config"
+            tmux set-environment -t "=$name" OPENCODE_CONFIG "$opencode_config"
         fi
     done < <("$WT_STATE" list | jq -r '.[] | [.name,.status,.message,.repo,.branch,.wt_path,.pr,.agent,.opencode_config,(if .is_master then "1" else "0" end)] | map(. // "" | tostring) | join("\u001f")')
 
@@ -1480,16 +1486,16 @@ master() {
     local force="${2:-false}"
     local session="wt-master"
 
-    if tmux has-session -t "$session" 2>/dev/null; then
+    if tmux has-session -t "=$session" 2>/dev/null; then
         if [[ "$force" == "true" ]]; then
             echo "Replacing existing master session..."
             # Switch away first so killing doesn't disconnect the client
             local other
             other=$(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -v "^${session}$" | head -1 || true)
             if [[ -n "$other" && -n "${TMUX:-}" ]]; then
-                tmux switch-client -t "$other" 2>/dev/null || true
+                tmux switch-client -t "=$other" 2>/dev/null || true
             fi
-            tmux kill-session -t "$session"
+            tmux kill-session -t "=$session"
         else
             echo "Master session already exists, switching..."
             switch_to "$session"
@@ -1509,19 +1515,19 @@ master() {
     opencode_config=$(agent_session_setup "$master_dir" "$agent" "master" "$session" || true)
 
     tmux new-session -d -s "$session" -c "$master_dir" -n agent
-    tmux new-window -t "$session" -n shell -c "$HOME"
-    tmux select-window -t "$session:agent"
+    tmux new-window -t "=$session" -n shell -c "$HOME"
+    tmux select-window -t "=$session:agent"
 
     tmux set-option -qt "$session" @wt-opencode-config "$opencode_config"
     if [[ -n "$opencode_config" ]]; then
-        tmux set-environment -t "$session" OPENCODE_CONFIG "$opencode_config"
+        tmux set-environment -t "=$session" OPENCODE_CONFIG "$opencode_config"
     fi
 
     # Start agent without --ide (master has no nvim)
     if [[ "$agent" == "opencode" && -n "$opencode_config" ]]; then
-        tmux send-keys -t "$session:agent" "OPENCODE_CONFIG=$(shell_quote "$opencode_config") $bin" Enter
+        tmux send-keys -t "=$session:agent" "OPENCODE_CONFIG=$(shell_quote "$opencode_config") $bin" Enter
     else
-        tmux send-keys -t "$session:agent" "$bin" Enter
+        tmux send-keys -t "=$session:agent" "$bin" Enter
     fi
 
     # Set tmux metadata
@@ -1647,16 +1653,16 @@ start_agent() {
     local session_name="$1"
     local task="$2"
 
-    if ! tmux has-session -t "$session_name" 2>/dev/null; then
+    if ! tmux has-session -t "=$session_name" 2>/dev/null; then
         echo "Session '$session_name' does not exist"
         return 1
     fi
 
     # Send agent launch command
     if [[ -n "$task" ]]; then
-        tmux send-keys -t "$session_name:main.1" "$WT_BIN_DIR/wt-agent-launch \"$task\"" Enter
+        tmux send-keys -t "=$session_name:main.1" "$WT_BIN_DIR/wt-agent-launch \"$task\"" Enter
     else
-        tmux send-keys -t "$session_name:main.1" "$WT_BIN_DIR/wt-agent-launch" Enter
+        tmux send-keys -t "=$session_name:main.1" "$WT_BIN_DIR/wt-agent-launch" Enter
     fi
     set_status "$session_name" "working" "${task:-Interactive session}"
 }

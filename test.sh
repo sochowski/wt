@@ -573,6 +573,21 @@ test_sync_tmux() {
     else
         fail "sync @wt-agent='$synced_agent', want 'claude' (empty-field column shift?)"
     fi
+
+    # Regression: a junk store row whose name is a PREFIX of a live session
+    # (e.g. "wt-" from a detached-HEAD hook) must not clobber that session's
+    # options — tmux -t resolves prefixes, so sync's writes for the junk name
+    # landed on the real session (@wt-agent=opencode on a claude session).
+    local junk_row="${TEST_SESSION%-*}"   # a strict prefix of TEST_SESSION
+    "$WT_STATE" set "$junk_row" --agent opencode --status idle >/dev/null 2>&1
+    "$WT_BIN_DIR/wt" sync-tmux 2>/dev/null
+    synced_agent=$(tmux show-option -qv -t "$TEST_SESSION" @wt-agent 2>/dev/null)
+    "$WT_STATE" delete "$junk_row" >/dev/null 2>&1
+    if [[ "$synced_agent" == "claude" ]]; then
+        pass "junk prefix row '$junk_row' did not clobber live session options"
+    else
+        fail "junk prefix row clobbered @wt-agent='$synced_agent', want 'claude'"
+    fi
 }
 
 test_wt_list() {

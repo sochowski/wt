@@ -45,7 +45,11 @@ get_session_name() {
         local repo_name
         repo_name=$(basename "$(git rev-parse --show-toplevel)")
         local branch
-        branch=$(git branch --show-current 2>/dev/null || echo "detached")
+        # On a detached HEAD, --show-current SUCCEEDS with empty output (the
+        # `|| echo` never fires), which built junk names like "wt-" — rows
+        # whose sync writes then tmux-prefix-matched onto real "wt-*" sessions.
+        branch=$(git branch --show-current 2>/dev/null || true)
+        [[ -n "$branch" ]] || branch="detached"
         branch="${branch//\//-}"  # Sanitize slashes
         echo "${repo_name}-${branch}"
         return 0
@@ -71,7 +75,7 @@ derive_status_metadata() {
     local session_name="$1"
     local cwd="${2:-$(pwd)}"
 
-    if tmux has-session -t "$session_name" 2>/dev/null; then
+    if tmux has-session -t "=$session_name" 2>/dev/null; then
         [[ -z "$repo" ]] && repo=$(tmux show-option -qv -t "$session_name" @wt-repo 2>/dev/null || true)
         [[ -z "$branch" ]] && branch=$(tmux show-option -qv -t "$session_name" @wt-branch 2>/dev/null || true)
         [[ -z "$wt_path" ]] && wt_path=$(tmux show-option -qv -t "$session_name" @wt-wt-path 2>/dev/null || true)
@@ -162,7 +166,7 @@ set_status() {
     save_session "$session_name"
 
     # Write tmux user options for live display
-    if tmux has-session -t "$session_name" 2>/dev/null; then
+    if tmux has-session -t "=$session_name" 2>/dev/null; then
         local icon
         icon=$(get_icon "$status")
         tmux set-option -qt "$session_name" @wt-status  "$status"
@@ -174,7 +178,7 @@ set_status() {
         tmux set-option -qt "$session_name" @wt-agent   "$agent"
         tmux set-option -qt "$session_name" @wt-opencode-config "$opencode_config"
         if [[ -n "$opencode_config" ]]; then
-            tmux set-environment -t "$session_name" OPENCODE_CONFIG "$opencode_config"
+            tmux set-environment -t "=$session_name" OPENCODE_CONFIG "$opencode_config"
         fi
         # Force immediate status bar redraw
         tmux refresh-client -S 2>/dev/null || true
