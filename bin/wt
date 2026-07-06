@@ -566,14 +566,20 @@ list_worktrees() {
     local seen_sessions=""
     local -a rows=()
     local stale_lines=""   # "session<TAB>branch<TAB>wt_path" per worktree needing a PR refresh
-    local TAB
+    local TAB SEP
     TAB=$(printf '\t')
+    SEP=$(printf '\037')   # unit separator: field delimiter for store rows below
 
-    # Fetch store metadata once. TSV columns:
+    # Fetch store metadata once. Columns:
     #   name status repo branch wt_path updated_at pr_state pr_state_checked_at
+    # Delimited by \x1f, not tab: `read` (Phase B) collapses runs of IFS-
+    # whitespace, so an empty field (e.g. no pr_state) would shift every column.
+    # @tsv already escapes any tabs/newlines inside values, so converting only
+    # the delimiter tabs to \x1f is safe and keeps empty fields positional.
     local store_data
     store_data=$("$WT_STATE" list --no-master 2>/dev/null \
-        | jq -r '.[] | [.name,.status,.repo,.branch,.wt_path,.updated_at,.pr_state,.pr_state_checked_at] | @tsv' || true)
+        | jq -r '.[] | [.name,.status,.repo,.branch,.wt_path,.updated_at,.pr_state,.pr_state_checked_at] | @tsv' \
+        | tr '\t' '\037' || true)
 
     # Phase A: worktrees on disk under WT_BASE_DIR (authoritative for existence).
     if [[ -d "$WT_BASE_DIR" ]]; then
@@ -586,14 +592,14 @@ list_worktrees() {
             seen_sessions="${seen_sessions}:${session_name}:"
             # Exact field match (awk, not grep) so repo/branch names with regex
             # metacharacters like '.' or '+' can't false-match.
-            srow=$(awk -F"$TAB" -v n="$session_name" '$1==n{print; exit}' <<<"$store_data")
+            srow=$(awk -F"$SEP" -v n="$session_name" '$1==n{print; exit}' <<<"$store_data")
             pr_state=""
             pr_checked=0
             if [[ -n "$srow" ]]; then
-                status=$(cut -f2 <<<"$srow")
-                key=$(cut -f6 <<<"$srow")
-                pr_state=$(cut -f7 <<<"$srow")
-                pr_checked=$(cut -f8 <<<"$srow")
+                status=$(cut -d"$SEP" -f2 <<<"$srow")
+                key=$(cut -d"$SEP" -f6 <<<"$srow")
+                pr_state=$(cut -d"$SEP" -f7 <<<"$srow")
+                pr_checked=$(cut -d"$SEP" -f8 <<<"$srow")
             else
                 status="unknown"
                 key=$(stat -c %Y "$wt_path" 2>/dev/null || stat -f %m "$wt_path" 2>/dev/null || echo 0)
@@ -614,7 +620,7 @@ list_worktrees() {
     # Phase B: store sessions not found on disk (adopted/primary worktrees),
     # included only when a live tmux session exists.
     local name status repo branch wt_path updated_at pr_state pr_checked
-    while IFS="$TAB" read -r name status repo branch wt_path updated_at pr_state pr_checked; do
+    while IFS="$SEP" read -r name status repo branch wt_path updated_at pr_state pr_checked; do
         [[ -n "$name" ]] || continue
         [[ "$seen_sessions" == *":${name}:"* ]] && continue
         tmux has-session -t "$name" 2>/dev/null || continue
@@ -1429,9 +1435,13 @@ switch_picker() {
 # -----------------------------------------------------------------------------
 sync_tmux() {
     # Project every stored session (master included via is_master) onto its tmux
-    # options. @tsv escapes tabs/newlines in fields so read stays aligned.
+    # Fields are joined with the unit separator (\x1f), NOT a tab: tab is an
+    # IFS-whitespace char, so `read` collapses runs of it and empty fields (an
+    # absent pr/opencode_config) vanish — shifting every column left and landing
+    # is_master ("0") in `agent`, which set @wt-agent=0 and broke agent launch.
+    # \x1f is non-whitespace, so read preserves empty fields positionally.
     local name status message repo branch wt_path pr agent opencode_config is_master icon
-    while IFS=$'\t' read -r name status message repo branch wt_path pr agent opencode_config is_master; do
+    while IFS=$'\037' read -r name status message repo branch wt_path pr agent opencode_config is_master; do
         tmux has-session -t "$name" 2>/dev/null || continue
 
         if [[ "$is_master" == "1" ]]; then
@@ -1457,7 +1467,7 @@ sync_tmux() {
         if [[ -n "${opencode_config:-}" ]]; then
             tmux set-environment -t "$name" OPENCODE_CONFIG "$opencode_config"
         fi
-    done < <("$WT_STATE" list | jq -r '.[] | [.name,.status,.message,.repo,.branch,.wt_path,.pr,.agent,.opencode_config,(if .is_master then "1" else "0" end)] | @tsv')
+    done < <("$WT_STATE" list | jq -r '.[] | [.name,.status,.message,.repo,.branch,.wt_path,.pr,.agent,.opencode_config,(if .is_master then "1" else "0" end)] | map(. // "" | tostring) | join("\u001f")')
 
     tmux refresh-client -S 2>/dev/null || true
 }

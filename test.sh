@@ -559,6 +559,20 @@ test_sync_tmux() {
     else
         fail "sync did not restore @wt-icon"
     fi
+
+    # Regression: an empty pr/opencode_config must not collapse when the store
+    # row is split, which previously shifted every column left and landed
+    # is_master ("0") in @wt-agent (breaking agent launch/resume). Set a known
+    # agent with those fields empty, sync, and require @wt-agent verbatim.
+    "$WT_STATE" set "$TEST_SESSION" --agent claude --pr "" --opencode-config "" >/dev/null 2>&1
+    "$WT_BIN_DIR/wt" sync-tmux 2>/dev/null
+    local synced_agent
+    synced_agent=$(tmux show-option -qv -t "$TEST_SESSION" @wt-agent 2>/dev/null)
+    if [[ "$synced_agent" == "claude" ]]; then
+        pass "sync mapped @wt-agent='claude' with empty pr/opencode_config"
+    else
+        fail "sync @wt-agent='$synced_agent', want 'claude' (empty-field column shift?)"
+    fi
 }
 
 test_wt_list() {
