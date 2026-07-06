@@ -78,13 +78,18 @@ fi
 # ("Invalid session ID: unknown error"). Don't leave the pane dead on it: if an
 # attempt exits nonzero within seconds (an immediate rejection, not a real
 # session the user later closed), retry one rung down the ladder:
-#   exact-id resume → cwd-latest resume (id dropped) → fresh launch.
+#   exact-id resume → [claude: once-per-boot warm-up, retry] → cwd-latest → fresh.
 attempted=" "
 run_attempt() {
+    local allow_repeat=""
+    [[ "${1:-}" == "--again" ]] && { allow_repeat=1; shift; }
     local key="${WT_LAUNCH_BINARY} ${WT_LAUNCH_ARGS[*]-}"
     # Skip attempts that resolve to a command line we already tried (e.g. no
-    # captured id, so rung 1 and rung 2 are the same --continue invocation).
-    [[ "$attempted" == *" ${key} "* ]] && return 1
+    # captured id, so rung 1 and rung 2 are the same --continue invocation) —
+    # unless this is an explicit post-warm-up retry.
+    if [[ -z "$allow_repeat" ]]; then
+        [[ "$attempted" == *" ${key} "* ]] && return 1
+    fi
     attempted+="${key} "
 
     local start=$SECONDS rc=0
@@ -92,12 +97,34 @@ run_attempt() {
     (( rc == 0 )) && exit 0
     # Ran for a while before failing: a real session, not a rejected resume.
     (( SECONDS - start >= 10 )) && exit "$rc"
-    echo "wt-agent-launch: '${key}' exited ${rc} immediately; trying next resume fallback..." >&2
+    # Breadcrumb with the full agent resolution, so a wrong-agent launch (e.g.
+    # opencode handed a claude id) is diagnosable from the pane text alone.
+    echo "wt-agent-launch: '${key}' exited ${rc} immediately" \
+         "(agent=${AGENT} @wt-agent='${tmux_agent:-}' session='${local_session}');" \
+         "trying next resume fallback..." >&2
     return 1
 }
 
 # Rung 1: the plan already resolved above (exact-id when captured + on disk).
 run_attempt "$@" || true
+
+# Claude's session lookup can fail globally after a reboot until the binary
+# has completed one run (upstream bug: `claude --resume <valid-id>` →
+# "Invalid session ID: unknown error", cleared for ALL worktrees by any single
+# run). If the first attempt was rejected, warm claude up once per boot with a
+# minimal headless call and retry the same plan. The warm-up runs from $HOME —
+# NEVER the worktree, since a -p run writes a transcript into its cwd's
+# project dir and would poison the --continue rung below.
+if [[ "$RESUME" == "1" && "$AGENT" == "claude" ]]; then
+    boot_id=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || echo unknown)
+    warmup_stamp="${XDG_RUNTIME_DIR:-/tmp}/wt-claude-warmup-$(id -u)"
+    if [[ "$(cat "$warmup_stamp" 2>/dev/null || true)" != "$boot_id" ]]; then
+        echo "wt-agent-launch: warming up claude (first resume this boot)..." >&2
+        ( cd "$HOME" && claude -p --model haiku "ok" >/dev/null 2>&1 ) || true
+        echo "$boot_id" > "$warmup_stamp" 2>/dev/null || true
+        run_attempt --again "$@" || true
+    fi
+fi
 
 # Rung 2: same plan minus the captured id → the agent's cwd-latest resume.
 resolve_plan --sh --session "$local_session" \
