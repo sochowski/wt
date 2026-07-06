@@ -31,6 +31,8 @@ func cmdAgentLaunchPlan(a Agent, args []string) {
 	opencodeConfig := fs.String("opencode-config", "", "resolved OPENCODE_CONFIG candidate")
 	configDir := fs.String("config-dir", os.Getenv("WT_CONFIG_DIR"), "wt config dir")
 	home := fs.String("home", "", "target home dir (default $HOME)")
+	resume := fs.Bool("resume", false, "resume the prior conversation (revive)")
+	resumeID := fs.String("resume-session-id", "", "captured native session id to resume, if any")
 	asSh := fs.Bool("sh", false, "emit shell to eval")
 	_ = fs.Bool("json", false, "emit JSON (default)")
 	fs.Parse(args)
@@ -46,6 +48,14 @@ func cmdAgentLaunchPlan(a Agent, args []string) {
 		if cfg := resolveOpencodeConfig(*opencodeConfig, *configDir, *session); cfg != "" {
 			plan.Env["OPENCODE_CONFIG"] = cfg
 		}
+	}
+
+	// On revive, fold in the agent's resume args so the pane picks up its prior
+	// conversation. The launcher appends any trailing prompt after these. A
+	// captured id arrives as a discrete flag value and is emitted single-quoted,
+	// so it can't inject.
+	if *resume {
+		plan.Args = append(plan.Args, resumeArgs(a, *resumeID, homeDir(*home))...)
 	}
 
 	if *asSh {
@@ -74,6 +84,55 @@ func resolveOpencodeConfig(candidate, configDir, session string) string {
 		}
 	}
 	return ""
+}
+
+// resumeArgs applies the resume capability ladder for an agent (see ResumeSpec):
+// captured id → cwd-latest → nothing (fresh launch). Returns the args to add to
+// the launch plan, or nil when the agent can't resume.
+func resumeArgs(a Agent, sessionID, home string) []string {
+	r := a.Resume
+	if sessionID != "" && r.IDFlag != "" {
+		return []string{r.IDFlag, sessionID}
+	}
+	if len(r.ContinueArgs) > 0 && r.ProjectsDir != "" && cwdHasProjectSession(home, r.ProjectsDir) {
+		return append([]string(nil), r.ContinueArgs...)
+	}
+	return nil
+}
+
+// cwdHasProjectSession reports whether the agent has a prior session stored for
+// the current working directory. Agents that key sessions by project path
+// (Claude: ~/.claude/projects/<mangled-cwd>/*.jsonl) mangle the cwd by replacing
+// every non-alphanumeric byte with '-'. Used to gate the cwd-latest resume so we
+// never pass --continue when there's nothing to continue.
+func cwdHasProjectSession(home, projectsRel string) bool {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return false
+	}
+	dir := filepath.Join(home, projectsRel, mangleProjectPath(cwd))
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".jsonl") {
+			return true
+		}
+	}
+	return false
+}
+
+func mangleProjectPath(p string) string {
+	b := []byte(p)
+	for i := range b {
+		c := b[i]
+		isAlnum := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+		if !isAlnum {
+			b[i] = '-'
+		}
+	}
+	return string(b)
 }
 
 var lockPID = regexp.MustCompile(`"pid":\s*(\d+)`)

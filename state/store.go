@@ -31,6 +31,11 @@ type Session struct {
 	// unix time of the last refresh; it auto-stamps whenever pr_state is set.
 	PRState          string `json:"pr_state"`
 	PRStateCheckedAt int64  `json:"pr_state_checked_at"`
+	// AgentSessionID is the agent CLI's own native session/conversation id,
+	// captured by wt-hook on session start. It lets `wt` resume the exact prior
+	// conversation on revive (e.g. `claude --resume <id>`) rather than relying
+	// on the agent's cwd-latest fallback. Empty when uncaptured/unsupported.
+	AgentSessionID string `json:"agent_session_id"`
 }
 
 // column names that `set` and `get --field` accept, in a stable order.
@@ -39,6 +44,7 @@ var columns = []string{
 	"pr", "agent", "opencode_config", "is_master",
 	"updated_at", "status_changed_at",
 	"pr_state", "pr_state_checked_at",
+	"agent_session_id",
 }
 
 type Store struct {
@@ -92,7 +98,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   updated_at        INTEGER NOT NULL DEFAULT 0,
   status_changed_at INTEGER NOT NULL DEFAULT 0,
   pr_state            TEXT    NOT NULL DEFAULT '',
-  pr_state_checked_at INTEGER NOT NULL DEFAULT 0
+  pr_state_checked_at INTEGER NOT NULL DEFAULT 0,
+  agent_session_id    TEXT    NOT NULL DEFAULT ''
 );`); err != nil {
 		return err
 	}
@@ -103,6 +110,7 @@ CREATE TABLE IF NOT EXISTS sessions (
 	for _, stmt := range []string{
 		`ALTER TABLE sessions ADD COLUMN pr_state TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE sessions ADD COLUMN pr_state_checked_at INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE sessions ADD COLUMN agent_session_id TEXT NOT NULL DEFAULT ''`,
 	} {
 		if _, err := s.db.Exec(stmt); err != nil &&
 			!strings.Contains(err.Error(), "duplicate column name") {
@@ -114,13 +122,14 @@ CREATE TABLE IF NOT EXISTS sessions (
 
 const selectCols = `name, status, message, repo, branch, wt_path, pr, agent,
 	opencode_config, is_master, updated_at, status_changed_at,
-	pr_state, pr_state_checked_at`
+	pr_state, pr_state_checked_at, agent_session_id`
 
 func scanSession(row interface{ Scan(...any) error }) (Session, error) {
 	var s Session
 	err := row.Scan(&s.Name, &s.Status, &s.Message, &s.Repo, &s.Branch,
 		&s.WtPath, &s.PR, &s.Agent, &s.OpencodeConfig, &s.IsMaster,
-		&s.UpdatedAt, &s.StatusChangedAt, &s.PRState, &s.PRStateCheckedAt)
+		&s.UpdatedAt, &s.StatusChangedAt, &s.PRState, &s.PRStateCheckedAt,
+		&s.AgentSessionID)
 	return s, err
 }
 
@@ -188,6 +197,8 @@ func (s *Store) Set(name string, fields map[string]string) (Session, error) {
 			// value still pushes the next check out.
 			cur.PRState = v
 			cur.PRStateCheckedAt = now
+		case "agent_session_id":
+			cur.AgentSessionID = v
 		default:
 			return Session{}, fmt.Errorf("unknown field %q", k)
 		}
@@ -202,18 +213,20 @@ func (s *Store) Set(name string, fields map[string]string) (Session, error) {
 	_, err = tx.Exec(`
 INSERT INTO sessions (name, status, message, repo, branch, wt_path, pr, agent,
 	opencode_config, is_master, updated_at, status_changed_at,
-	pr_state, pr_state_checked_at)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+	pr_state, pr_state_checked_at, agent_session_id)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(name) DO UPDATE SET
 	status=excluded.status, message=excluded.message, repo=excluded.repo,
 	branch=excluded.branch, wt_path=excluded.wt_path, pr=excluded.pr,
 	agent=excluded.agent, opencode_config=excluded.opencode_config,
 	is_master=excluded.is_master, updated_at=excluded.updated_at,
 	status_changed_at=excluded.status_changed_at,
-	pr_state=excluded.pr_state, pr_state_checked_at=excluded.pr_state_checked_at`,
+	pr_state=excluded.pr_state, pr_state_checked_at=excluded.pr_state_checked_at,
+	agent_session_id=excluded.agent_session_id`,
 		cur.Name, cur.Status, cur.Message, cur.Repo, cur.Branch, cur.WtPath,
 		cur.PR, cur.Agent, cur.OpencodeConfig, b2i(cur.IsMaster),
-		cur.UpdatedAt, cur.StatusChangedAt, cur.PRState, cur.PRStateCheckedAt)
+		cur.UpdatedAt, cur.StatusChangedAt, cur.PRState, cur.PRStateCheckedAt,
+		cur.AgentSessionID)
 	if err != nil {
 		return Session{}, err
 	}

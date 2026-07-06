@@ -47,13 +47,27 @@ type HookSpec struct {
 	Version  int    // bump when the template's format changes; drives updates
 }
 
+// ResumeSpec declares how an agent resumes a prior conversation on revive.
+// The launch plan applies a capability ladder: if a native session id was
+// captured (wt-hook stores it as agent_session_id) and IDFlag is set, resume
+// that exact conversation; else, if ContinueArgs is set and the agent has a
+// prior session for the current worktree's cwd (probed under ProjectsDir),
+// resume the cwd-latest conversation; else launch fresh. A zero ResumeSpec
+// means the agent can't be resumed yet and always launches fresh.
+type ResumeSpec struct {
+	IDFlag       string   // flag taking the session id as its next arg, e.g. "--resume" (claude) / "--session" (opencode); "" = no id-resume
+	ContinueArgs []string // cwd-latest resume args, e.g. ["--continue"]; nil = no cwd fallback
+	ProjectsDir  string   // home-relative dir of per-project session stores, used to gate ContinueArgs on an existing session (e.g. ".claude/projects")
+}
+
 // Agent is one CLI agent wt can drive.
 type Agent struct {
 	Name   string
 	Binary string
 	Hook   HookSpec
-	Launch string   // one of launch* above
-	Setup  []string // setup* steps, in order
+	Launch string     // one of launch* above
+	Setup  []string   // setup* steps, in order
+	Resume ResumeSpec // how `wt` revive resumes a prior conversation
 }
 
 // registry is the whole roster. Order is the canonical display order.
@@ -64,6 +78,7 @@ var registry = []Agent{
 		Hook:   HookSpec{Format: hookJSONMerge, Template: "claude-hooks.json", Target: ".claude/settings.json", Version: 1},
 		Launch: launchClaudeIDE,
 		Setup:  []string{setupAllowedTools},
+		Resume: ResumeSpec{IDFlag: "--resume", ContinueArgs: []string{"--continue"}, ProjectsDir: ".claude/projects"},
 	},
 	{
 		Name:   "codex",
@@ -83,6 +98,7 @@ var registry = []Agent{
 		Hook:   HookSpec{Format: hookSymlinkPlugin, Template: "opencode-wt-plugin.js", Target: ".config/opencode/plugins/wt-status.js", Version: 1},
 		Launch: launchOpencode,
 		Setup:  []string{setupOpencodeMCP},
+		Resume: ResumeSpec{IDFlag: "--session"},
 	},
 }
 

@@ -229,6 +229,8 @@ func fieldValue(s Session, col string) string {
 		return s.PRState
 	case "pr_state_checked_at":
 		return fmt.Sprintf("%d", s.PRStateCheckedAt)
+	case "agent_session_id":
+		return s.AgentSessionID
 	default:
 		fatalf("get: unknown field %q", col)
 		return ""
@@ -266,6 +268,7 @@ session store:
                       [--wt-path P] [--pr N] [--agent A]
                       [--opencode-config C] [--is-master 0|1]
                       [--pr-state merged|open|closed|draft|none]
+                      [--agent-session-id ID]
   wt-state get <name> [--field COL | --json]
   wt-state list [--master | --no-master] [--sort recency|name] [--json]
   wt-state counts [--json]

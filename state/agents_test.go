@@ -303,6 +303,48 @@ func TestIDELockCount(t *testing.T) {
 	}
 }
 
+func TestResumeArgs(t *testing.T) {
+	claude := lookupAgent("claude")
+	opencode := lookupAgent("opencode")
+	gemini := lookupAgent("gemini")
+	home := t.TempDir()
+
+	// Rung 1: a captured id resumes the exact conversation via the agent's flag.
+	if got := resumeArgs(claude, "sess-123", home); !reflect.DeepEqual(got, []string{"--resume", "sess-123"}) {
+		t.Fatalf("claude id: %v", got)
+	}
+	if got := resumeArgs(opencode, "ses_abc", home); !reflect.DeepEqual(got, []string{"--session", "ses_abc"}) {
+		t.Fatalf("opencode id: %v", got)
+	}
+
+	// Rung 3: no id and no prior cwd session -> fresh launch (nil).
+	if got := resumeArgs(claude, "", home); got != nil {
+		t.Fatalf("claude no-id/no-session: want nil, got %v", got)
+	}
+	// opencode has no cwd fallback, so no id means fresh.
+	if got := resumeArgs(opencode, "", home); got != nil {
+		t.Fatalf("opencode no-id: want nil, got %v", got)
+	}
+	// gemini has no ResumeSpec, so it never resumes even with an id.
+	if got := resumeArgs(gemini, "anything", home); got != nil {
+		t.Fatalf("gemini: want nil, got %v", got)
+	}
+
+	// Rung 2: no id, but a prior session exists for the cwd -> --continue.
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	projDir := filepath.Join(home, ".claude", "projects", mangleProjectPath(cwd))
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(projDir, "abc.jsonl"), "{}")
+	if got := resumeArgs(claude, "", home); !reflect.DeepEqual(got, []string{"--continue"}) {
+		t.Fatalf("claude cwd-continue: %v", got)
+	}
+}
+
 // --- helpers ---
 
 func writeFile(t *testing.T, path, content string) {

@@ -17,10 +17,20 @@ WT_LAUNCH_DIR="$(dirname "$(readlink -f "$0")")"
 WT_STATE="${WT_STATE:-$WT_LAUNCH_DIR/wt-state}"
 [[ -x "$WT_STATE" ]] || WT_STATE="wt-state"
 
+# --resume (passed by `wt` revive): ask the plan to resume the prior
+# conversation instead of starting cold. The captured native session id (if
+# any) is read from the store below and handed to the plan.
+RESUME=0
+if [[ "${1:-}" == "--resume" ]]; then
+    RESUME=1
+    shift
+fi
+
 # Determine which agent to launch and gather tmux-side context for the plan.
 AGENT="${WT_DEFAULT_AGENT:-opencode}"
 local_session=""
 opencode_candidate=""
+resume_session_id=""
 if [[ -n "${TMUX:-}" ]]; then
     local_session=$(tmux display-message -p '#{session_name}' 2>/dev/null || true)
     if [[ -n "$local_session" ]]; then
@@ -29,6 +39,7 @@ if [[ -n "${TMUX:-}" ]]; then
         if json=$("$WT_STATE" get "$local_session" --json 2>/dev/null); then
             [[ -z "$tmux_agent" ]] && tmux_agent=$(jq -r '.agent // ""' <<<"$json")
             [[ -z "$opencode_candidate" ]] && opencode_candidate=$(jq -r '.opencode_config // ""' <<<"$json")
+            resume_session_id=$(jq -r '.agent_session_id // ""' <<<"$json")
         fi
         [[ -n "$tmux_agent" ]] && AGENT="$tmux_agent"
     fi
@@ -37,12 +48,16 @@ fi
 # Ask the registry how to launch. The plan may perform side effects (e.g.
 # reconciling Claude IDE locks) and emits shell we eval: WT_LAUNCH_BINARY,
 # WT_LAUNCH_ARGS (array), and any `export`ed env (e.g. OPENCODE_CONFIG).
+plan_flags=(--sh --session "$local_session"
+            --opencode-config "$opencode_candidate"
+            --config-dir "$WT_CONFIG_DIR")
+if [[ "$RESUME" == "1" ]]; then
+    plan_flags+=(--resume --resume-session-id "$resume_session_id")
+fi
+
 WT_LAUNCH_BINARY=""
 WT_LAUNCH_ARGS=()
-if plan=$("$WT_STATE" agent "$AGENT" launch-plan --sh \
-            --session "$local_session" \
-            --opencode-config "$opencode_candidate" \
-            --config-dir "$WT_CONFIG_DIR" 2>/dev/null); then
+if plan=$("$WT_STATE" agent "$AGENT" launch-plan "${plan_flags[@]}" 2>/dev/null); then
     eval "$plan"
 fi
 
