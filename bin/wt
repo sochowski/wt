@@ -410,15 +410,17 @@ get_status() {
 }
 
 get_status_icon() {
-    local status="$1"
+    local status="$1" __out="${2:-}" val
     case "$status" in
-        working) echo "●" ;;
-        idle)    echo "○" ;;
-        input)   echo "⊘" ;;
-        error)   echo "✗" ;;
-        offline) echo "◌" ;;
-        *)       echo "?" ;;
+        working) val="●" ;;
+        idle)    val="○" ;;
+        input)   val="⊘" ;;
+        error)   val="✗" ;;
+        offline) val="◌" ;;
+        *)       val="?" ;;
     esac
+    # With an out-var name, assign in-process (no subshell); otherwise print.
+    if [[ -n "$__out" ]]; then printf -v "$__out" '%s' "$val"; else printf '%s\n' "$val"; fi
 }
 
 # ANSI-colored icon for terminal output (list, pick commands)
@@ -1240,14 +1242,39 @@ interactive_new() {
 # -----------------------------------------------------------------------------
 # Build rich pick list: session_name:display_string
 pick_list() {
+    local SEP; SEP=$(printf '\037')
+
+    # Index every session's stored fields in ONE `wt-state list` call. The old
+    # per-row load_session was an extra `wt-state get` + jq fork each (~2s at a
+    # few hundred sessions); this is a single query + one jq. Mirrors
+    # load_session's fields exactly (agent/repo/branch/message and the stored
+    # wt_path, which load_session overwrites the passed value with).
+    local -A a_have a_agent a_repo a_branch a_message a_wtpath
+    local _n _ag _rp _br _msg _wp store_rows
+    store_rows=$("$WT_STATE" list 2>/dev/null \
+        | jq -r '.[] | [.name,.agent,.repo,.branch,.message,.wt_path] | @tsv' \
+        | tr '\t' '\037' || true)
+    while IFS="$SEP" read -r _n _ag _rp _br _msg _wp; do
+        [[ -n "$_n" ]] || continue
+        a_have["$_n"]=1
+        a_agent["$_n"]="$_ag"; a_repo["$_n"]="$_rp"; a_branch["$_n"]="$_br"
+        a_message["$_n"]="$_msg"; a_wtpath["$_n"]="$_wp"
+    done <<<"$store_rows"
+
+    local session_name wt_path sess_status icon label agent repo branch message
     while IFS=: read -r session_name wt_path sess_status; do
-        # load_session populates agent/message/repo/branch (and re-sets wt_path
-        # to the stored value); locals keep the extra fields from leaking.
-        local agent="" message="" repo="" branch="" status="" pr="" opencode_config=""
-        load_session "$session_name" || true
-        local icon
-        icon=$(get_status_icon "${sess_status:-unknown}")
-        local label="${agent:-$WT_DEFAULT_AGENT}"
+        if [[ -n "${a_have[$session_name]:-}" ]]; then
+            # Store row present: load_session would set these (incl. wt_path).
+            agent="${a_agent[$session_name]}"; repo="${a_repo[$session_name]}"
+            branch="${a_branch[$session_name]}"; message="${a_message[$session_name]}"
+            wt_path="${a_wtpath[$session_name]}"
+        else
+            # No row: load_session returns 1, leaving fields empty and the
+            # list_worktrees-supplied wt_path untouched.
+            agent=""; repo=""; branch=""; message=""
+        fi
+        get_status_icon "${sess_status:-unknown}" icon
+        label="${agent:-$WT_DEFAULT_AGENT}"
         echo "${session_name}:${wt_path}:${icon} ${sess_status:-?}  ${label}  ${repo:-?}@${branch:-?}  ${message:-}"
     done < <(list_worktrees simple)
 }
