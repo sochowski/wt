@@ -1,2 +1,1 @@
-[[notify]]
-command = "$HOME/bin/wt-hook stop"
+notify = "$HOME/bin/wt-hook stop"
