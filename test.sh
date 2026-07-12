@@ -333,6 +333,15 @@ test_managed_shells() {
         fail "shell send/wait did not observe output" "$("${wt[@]}" read scratch --lines 30 2>&1)"
     fi
 
+    local clean raw
+    clean=$("${wt[@]}" read scratch --lines 30 2>/dev/null)
+    raw=$("${wt[@]}" read scratch --lines 30 --raw 2>/dev/null)
+    if [[ "$clean" == *shell-send-ok* && "$clean" != *'printf "shell-send-ok'* && "$raw" == *'printf "shell-send-ok'* ]]; then
+        pass "normalized reads hide sent command echoes; --raw preserves them"
+    else
+        fail "normalized/raw output projection incorrect" "clean=$clean raw=$raw"
+    fi
+
     local first second
     first=$("${wt[@]}" read scratch --new 2>/dev/null)
     second=$("${wt[@]}" read scratch --new 2>/dev/null)
@@ -340,7 +349,12 @@ test_managed_shells() {
         && pass "persistent log supports unread cursor" \
         || fail "unread cursor did not advance" "first=$first second=$second"
 
-    "${wt[@]}" run job -- sh -c 'printf "job-ready\\n"; sleep 0.2; exit 7' >/dev/null 2>&1
+    "${wt[@]}" run job -- sh -c 'sleep 1; printf "job-ready\\n"; exit 7' >/dev/null 2>&1
+    local early_rc=0
+    "${wt[@]}" wait job --match job-ready --timeout 0 >/dev/null 2>&1 || early_rc=$?
+    [[ "$early_rc" -eq 124 ]] \
+        && pass "wait --match ignores the echoed launch command" \
+        || fail "wait matched command echo before process output" "rc=$early_rc"
     if "${wt[@]}" wait job --match job-ready --timeout 5 >/dev/null 2>&1; then
         pass "shell run output is persistently readable"
     else
@@ -350,8 +364,26 @@ test_managed_shells() {
     "${wt[@]}" wait job --exit --timeout 5 >/dev/null 2>&1 || rc=$?
     [[ "$rc" -eq 7 ]] && pass "shell wait --exit returns command status" || fail "wait --exit status = $rc (expected 7)"
 
-    "${wt[@]}" watch scratch --on error >/dev/null 2>&1
-    "${wt[@]}" send scratch --text 'printf "Error: watched failure\\n"' >/dev/null
+    if "${wt[@]}" wait scratch --quiet 1s --timeout 5 >/dev/null 2>&1; then
+        pass "shell wait --quiet observes a stable output period"
+    else
+        fail "shell wait --quiet timed out"
+    fi
+
+    "${wt[@]}" run stopper -- sh -c 'trap "exit 130" INT; while :; do sleep 1; done' >/dev/null 2>&1
+    sleep 0.2
+    "${wt[@]}" stop stopper >/dev/null 2>&1
+    rc=0
+    "${wt[@]}" wait stopper --exit --timeout 5 >/dev/null 2>&1 || rc=$?
+    [[ "$rc" -eq 130 ]] && pass "shell stop interrupts a running command" || fail "stopper exit status = $rc (expected 130)"
+
+    "${wt[@]}" watch scratch --match watched-failure >/dev/null 2>&1
+    if grep -q 'tmux run-shell -b' "$WT_BIN_DIR/wt"; then
+        pass "watcher is launched and owned by the tmux server"
+    else
+        fail "watcher is not tmux-owned"
+    fi
+    "${wt[@]}" send scratch --text 'printf "watched-failure\\n"' >/dev/null
     "${wt[@]}" send scratch --key Enter >/dev/null
     local events="" i
     for i in $(seq 1 30); do
@@ -359,11 +391,32 @@ test_managed_shells() {
         jq -e '.[] | select(.shell == "scratch" and .kind == "output_match")' <<< "$events" >/dev/null && break
         sleep 0.2
     done
-    if jq -e '.[] | select(.excerpt | contains("watched failure"))' <<< "$events" >/dev/null 2>&1; then
-        pass "shell watch queues a durable event"
+    # Give a second chunk/cooldown cycle time to surface accidental duplicates.
+    sleep 1
+    events=$("${wt[@]}" events --json 2>/dev/null)
+    local matching_events
+    matching_events=$(jq '[.[] | select(.shell == "scratch" and .kind == "output_match")] | length' <<< "$events")
+    if [[ "$matching_events" -eq 1 ]] \
+        && jq -e '.[] | select(.excerpt == "watched-failure")' <<< "$events" >/dev/null 2>&1; then
+        pass "shell watch queues one normalized, echo-free event"
     else
-        fail "watch event not queued" "$events"
+        fail "watch event missing, duplicated, or noisy" "$events"
     fi
+
+    "${wt[@]}" run failjob -- sh -c 'sleep 0.5; exit 9' >/dev/null 2>&1
+    "${wt[@]}" watch failjob --on exit-failure >/dev/null 2>&1
+    rc=0
+    "${wt[@]}" wait failjob --exit --timeout 5 >/dev/null 2>&1 || rc=$?
+    events=""
+    for i in $(seq 1 30); do
+        events=$("${wt[@]}" events --json 2>/dev/null)
+        jq -e '.[] | select(.shell == "failjob" and .kind == "exit_failure")' <<< "$events" >/dev/null && break
+        sleep 0.2
+    done
+    [[ "$rc" -eq 9 ]] && jq -e '.[] | select(.shell == "failjob" and .excerpt == "Exited with status 9")' <<< "$events" >/dev/null 2>&1 \
+        && pass "exit-failure watch records the command status" \
+        || fail "exit-failure watch missing" "rc=$rc events=$events"
+
     "${wt[@]}" events --consume >/dev/null 2>&1
     [[ "$("${wt[@]}" events --json 2>/dev/null)" == "[]" ]] \
         && pass "shell events --consume clears the queue" \
@@ -371,9 +424,39 @@ test_managed_shells() {
 
     "${wt[@]}" rm scratch >/dev/null 2>&1
     "${wt[@]}" rm job >/dev/null 2>&1
+    "${wt[@]}" rm stopper >/dev/null 2>&1
+    "${wt[@]}" rm failjob >/dev/null 2>&1
     [[ "$("${wt[@]}" ls --json 2>/dev/null)" == "[]" ]] \
         && pass "shell rm cleans up managed windows" \
         || fail "managed shells remain after rm"
+}
+
+test_wt_shells_skill() {
+    section "wt-shells Agent Skill"
+
+    local skill_dir="$(dirname "$WT_BIN_DIR")/config/skills/wt-shells"
+    if [[ -f "$skill_dir/SKILL.md" ]] \
+        && grep -q '^name: wt-shells$' "$skill_dir/SKILL.md" \
+        && grep -q '^description:' "$skill_dir/SKILL.md"; then
+        pass "wt-shells has valid required skill metadata"
+    else
+        fail "wt-shells skill metadata missing"
+    fi
+
+    if [[ -f "$skill_dir/agents/openai.yaml" ]] \
+        && grep -q 'display_name: "WT Managed Shells"' "$skill_dir/agents/openai.yaml"; then
+        pass "wt-shells includes Codex UI metadata"
+    else
+        fail "wt-shells openai.yaml missing"
+    fi
+
+    local install="$(dirname "$WT_BIN_DIR")/install.sh"
+    local path
+    for path in '.agents/skills/wt-shells' '.claude/skills/wt-shells' '.gemini/skills/wt-shells'; do
+        grep -q "$path" "$install" \
+            && pass "installer wires $path" \
+            || fail "installer missing $path"
+    done
 }
 
 test_status_file() {
@@ -1316,6 +1399,7 @@ main() {
     test_find_git_repos
     test_create_worktree
     test_managed_shells
+    test_wt_shells_skill
     test_status_file
     test_status_messages_are_data
     test_tmux_options

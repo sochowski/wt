@@ -70,6 +70,8 @@ The installer will:
   - Gemini: `~/.gemini/settings.json`
   - Codex: `~/.codex/config.toml`
   - opencode: `~/.config/opencode/plugins/wt-status.js`
+- Install the shared `wt-shells` Agent Skill for Claude, Codex, Gemini, and
+  OpenCode using user-level skill symlinks
 
 Requires: git, tmux, fzf, jq, go (to build `wt-state`), and at least one agent CLI ([Claude Code](https://github.com/anthropics/claude-code), [Codex](https://github.com/openai/codex), [Gemini CLI](https://github.com/google/gemini-cli), or [opencode](https://opencode.ai/))
 
@@ -139,8 +141,11 @@ wt shell send tests --key Enter
 ```
 
 Shell output is logged privately beneath the configured `WT_STATUS_DIR` and is
-removed with the owning worktree. `read --new` advances a per-shell automation
-cursor. Watches record durable events without interrupting or waking the agent:
+removed with the owning worktree. Normal reads strip terminal control sequences
+and commands sent through `wt shell`; use `read --raw` for the original terminal
+stream. `read --new` advances a per-shell automation cursor. Watches are owned by
+the tmux server, so they survive the agent tool call that created them, and they
+record durable events without interrupting or waking the agent:
 
 ```bash
 wt shell watch server --match 'Error|Exception'
@@ -151,6 +156,23 @@ wt shell unwatch server
 
 Use `wt shell --session <session> ...` to address a worktree from another tmux
 session, such as the master orchestrator.
+
+### Agent skill
+
+`install.sh` symlinks the repo-owned `wt-shells` skill into the supported global
+skill locations:
+
+```text
+~/.agents/skills/wt-shells   # Codex + OpenCode
+~/.claude/skills/wt-shells   # Claude
+~/.gemini/skills/wt-shells   # Gemini
+```
+
+Agents discover the skill automatically when starting a new session (some
+harnesses also detect it live). Invoke it explicitly as `$wt-shells`, or let an
+agent load it when a task calls for a persistent server, watcher, REPL, debugger,
+or log stream. The skill teaches agents to inspect existing shells before
+starting duplicates and to keep one-shot commands in their native shell tool.
 
 ## Tmux Keybindings
 

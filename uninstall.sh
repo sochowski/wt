@@ -44,6 +44,22 @@ fi
 rmdir "$CONFIG_DIR" 2>/dev/null || true
 
 # -----------------------------------------------------------------------------
+#  Agent skill symlinks
+# -----------------------------------------------------------------------------
+echo "Removing wt-shells agent skill symlinks..."
+skill_source="$SCRIPT_DIR/config/skills/wt-shells"
+for target in \
+    "$HOME/.agents/skills/wt-shells" \
+    "$HOME/.claude/skills/wt-shells" \
+    "$HOME/.gemini/skills/wt-shells"; do
+    if [[ -L "$target" ]] && [[ "$(readlink -f "$target")" == "$(readlink -f "$skill_source")" ]]; then
+        rm "$target"
+        rmdir "$(dirname "$target")" 2>/dev/null || true
+        echo "  Removed $target"
+    fi
+done
+
+# -----------------------------------------------------------------------------
 #  Claude hooks
 # -----------------------------------------------------------------------------
 echo ""
