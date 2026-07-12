@@ -20,8 +20,8 @@
 
 </div>
 
-Each agent gets its own worktree and its own tmux session — agent, editor, and
-shell windows — plus a live status you can see at a glance, so you always know
+Each agent gets its own worktree and its own tmux session — agent and editor
+side by side, with managed shells on demand — plus a live status you can see at a glance, so you always know
 which one is working, which is waiting on you, and which is done.
 
 It works with Claude, Codex, Gemini, and opencode: one session on Claude, the
@@ -31,7 +31,9 @@ the thing you're waiting on is never buried.
 ## What you get
 
 - **A session per worktree.** `wt new` cuts the branch, adds the worktree, and
-  opens a tmux session with the agent, editor, and shell windows already running.
+  opens a tmux session with the agent and editor side by side.
+- **Persistent managed shells.** `prefix + c` creates named shells on demand;
+  the CLI can run services, read output, send input, wait, and watch for failures.
 - **Status at a glance.** Each session reports whether its agent is working,
   idle, waiting for input, or errored. `wt ls`, the fzf picker, and the tmux
   status bar all read the same live state.
@@ -102,12 +104,59 @@ wt pr-pick                            # Interactive PR picker (fzf + gh)
 # Status
 wt status <session>                   # Print a session's status
 wt sync-tmux                          # Restore tmux options after restart
+
+# Managed shells (inside a worktree session)
+wt shell new [name]                   # Interactive shell; create and switch
+wt shell run server -- npm run dev    # Persistent command; don't steal focus
+wt shell ls [--json]                  # List shells by stable name
+wt shell open server                  # Switch to a shell
+wt shell read server --lines 100      # Read recent persistent output
+wt shell read server --new            # Read only output not read before
+wt shell send server --key C-c        # Send a key or literal text
+wt shell wait server --match Ready    # Wait for output, quiet, or exit
+wt shell watch server --on error      # Queue matching output as an event
+wt shell events --consume             # Read and clear queued events
 ```
+
+## Managed Shells
+
+Worktree sessions start with only the `main` window: Neovim on the left and the
+selected agent on the right. Press `prefix + c` to create the first managed
+shell when you need one. Further presses create `shell-2`, `shell-3`, and so on.
+Outside a wt worktree session, `prefix + c` keeps its normal tmux behavior.
+
+Managed shells are ordinary tmux windows, so native navigation (`prefix + n`,
+`prefix + p`, and window indexes) still works. wt adds stable names and an API
+that agents can use without relying on window numbers:
+
+```bash
+wt shell new scratch
+wt shell run tests -- npm test -- --watch
+wt shell pick
+wt shell read tests --new
+wt shell send tests --text r
+wt shell send tests --key Enter
+```
+
+Shell output is logged privately beneath the configured `WT_STATUS_DIR` and is
+removed with the owning worktree. `read --new` advances a per-shell automation
+cursor. Watches record durable events without interrupting or waking the agent:
+
+```bash
+wt shell watch server --match 'Error|Exception'
+wt shell watch tests --on exit-failure
+wt shell events --json
+wt shell unwatch server
+```
+
+Use `wt shell --session <session> ...` to address a worktree from another tmux
+session, such as the master orchestrator.
 
 ## Tmux Keybindings
 
 | Key | Action |
 |-----|--------|
+| `prefix + c` | Create and open a managed shell inside a worktree session |
 | `prefix + W` | Session switcher (fzf popup, most-recently-active first) |
 | `prefix + w` | Action menu (new, switch, delete, PR, master) |
 | `prefix + M` | Jump to master orchestrator session |

@@ -40,6 +40,7 @@ WT_FZF_VIM="${WT_FZF_VIM:-0}"
 # harnesses stay isolated.
 WT_DIFF_VIEW="${WT_DIFF_VIEW:-1}"
 WT_NVIM_SOCK_DIR="${WT_NVIM_SOCK_DIR:-$WT_STATUS_DIR/nvim-sockets}"
+WT_SHELL_DIR="${WT_SHELL_DIR:-$WT_STATUS_DIR/shells}"
 
 # Which nvim diff plugin the live view uses: "unified" (unified.nvim, inline
 # unified diff) or "diffview" (diffview.nvim, side-by-side). Passed to
@@ -79,6 +80,27 @@ diff_merge_base() {
 
 # Path to a session's nvim RPC listen socket.
 nvim_socket_path() { printf '%s/%s.sock' "$WT_NVIM_SOCK_DIR" "$1"; }
+
+# Managed panes are addressed by role instead of position. This keeps agent
+# control stable when users add, remove, or reorder auxiliary shell windows.
+pane_by_role() {
+    local session_name="$1" role="$2"
+    tmux list-panes -s -t "=$session_name" \
+        -F $'#{pane_id}\037#{@wt-pane-role}' 2>/dev/null \
+        | awk -F $'\037' -v role="$role" '$2 == role { print $1; exit }'
+}
+
+agent_pane_target() {
+    local session_name="$1" pane
+    pane=$(pane_by_role "$session_name" agent)
+    [[ -n "$pane" ]] && printf '%s\n' "$pane" || printf '=%s:main.1\n' "$session_name"
+}
+
+mark_primary_panes() {
+    local session_name="$1"
+    tmux set-option -pqt "=$session_name:main.0" @wt-pane-role editor
+    tmux set-option -pqt "=$session_name:main.1" @wt-pane-role agent
+}
 
 # Launch nvim in pane 0 of the session's main window. With the diff view enabled
 # (WT_DIFF_VIEW=1) and nvim present, nvim listens on a per-session socket, boots
@@ -792,12 +814,10 @@ create_worktree() {
         # Split right for agent pane
         tmux split-window -h -t "=$session_name:main" -c "$wt_path"
 
-        # Create shell window
-        tmux new-window -t "=$session_name" -n shell -c "$wt_path"
-
         # Select agent pane (right pane of main window)
         tmux select-window -t "=$session_name:main"
-        tmux select-pane -t "=$session_name:main.1"
+        mark_primary_panes "$session_name"
+        tmux select-pane -t "$(agent_pane_target "$session_name")"
 
         # Persist initial session state with full metadata
         status=idle
@@ -830,14 +850,14 @@ create_worktree() {
         # Start agent via wt-agent-launch
         if [[ "$start_agent" == "true" ]]; then
             if [[ -n "$task" ]]; then
-                tmux send-keys -t "=$session_name:main.1" "$WT_BIN_DIR/wt-agent-launch \"$task\"" Enter
+                tmux send-keys -t "$(agent_pane_target "$session_name")" "$WT_BIN_DIR/wt-agent-launch \"$task\"" Enter
             else
-                tmux send-keys -t "=$session_name:main.1" "$WT_BIN_DIR/wt-agent-launch" Enter
+                tmux send-keys -t "$(agent_pane_target "$session_name")" "$WT_BIN_DIR/wt-agent-launch" Enter
             fi
             set_status "$session_name" "working" "${task:-Interactive session}"
         else
             # Start agent for when user wants it
-            tmux send-keys -t "=$session_name:main.1" "$WT_BIN_DIR/wt-agent-launch" Enter
+            tmux send-keys -t "$(agent_pane_target "$session_name")" "$WT_BIN_DIR/wt-agent-launch" Enter
         fi
     fi
 
@@ -915,6 +935,7 @@ delete_worktree() {
     # Remove session state
     "$WT_STATE" delete "$session_name" >/dev/null 2>&1 || true
     rm -f "$WT_CONFIG_DIR/opencode-mcp/${session_name}.json"
+    rm -rf "$(shell_session_dir "$session_name")"
 
     echo "Deleted: $session_name"
 }
@@ -1305,9 +1326,9 @@ revive_worktree_session() {
     tmux new-session -d -s "$session_name" -c "$wt_path" -n main
     launch_nvim "$session_name" "$wt_path"
     tmux split-window -h -t "=$session_name:main" -c "$wt_path"
-    tmux new-window -t "=$session_name" -n shell -c "$wt_path"
     tmux select-window -t "=$session_name:main"
-    tmux select-pane -t "=$session_name:main.1"
+    mark_primary_panes "$session_name"
+    tmux select-pane -t "$(agent_pane_target "$session_name")"
 
     status="working"
     message="Resuming ${agent}..."
@@ -1336,7 +1357,7 @@ revive_worktree_session() {
     # it, mirroring create_worktree.
     echo "Waiting for Neovim IDE server to start..."
     sleep 2
-    tmux send-keys -t "=$session_name:main.1" "$WT_BIN_DIR/wt-agent-launch --resume" Enter
+    tmux send-keys -t "$(agent_pane_target "$session_name")" "$WT_BIN_DIR/wt-agent-launch --resume" Enter
 }
 
 # -----------------------------------------------------------------------------
@@ -1451,7 +1472,7 @@ preview_pane() {
     budget=$(( avail - footer_lines - 1 ))
     (( budget < 3 )) && budget=3
 
-    cap=$(tmux capture-pane -p -e -t "=$session:main.1" 2>/dev/null \
+    cap=$(tmux capture-pane -p -e -t "$(agent_pane_target "$session")" 2>/dev/null \
           || tmux capture-pane -p -e -t "=$session:agent" 2>/dev/null || true)
     if [[ -n "$cap" ]]; then
         printf '%s\n' "$cap" | tail -n "$budget"
@@ -1538,6 +1559,10 @@ sync_tmux() {
             tmux set-option -qt "$name" @wt-agent   "${agent:-$WT_DEFAULT_AGENT}"
             tmux set-option -qt "$name" @wt-opencode-config "${opencode_config:-}"
         else
+            if tmux list-panes -t "=$name:main" >/dev/null 2>&1 \
+                && [[ "$(tmux list-panes -t "=$name:main" 2>/dev/null | wc -l | tr -d ' ')" -ge 2 ]]; then
+                mark_primary_panes "$name"
+            fi
             icon=$(get_status_icon "${status:-unknown}")
             tmux set-option -qt "$name" @wt-status  "${status:-unknown}"
             tmux set-option -qt "$name" @wt-icon    "$icon"
@@ -1727,6 +1752,436 @@ delete_pick() {
 }
 
 # -----------------------------------------------------------------------------
+#  Managed Shells
+# -----------------------------------------------------------------------------
+# A managed shell is an ordinary tmux window with stable wt metadata. The main
+# editor/agent window remains fixed; auxiliary shells are created only on demand.
+
+current_wt_session() {
+    local session_name wt_path is_master
+    if [[ -n "${WT_SHELL_SESSION:-}" ]]; then
+        session_name="$WT_SHELL_SESSION"
+    else
+        [[ -n "${TMUX:-}" ]] || { echo "wt shell must run inside a tmux session (or pass --session)" >&2; return 1; }
+        session_name=$(tmux display-message -p '#{session_name}' 2>/dev/null || true)
+    fi
+    [[ -n "$session_name" ]] || { echo "Could not determine the current tmux session" >&2; return 1; }
+    is_master=$(tmux show-option -qv -t "=$session_name" @wt-master 2>/dev/null || true)
+    [[ -n "$is_master" ]] || is_master=$("$WT_STATE" get "$session_name" --field is_master 2>/dev/null || true)
+    [[ "$is_master" != "1" ]] \
+        || { echo "Managed shells are only available in worktree sessions" >&2; return 1; }
+    wt_path=$(tmux show-option -qv -t "=$session_name" @wt-wt-path 2>/dev/null || true)
+    [[ -n "$wt_path" ]] || wt_path=$("$WT_STATE" get "$session_name" --field wt_path 2>/dev/null || true)
+    [[ -n "$wt_path" ]] \
+        || { echo "Not a wt-managed worktree session: $session_name" >&2; return 1; }
+    printf '%s\n' "$session_name"
+}
+
+valid_shell_name() {
+    [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]
+}
+
+shell_session_dir() { printf '%s/%s\n' "$WT_SHELL_DIR" "$1"; }
+shell_log_path() { printf '%s/logs/%s.log\n' "$(shell_session_dir "$1")" "$2"; }
+
+shell_prepare_dirs() {
+    local root
+    root=$(shell_session_dir "$1")
+    umask 077
+    mkdir -p "$root/logs" "$root/cursors" "$root/watches"
+    chmod 700 "$root" "$root/logs" "$root/cursors" "$root/watches" 2>/dev/null || true
+}
+
+shell_window_record() {
+    local session_name="$1" shell_name="$2"
+    tmux list-windows -t "=$session_name" \
+        -F $'#{window_id}\037#{window_name}\037#{@wt-managed-shell}\037#{@wt-shell-name}\037#{@wt-shell-kind}\037#{@wt-shell-command}\037#{pane_id}\037#{pane_dead}\037#{pane_dead_status}\037#{pane_current_command}\037#{window_active}' \
+        2>/dev/null | awk -F $'\037' -v name="$shell_name" '$3 == "1" && $4 == name { print; exit }'
+}
+
+shell_target() {
+    local record
+    record=$(shell_window_record "$1" "$2")
+    [[ -n "$record" ]] || { echo "Managed shell not found: $2" >&2; return 1; }
+    printf '%s\n' "${record%%$'\037'*}"
+}
+
+next_shell_name() {
+    local session_name="$1" name="shell" n=2
+    while [[ -n "$(shell_window_record "$session_name" "$name")" ]]; do
+        name="shell-$n"
+        (( n++ ))
+    done
+    printf '%s\n' "$name"
+}
+
+setup_shell_logging() {
+    local session_name="$1" shell_name="$2" pane_id="$3" log cmd
+    shell_prepare_dirs "$session_name"
+    log=$(shell_log_path "$session_name" "$shell_name")
+    : > "$log"
+    chmod 600 "$log" 2>/dev/null || true
+    printf -v cmd '%q %q' "$WT_BIN_DIR/wt-shell-log" "$log"
+    tmux pipe-pane -o -t "$pane_id" "$cmd"
+    tmux set-option -pqt "$pane_id" @wt-pane-role shell
+    tmux set-option -pqt "$pane_id" @wt-shell-name "$shell_name"
+}
+
+create_managed_shell() {
+    local session_name="$1" shell_name="$2" kind="$3" switch_after="$4"
+    local wt_path window_id pane_id flags=(-P -F $'#{window_id}\037#{pane_id}') created
+
+    valid_shell_name "$shell_name" || { echo "Invalid shell name: $shell_name" >&2; return 2; }
+    [[ -z "$(shell_window_record "$session_name" "$shell_name")" ]] \
+        || { echo "Managed shell already exists: $shell_name" >&2; return 1; }
+
+    wt_path=$(tmux show-option -qv -t "=$session_name" @wt-wt-path 2>/dev/null || true)
+    [[ -n "$wt_path" ]] || wt_path=$("$WT_STATE" get "$session_name" --field wt_path 2>/dev/null || true)
+    [[ -d "$wt_path" ]] || { echo "Worktree path not found: $wt_path" >&2; return 1; }
+    [[ "$switch_after" == "true" ]] || flags+=(-d)
+    created=$(tmux new-window "${flags[@]}" -t "=$session_name" -n "$shell_name" -c "$wt_path")
+    IFS=$'\037' read -r window_id pane_id <<< "$created"
+
+    tmux set-option -wqt "$window_id" @wt-managed-shell 1
+    tmux set-option -wqt "$window_id" @wt-shell-name "$shell_name"
+    tmux set-option -wqt "$window_id" @wt-shell-kind "$kind"
+    tmux set-option -wqt "$window_id" @wt-shell-command ""
+    tmux set-option -wqt "$window_id" remain-on-exit on
+    setup_shell_logging "$session_name" "$shell_name" "$pane_id"
+    printf '%s\037%s\n' "$window_id" "$pane_id"
+}
+
+shell_new() {
+    local session_name name="" switch_after=true created
+    session_name=$(current_wt_session) || return
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --detach|--no-switch) switch_after=false; shift ;;
+            --switch) switch_after=true; shift ;;
+            -*) echo "Unknown wt shell new option: $1" >&2; return 2 ;;
+            *) [[ -z "$name" ]] || { echo "Usage: wt shell new [NAME] [--detach]" >&2; return 2; }; name="$1"; shift ;;
+        esac
+    done
+    [[ -n "$name" ]] || name=$(next_shell_name "$session_name")
+    created=$(create_managed_shell "$session_name" "$name" interactive "$switch_after") || return
+    echo "Created shell '$name'"
+}
+
+shell_run() {
+    local session_name name="${1:-}" switch_after=false created window_id pane_id cmd="" arg
+    session_name=$(current_wt_session) || return
+    [[ -n "$name" && "$name" != --* ]] || { echo "Usage: wt shell run NAME [--switch] -- COMMAND..." >&2; return 2; }
+    shift
+    while [[ $# -gt 0 && "$1" != "--" ]]; do
+        case "$1" in
+            --switch) switch_after=true; shift ;;
+            --detach|--no-switch) switch_after=false; shift ;;
+            *) echo "Unknown wt shell run option: $1" >&2; return 2 ;;
+        esac
+    done
+    [[ "${1:-}" == "--" ]] && shift
+    [[ $# -gt 0 ]] || { echo "wt shell run requires a command after --" >&2; return 2; }
+
+    created=$(create_managed_shell "$session_name" "$name" command "$switch_after") || return
+    IFS=$'\037' read -r window_id pane_id <<< "$created"
+    for arg in "$@"; do printf -v cmd '%s%q ' "$cmd" "$arg"; done
+    cmd=${cmd% }
+    tmux set-option -wqt "$window_id" @wt-shell-command "$cmd"
+    # The pane starts as a normal interactive shell so pipe-pane can be attached
+    # before the command emits output. exec preserves the real exit status.
+    tmux send-keys -t "$pane_id" -l "exec $cmd"
+    tmux send-keys -t "$pane_id" Enter
+    echo "Started '$name': $cmd"
+}
+
+shell_list() {
+    local session_name json=false line window_id window_name managed name kind command pane_id dead exit_status current active state
+    session_name=$(current_wt_session) || return
+    [[ "${1:-}" == "--json" ]] && json=true
+    local objects=()
+    while IFS=$'\037' read -r window_id window_name managed name kind command pane_id dead exit_status current active; do
+        [[ "$managed" == "1" ]] || continue
+        if [[ "$dead" == "1" ]]; then state="exited"; else state=$([[ "$kind" == command ]] && echo running || echo interactive); fi
+        if [[ "$json" == true ]]; then
+            objects+=("$(jq -nc --arg name "$name" --arg kind "$kind" --arg command "$command" \
+                --arg state "$state" --arg pane_id "$pane_id" --arg window_id "$window_id" \
+                --argjson active "$([[ "$active" == 1 ]] && echo true || echo false)" \
+                --argjson exit_status "${exit_status:-0}" \
+                '{name:$name,kind:$kind,command:$command,state:$state,exit_status:$exit_status,active:$active,window_id:$window_id,pane_id:$pane_id}')")
+        else
+            printf '%-18s %-11s %s\n' "$name" "$state" "${command:-$current}"
+        fi
+    done < <(tmux list-windows -t "=$session_name" -F $'#{window_id}\037#{window_name}\037#{@wt-managed-shell}\037#{@wt-shell-name}\037#{@wt-shell-kind}\037#{@wt-shell-command}\037#{pane_id}\037#{pane_dead}\037#{pane_dead_status}\037#{pane_current_command}\037#{window_active}')
+    if [[ "$json" == true ]]; then
+        if [[ ${#objects[@]} -eq 0 ]]; then echo '[]'; else printf '%s\n' "${objects[@]}" | jq -s '.'; fi
+    fi
+}
+
+shell_open() {
+    local session_name target
+    session_name=$(current_wt_session) || return
+    if [[ "${1:-}" == main ]]; then target="=$session_name:main"; else target=$(shell_target "$session_name" "${1:-}") || return; fi
+    tmux select-window -t "$target"
+}
+
+shell_read() {
+    local session_name name="${1:-}" lines=100 mode=last advance=false log cursor size start
+    session_name=$(current_wt_session) || return
+    [[ -n "$name" ]] || { echo "Usage: wt shell read NAME [--lines N|--new|--peek]" >&2; return 2; }
+    shell_target "$session_name" "$name" >/dev/null || return
+    shift
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --lines|--last) lines="$2"; shift 2 ;;
+            --new) mode=new; advance=true; shift ;;
+            --peek) mode=new; advance=false; shift ;;
+            *) echo "Unknown wt shell read option: $1" >&2; return 2 ;;
+        esac
+    done
+    log=$(shell_log_path "$session_name" "$name")
+    [[ -f "$log" ]] || return 0
+    if [[ "$mode" == last ]]; then
+        tail -n "$lines" "$log"
+        return
+    fi
+    cursor="$(shell_session_dir "$session_name")/cursors/$name.agent"
+    start=$(cat "$cursor" 2>/dev/null || echo 0)
+    [[ "$start" =~ ^[0-9]+$ ]] || start=0
+    size=$(wc -c < "$log" | tr -d ' ')
+    (( start > size )) && start=0
+    (( start < size )) && tail -c "+$((start + 1))" "$log"
+    if [[ "$advance" == true ]]; then printf '%s\n' "$size" > "$cursor"; fi
+}
+
+shell_send() {
+    local session_name name="${1:-}" mode="" value="" pane_id buffer
+    session_name=$(current_wt_session) || return
+    [[ -n "$name" ]] || { echo "Usage: wt shell send NAME (--text TEXT|--key KEY)" >&2; return 2; }
+    shift
+    case "${1:-}" in
+        --text) mode=text; value="${2:-}" ;;
+        --key) mode=key; value="${2:-}" ;;
+        *) echo "Usage: wt shell send NAME (--text TEXT|--key KEY)" >&2; return 2 ;;
+    esac
+    pane_id=$(shell_window_record "$session_name" "$name" | awk -F $'\037' '{print $7}')
+    [[ -n "$pane_id" ]] || { echo "Managed shell not found: $name" >&2; return 1; }
+    if [[ "$mode" == key ]]; then
+        tmux send-keys -t "$pane_id" "$value"
+    else
+        buffer="wt-shell-${session_name//[^A-Za-z0-9]/_}-$$"
+        tmux set-buffer -b "$buffer" -- "$value"
+        tmux paste-buffer -d -b "$buffer" -t "$pane_id"
+    fi
+}
+
+shell_stop() {
+    local session_name pane_id
+    session_name=$(current_wt_session) || return
+    pane_id=$(shell_window_record "$session_name" "${1:-}" | awk -F $'\037' '{print $7}')
+    [[ -n "$pane_id" ]] || { echo "Managed shell not found: ${1:-}" >&2; return 1; }
+    tmux send-keys -t "$pane_id" C-c
+}
+
+shell_remove() {
+    local session_name name="${1:-}" target root
+    session_name=$(current_wt_session) || return
+    target=$(shell_target "$session_name" "$name") || return
+    shell_unwatch "$name" >/dev/null 2>&1 || true
+    tmux kill-window -t "$target"
+    root=$(shell_session_dir "$session_name")
+    rm -f "$root/logs/$name.log" "$root/cursors/$name.agent"
+}
+
+shell_pick() {
+    local session_name choice rows
+    session_name=$(current_wt_session) || return
+    rows=$(printf 'main\tprimary\teditor + agent\n'; shell_list --json | jq -r '.[] | [.name,.state,(if .command == "" then .kind else .command end)] | @tsv')
+    choice=$(printf '%s\n' "$rows" | fzf --ansi --delimiter=$'\t' --with-nth=1,2,3 \
+        --prompt='shell> ' "${WT_FZF_VIM_ARGS[@]}") || return 0
+    shell_open "${choice%%$'\t'*}"
+}
+
+parse_duration_seconds() {
+    local value="$1"
+    case "$value" in
+        *s) value=${value%s} ;;
+        *m) echo $(( ${value%m} * 60 )); return ;;
+    esac
+    [[ "$value" =~ ^[0-9]+$ ]] || return 1
+    echo "$value"
+}
+
+shell_wait() {
+    local session_name name="${1:-}" mode="" pattern="" timeout=30 quiet_for=2 start now last_change size last_size pane_id dead status log
+    session_name=$(current_wt_session) || return
+    [[ -n "$name" ]] || { echo "Usage: wt shell wait NAME (--match PATTERN|--exit|--quiet [SECONDS])" >&2; return 2; }
+    shift
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --match) mode=match; pattern="$2"; shift 2 ;;
+            --exit) mode=exit; shift ;;
+            --quiet) mode=quiet; [[ "${2:-}" =~ ^[0-9]+([sm])?$ ]] && { quiet_for=$(parse_duration_seconds "$2"); shift 2; } || shift ;;
+            --timeout) timeout=$(parse_duration_seconds "$2") || { echo "Invalid timeout: $2" >&2; return 2; }; shift 2 ;;
+            *) echo "Unknown wt shell wait option: $1" >&2; return 2 ;;
+        esac
+    done
+    [[ -n "$mode" ]] || { echo "wt shell wait requires --match, --exit, or --quiet" >&2; return 2; }
+    pane_id=$(shell_window_record "$session_name" "$name" | awk -F $'\037' '{print $7}')
+    [[ -n "$pane_id" ]] || { echo "Managed shell not found: $name" >&2; return 1; }
+    log=$(shell_log_path "$session_name" "$name")
+    start=$(date +%s); last_change=$start; last_size=-1
+    while true; do
+        now=$(date +%s)
+        case "$mode" in
+            match)
+                if [[ -f "$log" ]] && grep -E -q -- "$pattern" "$log"; then grep -E -- "$pattern" "$log" | tail -n 20; return 0; fi ;;
+            exit)
+                IFS=$'\037' read -r dead status < <(tmux display-message -p -t "$pane_id" $'#{pane_dead}\037#{pane_dead_status}')
+                if [[ "$dead" == 1 ]]; then return "${status:-0}"; fi ;;
+            quiet)
+                size=$(wc -c < "$log" 2>/dev/null || echo 0)
+                if [[ "$size" != "$last_size" ]]; then last_size="$size"; last_change=$now; fi
+                (( now - last_change >= quiet_for )) && return 0 ;;
+        esac
+        (( now - start >= timeout )) && { echo "Timed out waiting for '$name'" >&2; return 124; }
+        sleep 0.2
+    done
+}
+
+shell_event_add() {
+    local session_name="$1" name="$2" kind="$3" excerpt="$4" root file lock event
+    shell_prepare_dirs "$session_name"
+    root=$(shell_session_dir "$session_name"); file="$root/events.jsonl"; lock="$root/.events-lock"
+    event=$(jq -nc --arg session "$session_name" --arg shell "$name" --arg kind "$kind" \
+        --arg excerpt "$excerpt" --argjson created_at "$(date +%s)" \
+        '{session:$session,shell:$shell,kind:$kind,excerpt:$excerpt,created_at:$created_at}')
+    while ! mkdir "$lock" 2>/dev/null; do sleep 0.05; done
+    printf '%s\n' "$event" >> "$file"
+    rmdir "$lock"
+}
+
+shell_events() {
+    local session_name consume=false json=false file root lock
+    session_name=$(current_wt_session) || return
+    while [[ $# -gt 0 ]]; do
+        case "$1" in --consume) consume=true ;; --json) json=true ;; *) echo "Unknown events option: $1" >&2; return 2 ;; esac
+        shift
+    done
+    shell_prepare_dirs "$session_name"
+    root=$(shell_session_dir "$session_name"); file="$root/events.jsonl"; lock="$root/.events-lock"
+    while ! mkdir "$lock" 2>/dev/null; do sleep 0.05; done
+    if [[ "$json" == true ]]; then
+        [[ -s "$file" ]] && jq -s '.' "$file" || echo '[]'
+    elif [[ -s "$file" ]]; then
+        jq -r '"\(.shell) [\(.kind)] \(.excerpt)"' "$file"
+    fi
+    [[ "$consume" == true ]] && rm -f "$file"
+    rmdir "$lock"
+}
+
+shell_watch_loop() {
+    local session_name="$1" name="$2" mode="$3" pattern="$4" marker="$5" log cursor offset size chunk pane_id dead status excerpt
+    log=$(shell_log_path "$session_name" "$name"); cursor="$marker.cursor"
+    offset=$(wc -c < "$log" 2>/dev/null || echo 0); printf '%s\n' "$offset" > "$cursor"
+    while [[ -f "$marker" ]] && tmux has-session -t "=$session_name" 2>/dev/null; do
+        pane_id=$(shell_window_record "$session_name" "$name" | awk -F $'\037' '{print $7}')
+        [[ -n "$pane_id" ]] || break
+        size=$(wc -c < "$log" 2>/dev/null || echo 0)
+        if (( size > offset )); then
+            chunk=$(tail -c "+$((offset + 1))" "$log"); offset=$size; printf '%s\n' "$offset" > "$cursor"
+            if [[ "$mode" != exit-failure ]] && grep -E -q -- "$pattern" <<< "$chunk"; then
+                excerpt=$(grep -E -- "$pattern" <<< "$chunk" | tail -n 20)
+                shell_event_add "$session_name" "$name" output_match "$excerpt"
+                sleep 2
+            fi
+        fi
+        if [[ "$mode" == exit-failure ]]; then
+            IFS=$'\037' read -r dead status < <(tmux display-message -p -t "$pane_id" $'#{pane_dead}\037#{pane_dead_status}')
+            if [[ "$dead" == 1 ]]; then
+                if [[ "${status:-0}" != 0 ]]; then shell_event_add "$session_name" "$name" exit_failure "Exited with status $status"; fi
+                break
+            fi
+        fi
+        sleep 0.5
+    done
+    rm -f "$marker" "$cursor"
+}
+
+shell_watch() {
+    local session_name name="${1:-}" mode=match pattern="" marker pid
+    session_name=$(current_wt_session) || return
+    [[ -n "$name" ]] || { echo "Usage: wt shell watch NAME (--match PATTERN|--on error|exit-failure)" >&2; return 2; }
+    shell_target "$session_name" "$name" >/dev/null || return
+    shift
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --match) mode=match; pattern="$2"; shift 2 ;;
+            --on)
+                case "$2" in
+                    error) mode=match; pattern='[Ee]rror|[Ee]xception|[Ff]atal|[Pp]anic|[Ff]ailed' ;;
+                    exit-failure) mode=exit-failure ;;
+                    *) echo "Unknown watch condition: $2" >&2; return 2 ;;
+                esac
+                shift 2 ;;
+            *) echo "Unknown wt shell watch option: $1" >&2; return 2 ;;
+        esac
+    done
+    [[ "$mode" == exit-failure || -n "$pattern" ]] || { echo "A watch condition is required" >&2; return 2; }
+    shell_prepare_dirs "$session_name"
+    marker="$(shell_session_dir "$session_name")/watches/$name.watch"
+    shell_unwatch "$name" >/dev/null 2>&1 || true
+    jq -nc --arg mode "$mode" --arg pattern "$pattern" '{mode:$mode,pattern:$pattern}' > "$marker"
+    nohup "$WT_BIN_DIR/wt" shell _watch-loop "$session_name" "$name" "$mode" "$pattern" "$marker" >/dev/null 2>&1 &
+    pid=$!
+    jq --argjson pid "$pid" '. + {pid:$pid}' "$marker" > "$marker.tmp" && mv "$marker.tmp" "$marker"
+    echo "Watching '$name' ($mode)"
+}
+
+shell_unwatch() {
+    local session_name name="${1:-}" marker pid i
+    session_name=$(current_wt_session) || return
+    marker="$(shell_session_dir "$session_name")/watches/$name.watch"
+    [[ -f "$marker" ]] || return 0
+    pid=$(jq -r '.pid // empty' "$marker" 2>/dev/null || true)
+    [[ -n "$pid" ]] && kill "$pid" 2>/dev/null || true
+    if [[ -n "$pid" ]]; then
+        for i in $(seq 1 20); do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done
+    fi
+    rm -f "$marker" "$marker.cursor"
+    echo "Stopped watching '$name'"
+}
+
+shell_command() {
+    local sub="${1:-}"
+    shift || true
+    if [[ "$sub" == "--session" ]]; then
+        [[ -n "${1:-}" && -n "${2:-}" ]] || { echo "Usage: wt shell --session SESSION COMMAND..." >&2; return 2; }
+        WT_SHELL_SESSION="$1"
+        export WT_SHELL_SESSION
+        shift
+        sub="$1"
+        shift
+    fi
+    case "$sub" in
+        new) shell_new "$@" ;;
+        run) shell_run "$@" ;;
+        ls|list) shell_list "$@" ;;
+        open) shell_open "$@" ;;
+        pick) shell_pick "$@" ;;
+        read) shell_read "$@" ;;
+        send) shell_send "$@" ;;
+        stop) shell_stop "$@" ;;
+        rm|delete) shell_remove "$@" ;;
+        wait) shell_wait "$@" ;;
+        watch) shell_watch "$@" ;;
+        unwatch) shell_unwatch "$@" ;;
+        events) shell_events "$@" ;;
+        _watch-loop) shell_watch_loop "$@" ;;
+        *) echo "Usage: wt shell {new|run|ls|open|pick|read|send|stop|rm|wait|watch|unwatch|events}" >&2; return 2 ;;
+    esac
+}
+
+# -----------------------------------------------------------------------------
 #  Agent Integration
 # -----------------------------------------------------------------------------
 start_agent() {
@@ -1740,9 +2195,9 @@ start_agent() {
 
     # Send agent launch command
     if [[ -n "$task" ]]; then
-        tmux send-keys -t "=$session_name:main.1" "$WT_BIN_DIR/wt-agent-launch \"$task\"" Enter
+        tmux send-keys -t "$(agent_pane_target "$session_name")" "$WT_BIN_DIR/wt-agent-launch \"$task\"" Enter
     else
-        tmux send-keys -t "=$session_name:main.1" "$WT_BIN_DIR/wt-agent-launch" Enter
+        tmux send-keys -t "$(agent_pane_target "$session_name")" "$WT_BIN_DIR/wt-agent-launch" Enter
     fi
     set_status "$session_name" "working" "${task:-Interactive session}"
 }
@@ -1781,6 +2236,15 @@ Agent Control:
   agent <session> [task]  Start agent on a task in a session
   claude <session> [task] Alias for 'agent'
 
+Managed Shells (inside a worktree session):
+  shell new [name]                 Create and open an interactive shell
+  shell run <name> -- <command>    Run a persistent command without switching
+  shell ls [--json]                List managed shells
+  shell open|read|send|stop|rm     Control a shell by stable name
+  shell wait <name> ...            Wait for output, quiet, or process exit
+  shell watch <name> ...           Queue events from matching output/failures
+  shell events [--json|--consume]  Read queued shell events
+
 Status:
   status <session>                        Get session status
   set-status <session> <status> [msg]     Set session status
@@ -1794,6 +2258,7 @@ Options for 'new':
   --force               Skip confirmation prompts
 
 Tmux Keybindings:
+  prefix + c    Create and open a managed shell (in wt worktree sessions)
   prefix + w    Action menu (new, switch, delete, PR, master)
   prefix + W    Session switcher (fzf popup, most-recently-active first)
   prefix + M    Jump to master session
@@ -1961,6 +2426,9 @@ main() {
             ;;
         agent|claude)
             start_agent "${1:-}" "${2:-}"
+            ;;
+        shell)
+            shell_command "$@"
             ;;
         status)
             get_status "${1:-}"
