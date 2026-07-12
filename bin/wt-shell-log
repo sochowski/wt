@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Append a managed tmux shell's output to its private persistent log.
+set -euo pipefail
+
+log_file="${1:?usage: wt-shell-log LOG_FILE}"
+umask 077
+mkdir -p "$(dirname "$log_file")"
+touch "$log_file"
+chmod 600 "$log_file" 2>/dev/null || true
+cat >> "$log_file"

@@ -249,23 +249,31 @@ test_create_worktree() {
         return
     fi
 
-    # Check session has 3 windows
+    # Worktree sessions start with only the fixed editor + agent window. Shells
+    # are created on demand through `wt shell` / prefix+c.
     local win_count
     win_count=$(tmux list-windows -t "$TEST_SESSION" 2>/dev/null | wc -l | tr -d ' ')
-    if [[ "$win_count" -eq 2 ]]; then
-        pass "session has 2 windows"
+    if [[ "$win_count" -eq 1 ]]; then
+        pass "session starts with only the main window"
     else
-        fail "session has $win_count windows (expected 2)"
+        fail "session has $win_count windows (expected 1)"
     fi
 
     # Check window names
     local windows
     windows=$(tmux list-windows -t "$TEST_SESSION" -F "#{window_name}" 2>/dev/null | tr '\n' ',')
-    if echo "$windows" | grep -q "main" && echo "$windows" | grep -q "shell"; then
-        pass "windows named correctly: main, shell"
+    if [[ "$windows" == "main," ]]; then
+        pass "only main window is created by default"
     else
-        fail "unexpected window names: $windows (expected main, shell)"
+        fail "unexpected default windows: $windows (expected main)"
     fi
+
+    local editor_role agent_role
+    editor_role=$(tmux show-option -pqv -t "$TEST_SESSION:main.0" @wt-pane-role 2>/dev/null)
+    agent_role=$(tmux show-option -pqv -t "$TEST_SESSION:main.1" @wt-pane-role 2>/dev/null)
+    [[ "$editor_role" == editor && "$agent_role" == agent ]] \
+        && pass "primary panes have semantic editor/agent roles" \
+        || fail "primary pane roles missing" "editor=$editor_role agent=$agent_role"
 
     # --- Focus behavior: `wt new` creates in the BACKGROUND by default ---------
     # (Regression guard: it used to switch-client and yank the current view.)
@@ -287,6 +295,85 @@ test_create_worktree() {
     fi
     tmux kill-session -t "test-wt-repo-switch-branch" 2>/dev/null || true
     git -C "$TEST_REPO" worktree remove "$WT_BASE_DIR/test-wt-repo/switch-branch" --force 2>/dev/null || true
+}
+
+test_managed_shells() {
+    section "Managed Shells"
+
+    local wt=("$WT_BIN_DIR/wt" shell --session "$TEST_SESSION")
+    local wt_path="$WT_BASE_DIR/test-wt-repo/test-branch"
+
+    local shell_new_output
+    if shell_new_output=$("${wt[@]}" new scratch --detach 2>&1); then
+        pass "shell new creates a detached managed shell"
+    else
+        fail "shell new failed" "$shell_new_output"
+        return
+    fi
+
+    local json cwd managed role
+    json=$("${wt[@]}" ls --json 2>/dev/null)
+    if jq -e '.[] | select(.name == "scratch" and .kind == "interactive")' <<< "$json" >/dev/null; then
+        pass "shell ls --json exposes stable metadata"
+    else
+        fail "scratch missing from shell list" "$json"
+    fi
+    cwd=$(tmux display-message -p -t "$TEST_SESSION:scratch" '#{pane_current_path}' 2>/dev/null)
+    managed=$(tmux show-option -wqv -t "$TEST_SESSION:scratch" @wt-managed-shell 2>/dev/null)
+    role=$(tmux show-option -pqv -t "$TEST_SESSION:scratch" @wt-pane-role 2>/dev/null)
+    [[ "$cwd" == "$wt_path" && "$managed" == 1 && "$role" == shell ]] \
+        && pass "managed shell uses worktree cwd and tmux metadata" \
+        || fail "managed shell metadata/cwd wrong" "cwd=$cwd managed=$managed role=$role"
+
+    "${wt[@]}" send scratch --text 'printf "shell-send-ok\\n"' >/dev/null
+    "${wt[@]}" send scratch --key Enter >/dev/null
+    if "${wt[@]}" wait scratch --match shell-send-ok --timeout 5 >/dev/null 2>&1; then
+        pass "shell send and wait --match work"
+    else
+        fail "shell send/wait did not observe output" "$("${wt[@]}" read scratch --lines 30 2>&1)"
+    fi
+
+    local first second
+    first=$("${wt[@]}" read scratch --new 2>/dev/null)
+    second=$("${wt[@]}" read scratch --new 2>/dev/null)
+    [[ "$first" == *shell-send-ok* && -z "$second" ]] \
+        && pass "persistent log supports unread cursor" \
+        || fail "unread cursor did not advance" "first=$first second=$second"
+
+    "${wt[@]}" run job -- sh -c 'printf "job-ready\\n"; sleep 0.2; exit 7' >/dev/null 2>&1
+    if "${wt[@]}" wait job --match job-ready --timeout 5 >/dev/null 2>&1; then
+        pass "shell run output is persistently readable"
+    else
+        fail "shell run output missing" "$("${wt[@]}" read job --lines 30 2>&1)"
+    fi
+    local rc=0
+    "${wt[@]}" wait job --exit --timeout 5 >/dev/null 2>&1 || rc=$?
+    [[ "$rc" -eq 7 ]] && pass "shell wait --exit returns command status" || fail "wait --exit status = $rc (expected 7)"
+
+    "${wt[@]}" watch scratch --on error >/dev/null 2>&1
+    "${wt[@]}" send scratch --text 'printf "Error: watched failure\\n"' >/dev/null
+    "${wt[@]}" send scratch --key Enter >/dev/null
+    local events="" i
+    for i in $(seq 1 30); do
+        events=$("${wt[@]}" events --json 2>/dev/null)
+        jq -e '.[] | select(.shell == "scratch" and .kind == "output_match")' <<< "$events" >/dev/null && break
+        sleep 0.2
+    done
+    if jq -e '.[] | select(.excerpt | contains("watched failure"))' <<< "$events" >/dev/null 2>&1; then
+        pass "shell watch queues a durable event"
+    else
+        fail "watch event not queued" "$events"
+    fi
+    "${wt[@]}" events --consume >/dev/null 2>&1
+    [[ "$("${wt[@]}" events --json 2>/dev/null)" == "[]" ]] \
+        && pass "shell events --consume clears the queue" \
+        || fail "event queue was not consumed"
+
+    "${wt[@]}" rm scratch >/dev/null 2>&1
+    "${wt[@]}" rm job >/dev/null 2>&1
+    [[ "$("${wt[@]}" ls --json 2>/dev/null)" == "[]" ]] \
+        && pass "shell rm cleans up managed windows" \
+        || fail "managed shells remain after rm"
 }
 
 test_status_file() {
@@ -754,6 +841,12 @@ test_choose_tree_format() {
         fail "wt switch popup binding not found in config"
     fi
 
+    if grep -q 'bind c if-shell' "$conf" && grep -q 'wt shell --session' "$conf"; then
+        pass "prefix+c conditionally creates a managed shell"
+    else
+        fail "conditional managed-shell binding missing"
+    fi
+
     # Verify @wt-icon is readable in format context
     local icon
     icon=$(tmux display-message -t "$TEST_SESSION" -p '#{@wt-icon}' 2>/dev/null)
@@ -847,11 +940,11 @@ test_adopt_existing() {
 
         # Check the session's working directory matches the repo
         local pane_path
-        pane_path=$(tmux display-message -t "$adopt_session:shell" -p '#{pane_current_path}' 2>/dev/null)
+        pane_path=$(tmux display-message -t "$adopt_session:main" -p '#{pane_current_path}' 2>/dev/null)
         if [[ "$pane_path" == "$TEST_REPO" ]]; then
-            pass "shell window cwd matches repo: $pane_path"
+            pass "main window cwd matches repo: $pane_path"
         else
-            fail "shell window cwd is '$pane_path' (expected '$TEST_REPO')"
+            fail "main window cwd is '$pane_path' (expected '$TEST_REPO')"
         fi
     else
         fail "session not created"
@@ -1222,6 +1315,7 @@ main() {
     test_install_script
     test_find_git_repos
     test_create_worktree
+    test_managed_shells
     test_status_file
     test_status_messages_are_data
     test_tmux_options
