@@ -158,6 +158,35 @@ echo "Configuring agent hooks..."
 "$SCRIPT_DIR/bin/wt-state" agents install-hooks --template-dir "$SCRIPT_DIR/config"
 
 # -----------------------------------------------------------------------------
+#  Install Agent Skill
+# -----------------------------------------------------------------------------
+# One open-standard skill is shared by every harness. Codex and OpenCode scan
+# ~/.agents/skills; Claude and Gemini use their own user-level skill roots.
+# Symlink instead of copying so updates in this checkout apply immediately.
+echo "Installing wt-shells agent skill..."
+skill_source="$SCRIPT_DIR/config/skills/wt-shells"
+skill_targets=(
+    "$HOME/.agents/skills/wt-shells"
+    "$HOME/.claude/skills/wt-shells"
+    "$HOME/.gemini/skills/wt-shells"
+)
+for target in "${skill_targets[@]}"; do
+    mkdir -p "$(dirname "$target")"
+    if [[ -L "$target" ]]; then
+        if [[ "$(readlink -f "$target")" != "$(readlink -f "$skill_source")" ]]; then
+            echo "  Warning: $target is a symlink to another skill; leaving it unchanged"
+            continue
+        fi
+        rm "$target"
+    elif [[ -e "$target" ]]; then
+        echo "  Warning: $target already exists; leaving it unchanged"
+        continue
+    fi
+    ln -s "$skill_source" "$target"
+    echo "  wt-shells -> $target"
+done
+
+# -----------------------------------------------------------------------------
 #  Check PATH
 # -----------------------------------------------------------------------------
 echo ""
@@ -210,6 +239,7 @@ echo "  wt ls           # List worktrees"
 echo "  wt new          # Create new worktree (interactive)"
 echo "  wt pick         # Switch between worktrees"
 echo "  wt master       # Create master orchestrator session"
+echo "  \$wt-shells      # Teach an agent to manage persistent shells"
 echo ""
 echo "Tmux keybindings:"
 echo "  prefix + c      # Create a managed shell (inside worktree sessions)"

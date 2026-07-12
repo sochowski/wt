@@ -1783,13 +1783,65 @@ valid_shell_name() {
 
 shell_session_dir() { printf '%s/%s\n' "$WT_SHELL_DIR" "$1"; }
 shell_log_path() { printf '%s/logs/%s.log\n' "$(shell_session_dir "$1")" "$2"; }
+shell_input_path() { printf '%s/inputs/%s.txt\n' "$(shell_session_dir "$1")" "$2"; }
 
 shell_prepare_dirs() {
     local root
     root=$(shell_session_dir "$1")
     umask 077
-    mkdir -p "$root/logs" "$root/cursors" "$root/watches"
-    chmod 700 "$root" "$root/logs" "$root/cursors" "$root/watches" 2>/dev/null || true
+    mkdir -p "$root/logs" "$root/inputs" "$root/cursors" "$root/watches"
+    chmod 700 "$root" "$root/logs" "$root/inputs" "$root/cursors" "$root/watches" 2>/dev/null || true
+}
+
+# Remember text wt sent to a shell so normalized reads and watches can omit the
+# terminal's echoed command line. Direct human typing remains visible; the
+# agent-facing CLI path is deterministic and free of false-positive matches.
+shell_record_input() {
+    local session_name="$1" shell_name="$2" value="$3" input line
+    shell_prepare_dirs "$session_name"
+    input=$(shell_input_path "$session_name" "$shell_name")
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ -n "$line" ]] && printf '%s\n' "$line" >> "$input"
+    done <<< "$value"
+    chmod 600 "$input" 2>/dev/null || true
+}
+
+# Strip CSI colour/mode sequences, OSC shell-integration/title payloads, and
+# carriage returns. The raw log stays intact for `read --raw`; all automation
+# consumes this stable plain-text projection.
+strip_terminal_control() {
+    awk '
+        BEGIN {
+            esc = sprintf("%c", 27)
+            bel = sprintf("%c", 7)
+            csi = esc "\\[[0-?]*[ -/]*[@-~]"
+            osc = esc "\\][^" bel esc "]*(" bel "|" esc "\\\\)"
+        }
+        {
+            gsub("\r", "")
+            while (match($0, osc))
+                $0 = substr($0, 1, RSTART - 1) substr($0, RSTART + RLENGTH)
+            gsub(csi, "")
+            print
+        }
+    '
+}
+
+shell_clean_output() {
+    local session_name="$1" shell_name="$2" input
+    input=$(shell_input_path "$session_name" "$shell_name")
+    strip_terminal_control | awk -v input_file="$input" '
+        BEGIN {
+            while ((getline line < input_file) > 0)
+                if (length(line)) sent[++count] = line
+            close(input_file)
+        }
+        {
+            for (i = 1; i <= count; i++)
+                if (index($0, sent[i])) next
+            print
+        }
+    '
 }
 
 shell_window_record() {
@@ -1820,6 +1872,7 @@ setup_shell_logging() {
     shell_prepare_dirs "$session_name"
     log=$(shell_log_path "$session_name" "$shell_name")
     : > "$log"
+    : > "$(shell_input_path "$session_name" "$shell_name")"
     chmod 600 "$log" 2>/dev/null || true
     printf -v cmd '%q %q' "$WT_BIN_DIR/wt-shell-log" "$log"
     tmux pipe-pane -o -t "$pane_id" "$cmd"
@@ -1889,6 +1942,7 @@ shell_run() {
     tmux set-option -wqt "$window_id" @wt-shell-command "$cmd"
     # The pane starts as a normal interactive shell so pipe-pane can be attached
     # before the command emits output. exec preserves the real exit status.
+    shell_record_input "$session_name" "$name" "exec $cmd"
     tmux send-keys -t "$pane_id" -l "exec $cmd"
     tmux send-keys -t "$pane_id" Enter
     echo "Started '$name': $cmd"
@@ -1925,7 +1979,7 @@ shell_open() {
 }
 
 shell_read() {
-    local session_name name="${1:-}" lines=100 mode=last advance=false log cursor size start
+    local session_name name="${1:-}" lines=100 mode=last advance=false raw=false log cursor size start
     session_name=$(current_wt_session) || return
     [[ -n "$name" ]] || { echo "Usage: wt shell read NAME [--lines N|--new|--peek]" >&2; return 2; }
     shell_target "$session_name" "$name" >/dev/null || return
@@ -1935,13 +1989,18 @@ shell_read() {
             --lines|--last) lines="$2"; shift 2 ;;
             --new) mode=new; advance=true; shift ;;
             --peek) mode=new; advance=false; shift ;;
+            --raw) raw=true; shift ;;
             *) echo "Unknown wt shell read option: $1" >&2; return 2 ;;
         esac
     done
     log=$(shell_log_path "$session_name" "$name")
     [[ -f "$log" ]] || return 0
     if [[ "$mode" == last ]]; then
-        tail -n "$lines" "$log"
+        if [[ "$raw" == true ]]; then
+            tail -n "$lines" "$log"
+        else
+            tail -n "$lines" "$log" | shell_clean_output "$session_name" "$name"
+        fi
         return
     fi
     cursor="$(shell_session_dir "$session_name")/cursors/$name.agent"
@@ -1949,7 +2008,13 @@ shell_read() {
     [[ "$start" =~ ^[0-9]+$ ]] || start=0
     size=$(wc -c < "$log" | tr -d ' ')
     (( start > size )) && start=0
-    (( start < size )) && tail -c "+$((start + 1))" "$log"
+    if (( start < size )); then
+        if [[ "$raw" == true ]]; then
+            tail -c "+$((start + 1))" "$log"
+        else
+            tail -c "+$((start + 1))" "$log" | shell_clean_output "$session_name" "$name"
+        fi
+    fi
     if [[ "$advance" == true ]]; then printf '%s\n' "$size" > "$cursor"; fi
 }
 
@@ -1968,6 +2033,7 @@ shell_send() {
     if [[ "$mode" == key ]]; then
         tmux send-keys -t "$pane_id" "$value"
     else
+        shell_record_input "$session_name" "$name" "$value"
         buffer="wt-shell-${session_name//[^A-Za-z0-9]/_}-$$"
         tmux set-buffer -b "$buffer" -- "$value"
         tmux paste-buffer -d -b "$buffer" -t "$pane_id"
@@ -1989,7 +2055,7 @@ shell_remove() {
     shell_unwatch "$name" >/dev/null 2>&1 || true
     tmux kill-window -t "$target"
     root=$(shell_session_dir "$session_name")
-    rm -f "$root/logs/$name.log" "$root/cursors/$name.agent"
+    rm -f "$root/logs/$name.log" "$root/inputs/$name.txt" "$root/cursors/$name.agent"
 }
 
 shell_pick() {
@@ -2012,7 +2078,7 @@ parse_duration_seconds() {
 }
 
 shell_wait() {
-    local session_name name="${1:-}" mode="" pattern="" timeout=30 quiet_for=2 start now last_change size last_size pane_id dead status log
+    local session_name name="${1:-}" mode="" pattern="" timeout=30 quiet_for=2 start now last_change size last_size pane_id dead status log matches
     session_name=$(current_wt_session) || return
     [[ -n "$name" ]] || { echo "Usage: wt shell wait NAME (--match PATTERN|--exit|--quiet [SECONDS])" >&2; return 2; }
     shift
@@ -2034,7 +2100,14 @@ shell_wait() {
         now=$(date +%s)
         case "$mode" in
             match)
-                if [[ -f "$log" ]] && grep -E -q -- "$pattern" "$log"; then grep -E -- "$pattern" "$log" | tail -n 20; return 0; fi ;;
+                matches=""
+                if [[ -f "$log" ]]; then
+                    matches=$(shell_clean_output "$session_name" "$name" < "$log" | grep -E -- "$pattern" | tail -n 20 || true)
+                fi
+                if [[ -n "$matches" ]]; then
+                    printf '%s\n' "$matches"
+                    return 0
+                fi ;;
             exit)
                 IFS=$'\037' read -r dead status < <(tmux display-message -p -t "$pane_id" $'#{pane_dead}\037#{pane_dead_status}')
                 if [[ "$dead" == 1 ]]; then return "${status:-0}"; fi ;;
@@ -2080,19 +2153,44 @@ shell_events() {
 }
 
 shell_watch_loop() {
-    local session_name="$1" name="$2" mode="$3" pattern="$4" marker="$5" log cursor offset size chunk pane_id dead status excerpt
-    log=$(shell_log_path "$session_name" "$name"); cursor="$marker.cursor"
-    offset=$(wc -c < "$log" 2>/dev/null || echo 0); printf '%s\n' "$offset" > "$cursor"
-    while [[ -f "$marker" ]] && tmux has-session -t "=$session_name" 2>/dev/null; do
+    local session_name="$1" name="$2" mode="$3" pattern="$4" marker="$5" token="$6"
+    local log cursor pid_file ready_file offset size chunk pane_id dead status excerpt marker_token
+    local last_excerpt="" last_event_at=0 now
+    log=$(shell_log_path "$session_name" "$name")
+    cursor="$marker.$token.cursor"; pid_file="$marker.$token.pid"; ready_file="$marker.$token.ready"
+
+    watcher_cleanup() {
+        local current_token=""
+        current_token=$(jq -r '.token // empty' "$marker" 2>/dev/null || true)
+        [[ "$current_token" == "$token" ]] && rm -f "$marker"
+        rm -f "$cursor" "$pid_file" "$ready_file"
+    }
+    trap watcher_cleanup EXIT
+
+    printf '%s\n' "$BASHPID" > "$pid_file"
+    offset=$(wc -c < "$log" 2>/dev/null || echo 0)
+    printf '%s\n' "$offset" > "$cursor"
+    : > "$ready_file"
+
+    while tmux has-session -t "=$session_name" 2>/dev/null; do
+        marker_token=$(jq -r '.token // empty' "$marker" 2>/dev/null || true)
+        [[ "$marker_token" == "$token" ]] || break
         pane_id=$(shell_window_record "$session_name" "$name" | awk -F $'\037' '{print $7}')
         [[ -n "$pane_id" ]] || break
         size=$(wc -c < "$log" 2>/dev/null || echo 0)
         if (( size > offset )); then
-            chunk=$(tail -c "+$((offset + 1))" "$log"); offset=$size; printf '%s\n' "$offset" > "$cursor"
-            if [[ "$mode" != exit-failure ]] && grep -E -q -- "$pattern" <<< "$chunk"; then
-                excerpt=$(grep -E -- "$pattern" <<< "$chunk" | tail -n 20)
-                shell_event_add "$session_name" "$name" output_match "$excerpt"
-                sleep 2
+            chunk=$(tail -c "+$((offset + 1))" "$log" | shell_clean_output "$session_name" "$name")
+            offset=$size; printf '%s\n' "$offset" > "$cursor"
+            if [[ "$mode" != exit-failure ]]; then
+                excerpt=$(grep -E -- "$pattern" <<< "$chunk" | tail -n 20 || true)
+                if [[ -n "$excerpt" ]]; then
+                    now=$(date +%s)
+                    if [[ "$excerpt" != "$last_excerpt" || $((now - last_event_at)) -ge 5 ]]; then
+                        shell_event_add "$session_name" "$name" output_match "$excerpt"
+                        last_excerpt="$excerpt"
+                        last_event_at=$now
+                    fi
+                fi
             fi
         fi
         if [[ "$mode" == exit-failure ]]; then
@@ -2104,11 +2202,10 @@ shell_watch_loop() {
         fi
         sleep 0.5
     done
-    rm -f "$marker" "$cursor"
 }
 
 shell_watch() {
-    local session_name name="${1:-}" mode=match pattern="" marker pid
+    local session_name name="${1:-}" mode=match pattern="" marker token cmd ready_file i
     session_name=$(current_wt_session) || return
     [[ -n "$name" ]] || { echo "Usage: wt shell watch NAME (--match PATTERN|--on error|exit-failure)" >&2; return 2; }
     shell_target "$session_name" "$name" >/dev/null || return
@@ -2130,24 +2227,38 @@ shell_watch() {
     shell_prepare_dirs "$session_name"
     marker="$(shell_session_dir "$session_name")/watches/$name.watch"
     shell_unwatch "$name" >/dev/null 2>&1 || true
-    jq -nc --arg mode "$mode" --arg pattern "$pattern" '{mode:$mode,pattern:$pattern}' > "$marker"
-    nohup "$WT_BIN_DIR/wt" shell _watch-loop "$session_name" "$name" "$mode" "$pattern" "$marker" >/dev/null 2>&1 &
-    pid=$!
-    jq --argjson pid "$pid" '. + {pid:$pid}' "$marker" > "$marker.tmp" && mv "$marker.tmp" "$marker"
+    token="$(date +%s)-$$-$RANDOM"
+    jq -nc --arg mode "$mode" --arg pattern "$pattern" --arg token "$token" \
+        '{mode:$mode,pattern:$pattern,token:$token}' > "$marker"
+    printf -v cmd '%q %q %q %q %q %q %q %q %q' \
+        "$WT_BIN_DIR/wt" shell _watch-loop "$session_name" "$name" "$mode" "$pattern" "$marker" "$token"
+    # The tmux server owns the watcher, so agent harnesses may tear down their
+    # tool subprocess without killing the long-lived monitor.
+    tmux run-shell -b "$cmd"
+    ready_file="$marker.$token.ready"
+    for i in $(seq 1 40); do [[ -f "$ready_file" ]] && break; sleep 0.05; done
+    if [[ ! -f "$ready_file" ]]; then
+        rm -f "$marker" "$marker.$token."*
+        echo "Watcher failed to start for '$name'" >&2
+        return 1
+    fi
     echo "Watching '$name' ($mode)"
 }
 
 shell_unwatch() {
-    local session_name name="${1:-}" marker pid i
+    local session_name name="${1:-}" marker token pid_file pid i
     session_name=$(current_wt_session) || return
     marker="$(shell_session_dir "$session_name")/watches/$name.watch"
     [[ -f "$marker" ]] || return 0
-    pid=$(jq -r '.pid // empty' "$marker" 2>/dev/null || true)
+    token=$(jq -r '.token // empty' "$marker" 2>/dev/null || true)
+    pid_file="$marker.$token.pid"
+    pid=$(cat "$pid_file" 2>/dev/null || true)
+    rm -f "$marker"
     [[ -n "$pid" ]] && kill "$pid" 2>/dev/null || true
     if [[ -n "$pid" ]]; then
         for i in $(seq 1 20); do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done
     fi
-    rm -f "$marker" "$marker.cursor"
+    rm -f "$marker.$token.cursor" "$pid_file" "$marker.$token.ready"
     echo "Stopped watching '$name'"
 }
 

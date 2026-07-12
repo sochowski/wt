@@ -1,0 +1,4 @@
+interface:
+  display_name: "WT Managed Shells"
+  short_description: "Control persistent wt-managed tmux shells"
+  default_prompt: "Use $wt-shells to run and monitor a persistent development server."
