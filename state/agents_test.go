@@ -153,6 +153,46 @@ func TestInstallTOMLManagedBlockReplace(t *testing.T) {
 	}
 }
 
+func TestInstallTOMLManagedTopLevelKeyBeforeTables(t *testing.T) {
+	dir := t.TempDir()
+	tmpl := filepath.Join(dir, "notify.toml")
+	writeFile(t, tmpl, "notify = \"$HOME/bin/wt-hook stop\"\n")
+	target := filepath.Join(dir, "config.toml")
+	writeFile(t, target, "model = \"gpt\"\n\n[features]\njs_repl = false\n")
+
+	if err := installTOMLManaged(tmpl, target, 1); err != nil {
+		t.Fatal(err)
+	}
+
+	got := readFile(t, target)
+	if !contains(got, "notify = \"$HOME/bin/wt-hook stop\"") {
+		t.Fatalf("managed notify missing: %q", got)
+	}
+	if strings.Index(got, tomlBlockBegin) > strings.Index(got, "[features]") {
+		t.Fatalf("managed top-level block was inserted inside [features]: %q", got)
+	}
+}
+
+func TestInstallTOMLManagedTopLevelKeyConflictSkipsHook(t *testing.T) {
+	dir := t.TempDir()
+	tmpl := filepath.Join(dir, "notify.toml")
+	writeFile(t, tmpl, "notify = \"$HOME/bin/wt-hook stop\"\n")
+	target := filepath.Join(dir, "config.toml")
+	writeFile(t, target, "notify = [\"/usr/bin/true\"]\n\n[features]\njs_repl = false\n")
+
+	if err := installTOMLManaged(tmpl, target, 1); err != nil {
+		t.Fatal(err)
+	}
+
+	got := readFile(t, target)
+	if contains(got, "wt-hook stop") {
+		t.Fatalf("conflicting user notify should not be duplicated: %q", got)
+	}
+	if !contains(got, tomlBlockBegin) || strings.Index(got, tomlBlockBegin) > strings.Index(got, "[features]") {
+		t.Fatalf("empty managed block should remain at top level: %q", got)
+	}
+}
+
 func TestInstallSymlinkPluginReplacesAndBacksUp(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "plugin.js")

@@ -239,8 +239,9 @@ func installTOMLManaged(src, target string, version int) error {
 		return err
 	}
 
+	template := string(body)
 	block := fmt.Sprintf("%s (v%d) — managed by wt, do not edit\n%s%s\n",
-		tomlBlockBegin, version, ensureTrailingNL(string(body)), tomlBlockEnd)
+		tomlBlockBegin, version, ensureTrailingNL(template), tomlBlockEnd)
 
 	existing, err := os.ReadFile(target)
 	if os.IsNotExist(err) {
@@ -258,9 +259,23 @@ func installTOMLManaged(src, target string, version int) error {
 			if end < len(s) && s[end] == '\n' {
 				end++
 			}
-			replaced := s[:begin] + block + s[end:]
-			return os.WriteFile(target, []byte(replaced), 0o644)
+			base := s[:begin] + s[end:]
+			if topLevelTemplateConflicts(template, base) {
+				block = fmt.Sprintf("%s (v%d) — managed by wt, do not edit\n%s\n", tomlBlockBegin, version, tomlBlockEnd)
+			}
+			if templateHasTopLevelKeys(template) {
+				return os.WriteFile(target, []byte(insertBeforeFirstTOMLTable(base, block)), 0o644)
+			}
+			return os.WriteFile(target, []byte(s[:begin]+block+s[end:]), 0o644)
 		}
+	}
+
+	if topLevelTemplateConflicts(template, s) {
+		block = fmt.Sprintf("%s (v%d) — managed by wt, do not edit\n%s\n", tomlBlockBegin, version, tomlBlockEnd)
+	}
+
+	if templateHasTopLevelKeys(template) {
+		return os.WriteFile(target, []byte(insertBeforeFirstTOMLTable(s, block)), 0o644)
 	}
 
 	// No existing block: append, separated by a blank line.
@@ -269,6 +284,76 @@ func installTOMLManaged(src, target string, version int) error {
 		out += "\n"
 	}
 	return os.WriteFile(target, []byte(out+block), 0o644)
+}
+
+func templateHasTopLevelKeys(s string) bool {
+	for _, line := range strings.Split(s, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		return !strings.HasPrefix(trimmed, "[") && strings.Contains(trimmed, "=")
+	}
+	return false
+}
+
+func topLevelTemplateConflicts(template, existing string) bool {
+	keys := topLevelKeys(template)
+	if len(keys) == 0 {
+		return false
+	}
+	for key := range topLevelKeys(existing) {
+		if keys[key] {
+			return true
+		}
+	}
+	return false
+}
+
+func topLevelKeys(s string) map[string]bool {
+	keys := map[string]bool{}
+	inTable := false
+	for _, line := range strings.Split(s, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "[") {
+			inTable = true
+			continue
+		}
+		if inTable || !strings.Contains(trimmed, "=") {
+			continue
+		}
+		key := strings.TrimSpace(strings.SplitN(trimmed, "=", 2)[0])
+		keys[key] = true
+	}
+	return keys
+}
+
+func insertBeforeFirstTOMLTable(existing, block string) string {
+	lines := strings.SplitAfter(existing, "\n")
+	offset := 0
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "[") {
+			break
+		}
+		offset += len(line)
+	}
+	prefix := existing[:offset]
+	suffix := existing[offset:]
+	if prefix != "" && !strings.HasSuffix(prefix, "\n\n") {
+		prefix = ensureTrailingNL(prefix) + "\n"
+	}
+	return prefix + block + ensureLeadingNL(suffix)
+}
+
+func ensureLeadingNL(s string) string {
+	if s == "" || strings.HasPrefix(s, "\n") {
+		return s
+	}
+	return "\n" + s
 }
 
 func ensureTrailingNL(s string) string {

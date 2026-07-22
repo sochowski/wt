@@ -1271,16 +1271,15 @@ pick_list() {
     # load_session's fields exactly (agent/repo/branch/message and the stored
     # wt_path, which load_session overwrites the passed value with).
     local -A a_have a_agent a_repo a_branch a_message a_wtpath
-    local _n _ag _rp _br _msg _wp store_rows
-    store_rows=$("$WT_STATE" list 2>/dev/null \
-        | jq -r '.[] | [.name,.agent,.repo,.branch,.message,.wt_path] | @tsv' \
-        | tr '\t' '\037' || true)
+    local _n _ag _rp _br _msg _wp
     while IFS="$SEP" read -r _n _ag _rp _br _msg _wp; do
         [[ -n "$_n" ]] || continue
         a_have["$_n"]=1
         a_agent["$_n"]="$_ag"; a_repo["$_n"]="$_rp"; a_branch["$_n"]="$_br"
         a_message["$_n"]="$_msg"; a_wtpath["$_n"]="$_wp"
-    done <<<"$store_rows"
+    done < <("$WT_STATE" list 2>/dev/null \
+        | jq -r '.[] | [.name,.agent,.repo,.branch,.message,.wt_path] | @tsv' \
+        | tr '\t' '\037' || true)
 
     local session_name wt_path sess_status icon label agent repo branch message
     while IFS=: read -r session_name wt_path sess_status; do
