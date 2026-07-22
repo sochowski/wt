@@ -798,6 +798,15 @@ create_worktree() {
 
     if tmux has-session -t "=$session_name" 2>/dev/null; then
         echo "Session already exists, attaching..."
+        status=idle
+        message=Ready
+        repo=$repo_name
+        branch=$branch
+        wt_path=$wt_path
+        pr=
+        agent=$agent
+        opencode_config=$(tmux show-option -qv -t "$session_name" @wt-opencode-config 2>/dev/null || true)
+        save_session "$session_name"
     else
         local opencode_config=""
         opencode_config=$(agent_session_setup "$wt_path" "$agent" "default" "$session_name" || true)
@@ -823,7 +832,11 @@ create_worktree() {
         status=idle
         message=Ready
         repo=$repo_name
+        branch=$branch
+        wt_path=$wt_path
         pr=
+        agent=$agent
+        opencode_config=$opencode_config
         save_session "$session_name"
 
         # Set tmux session options (status + metadata)
@@ -1287,11 +1300,19 @@ pick_list() {
             # Store row present: load_session would set these (incl. wt_path).
             agent="${a_agent[$session_name]}"; repo="${a_repo[$session_name]}"
             branch="${a_branch[$session_name]}"; message="${a_message[$session_name]}"
-            wt_path="${a_wtpath[$session_name]}"
+            [[ -n "${a_wtpath[$session_name]}" ]] && wt_path="${a_wtpath[$session_name]}"
         else
             # No row: load_session returns 1, leaving fields empty and the
             # list_worktrees-supplied wt_path untouched.
             agent=""; repo=""; branch=""; message=""
+        fi
+        if [[ -z "$repo" && -n "$wt_path" ]]; then
+            local rel_path="${wt_path#$WT_BASE_DIR/}"
+            repo="${rel_path%%/*}"
+        fi
+        if [[ -z "$branch" ]]; then
+            branch=$(git -C "$wt_path" branch --show-current 2>/dev/null || true)
+            [[ -n "$branch" ]] || branch="${session_name#${repo}-}"
         fi
         get_status_icon "${sess_status:-unknown}" icon
         label="${agent:-$WT_DEFAULT_AGENT}"
