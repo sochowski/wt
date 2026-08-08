@@ -748,13 +748,6 @@ create_worktree() {
     local wt_path="$WT_BASE_DIR/$repo_name/$safe_branch"
     local session_name="${repo_name}-${safe_branch}"
 
-    # Check if worktree already exists on disk
-    if [[ -d "$wt_path" ]] && tmux has-session -t "=$session_name" 2>/dev/null; then
-        echo "Worktree already exists at $wt_path"
-        [[ "$switch_after" == "true" ]] && switch_to "$session_name"
-        return
-    fi
-
     # Resolve worktree path (create if needed, adopt if exists elsewhere)
     if [[ ! -d "$wt_path" ]]; then
         echo "Creating worktree for $repo_name @ $branch..."
@@ -806,6 +799,13 @@ create_worktree() {
 
     if tmux has-session -t "=$session_name" 2>/dev/null; then
         echo "Session already exists, attaching..."
+        opencode_config=$(tmux show-option -qv -t "$session_name" @wt-opencode-config 2>/dev/null || true)
+        local needs_agent_launch=false
+        if [[ -z "$(pane_by_role "$session_name" agent)" ]]; then
+            tmux split-window -h -t "=$session_name:main" -c "$wt_path"
+            mark_primary_panes "$session_name"
+            needs_agent_launch=true
+        fi
         status=idle
         message=Ready
         repo=$repo_name
@@ -813,8 +813,20 @@ create_worktree() {
         wt_path=$wt_path
         pr=
         agent=$agent
-        opencode_config=$(tmux show-option -qv -t "$session_name" @wt-opencode-config 2>/dev/null || true)
         save_session "$session_name"
+        tmux set-option -qt "$session_name" @wt-status  "idle"
+        tmux set-option -qt "$session_name" @wt-icon    "○"
+        tmux set-option -qt "$session_name" @wt-message "Ready"
+        tmux set-option -qt "$session_name" @wt-repo    "$repo_name"
+        tmux set-option -qt "$session_name" @wt-branch  "$branch"
+        tmux set-option -qt "$session_name" @wt-wt-path "$wt_path"
+        tmux set-option -qt "$session_name" @wt-pr      ""
+        tmux set-option -qt "$session_name" @wt-master  "0"
+        tmux set-option -qt "$session_name" @wt-agent   "$agent"
+        tmux set-option -qt "$session_name" @wt-opencode-config "$opencode_config"
+        if [[ "$needs_agent_launch" == "true" ]]; then
+            tmux send-keys -t "$(agent_pane_target "$session_name")" "$WT_BIN_DIR/wt-agent-launch" Enter
+        fi
     else
         local opencode_config=""
         opencode_config=$(agent_session_setup "$wt_path" "$agent" "default" "$session_name" || true)
@@ -1229,6 +1241,7 @@ interactive_new() {
     local repo_path="${1:-}"
     local branch="${2:-}"
     local switch_after="${3:-false}"
+    local agent="${4:-}"
 
     log "interactive_new start repo_path='$repo_path' branch='$branch'"
 
@@ -1276,8 +1289,9 @@ interactive_new() {
     log "branch=$branch repo_path=$repo_path base_branch=$base_branch"
 
     # Step 4: Pick agent (fzf)
-    local agent
-    agent=$(pick_agent) || { echo "Cancelled."; return 1; }
+    if [[ -z "$agent" ]]; then
+        agent=$(pick_agent) || { echo "Cancelled."; return 1; }
+    fi
 
     echo ""
     echo "Creating worktree: $repo_name @ $branch (base: origin/$base_branch) [$agent]"
@@ -2796,7 +2810,7 @@ main() {
 
             # Use interactive mode if repo or branch not provided
             if [[ -z "$repo" || -z "$branch" ]]; then
-                interactive_new "$repo" "$branch" "$switch_after"
+                interactive_new "$repo" "$branch" "$switch_after" "$agent"
             else
                 # Default the base to the repo's detected default branch so a new
                 # branch created here matches the interactive flow's intent rather
