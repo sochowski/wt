@@ -99,7 +99,7 @@ teardown() {
 test_script_syntax() {
     section "Script Syntax"
 
-    for script in "$WT_BIN_DIR"/*; do
+    for script in "$WT_BIN_DIR"/* "$(dirname "$WT_BIN_DIR")/mobile-dev.sh"; do
         local name=$(basename "$script")
         # Skip compiled binaries (e.g. wt-state) — only lint shell scripts.
         if ! head -c2 "$script" 2>/dev/null | grep -q '#!'; then
@@ -117,6 +117,7 @@ test_tmux_conf_syntax() {
     section "Tmux Config Syntax"
 
     local conf="$(dirname "$WT_BIN_DIR")/config/tmux-wt.conf"
+    local pane_conf="$(dirname "$WT_BIN_DIR")/config/tmux-panes.conf"
     if [[ -f "$conf" ]]; then
         # Validate by sourcing into a THROWAWAY server on a private socket
         # (-L wt-test). NEVER use the default socket here: `kill-server` on it
@@ -130,6 +131,19 @@ test_tmux_conf_syntax() {
         fi
     else
         fail "tmux-wt.conf: file not found"
+    fi
+
+    if [[ -f "$pane_conf" ]]; then
+        local pane_result
+        pane_result=$(tmux -L wt-pane-test -f /dev/null start-server \
+            \; source-file "$pane_conf" \; kill-server 2>&1 || true)
+        if [[ -z "$pane_result" ]] || [[ "$pane_result" != *"error"* && "$pane_result" != *"unknown"* ]]; then
+            pass "tmux-panes.conf: valid syntax"
+        else
+            fail "tmux-panes.conf: syntax error" "$pane_result"
+        fi
+    else
+        fail "tmux-panes.conf: file not found"
     fi
 }
 
@@ -295,6 +309,127 @@ test_create_worktree() {
     fi
     tmux kill-session -t "test-wt-repo-switch-branch" 2>/dev/null || true
     git -C "$TEST_REPO" worktree remove "$WT_BASE_DIR/test-wt-repo/switch-branch" --force 2>/dev/null || true
+}
+
+test_mobile_session_control() {
+    section "Mobile session control"
+
+    if [[ -z "${TMUX:-}" || -z "$TEST_SESSION" ]]; then
+        fail "skipped: no isolated test session"
+        return
+    fi
+
+    local json pane capture payload command wt_path diff_files diff_output
+    local mobile_once mobile_switch_binding picker_source
+    json=$("$WT_BIN_DIR/wt" session list 2>&1)
+    if jq -e --arg name "$TEST_SESSION" \
+        '.[] | select(.name == $name and .live == true and .effective_status != "offline")' \
+        <<<"$json" >/dev/null 2>&1; then
+        pass "session list exposes live mobile metadata"
+    else
+        fail "session list omitted the live test session" "$json"
+    fi
+
+    pane=$("$WT_BIN_DIR/wt" session pane "$TEST_SESSION" 2>/dev/null || true)
+    if [[ "$pane" == %* ]]; then
+        pass "session pane resolves the semantic agent pane"
+    else
+        fail "session pane did not resolve an agent pane" "$pane"
+        return
+    fi
+
+    picker_source=$(sed -n '/^session_picker()/,/^}/p; /^mobile_mode()/,/^}/p' "$WT_BIN_DIR/wt")
+    if grep -Fq 'selection=$(session_picker all true)' "$WT_BIN_DIR/wt" \
+        && grep -Fq 'pick_worktree' <<<"$picker_source" \
+        && grep -Fq "preview_window='down,50%,border-top,wrap'" <<<"$picker_source" \
+        && [[ ! -e "$WT_BIN_DIR/wt-mobile" ]]; then
+        pass "mobile and prefix+s share the responsive session picker"
+    else
+        fail "mobile still has a separate session-menu implementation" "$picker_source"
+    fi
+
+    local pane_conf mobile_bindings
+    pane_conf="$(dirname "$WT_BIN_DIR")/config/tmux-panes.conf"
+    tmux source-file "$pane_conf"
+    mobile_bindings=$(tmux list-keys -T prefix 2>/dev/null | grep -E ' prefix (h|j|k|l) ' || true)
+    if grep -Fq 'no-detach-on-destroy' <<<"$mobile_bindings" \
+        && grep -Fq 'select-pane -L' <<<"$mobile_bindings" \
+        && grep -Fq 'select-pane -D' <<<"$mobile_bindings" \
+        && grep -Fq 'select-pane -U' <<<"$mobile_bindings" \
+        && grep -Fq 'select-pane -R' <<<"$mobile_bindings" \
+        && grep -Fq 'resize-pane -Z' <<<"$mobile_bindings"; then
+        pass "mobile prefix+h/j/k/l bindings select direction and zoom"
+    else
+        fail "mobile directional fullscreen bindings are incomplete" "$mobile_bindings"
+    fi
+
+    if grep -Fq 'select-pane -t \"{next}\"' <<<"$mobile_bindings" \
+        && grep -Fq 'select-pane -t \"{previous}\"' <<<"$mobile_bindings" \
+        && grep -Fq 'resize-pane -t \"{top-left}\" -L 3' <<<"$mobile_bindings" \
+        && grep -Fq 'resize-pane -t \"{top-left}\" -R 3' <<<"$mobile_bindings"; then
+        pass "desktop prefix+h/j/k/l fallbacks retain focus and resize behavior"
+    else
+        fail "mobile bindings changed the desktop pane fallbacks" "$mobile_bindings"
+    fi
+
+    # Replace the isolated agent process with a controlled shell so capture and
+    # literal-paste behavior are deterministic and never invoke a real agent.
+    tmux respawn-pane -k -t "$pane" "bash --noprofile --norc"
+    sleep 0.1
+    tmux send-keys -t "$pane" -l 'printf "mobile-capture-ok\n"'
+    tmux send-keys -t "$pane" Enter
+    sleep 0.1
+    capture=$("$WT_BIN_DIR/wt" session capture "$TEST_SESSION" --lines 30 --plain 2>&1)
+    if grep -Fq "mobile-capture-ok" <<<"$capture"; then
+        pass "session capture reads recent agent output"
+    else
+        fail "session capture missed pane output" "$capture"
+    fi
+    payload='hello "quotes" $HOME ; still-text'
+    printf -v command 'printf %q %q' 'mobile-reply=<%s>\n' "$payload"
+    printf '%s' "$command" | "$WT_BIN_DIR/wt" session send "$TEST_SESSION" --enter
+    sleep 0.1
+    capture=$("$WT_BIN_DIR/wt" session capture "$TEST_SESSION" --lines 30 --plain 2>&1)
+    if grep -Fq "mobile-reply=<$payload>" <<<"$capture"; then
+        pass "session send pastes quotes and shell syntax literally"
+    else
+        fail "session send changed literal input" "$capture"
+    fi
+
+    if "$WT_BIN_DIR/wt" session key "$TEST_SESSION" definitely-not-a-key >/dev/null 2>&1; then
+        fail "session key accepted an unsupported key"
+    else
+        pass "session key rejects unsupported key names"
+    fi
+
+    wt_path="$WT_BASE_DIR/test-wt-repo/test-branch"
+    printf 'mobile diff content\n' > "$wt_path/mobile-api.txt"
+    diff_files=$("$WT_BIN_DIR/wt" session diff "$TEST_SESSION" --files 2>&1)
+    diff_output=$("$WT_BIN_DIR/wt" session diff "$TEST_SESSION" --file mobile-api.txt --no-color 2>&1)
+    if grep -Fq $'?\tmobile-api.txt' <<<"$diff_files" \
+        && grep -Fq "mobile diff content" <<<"$diff_output"; then
+        pass "shared picker diff includes untracked file contents"
+    else
+        fail "session diff did not render the untracked test file" "$diff_files / $diff_output"
+    fi
+    rm -f "$wt_path/mobile-api.txt"
+
+    mobile_once=$(COLUMNS=48 "$WT_BIN_DIR/wt" mobile --once 2>&1)
+    if grep -Fq "test-wt-repo@test-branch" <<<"$mobile_once"; then
+        pass "mobile --once emits the shared picker rows"
+    else
+        fail "mobile did not reuse shared picker rows" "$mobile_once"
+    fi
+
+    mobile_switch_binding=$(tmux list-keys -T prefix 2>/dev/null \
+        | grep -E ' prefix s +if-shell ' || true)
+    if grep -Fq 'no-detach-on-destroy' <<<"$mobile_switch_binding" \
+        && grep -Fq "$WT_BIN_DIR/wt" <<<"$mobile_switch_binding" \
+        && grep -Fq ' pick' <<<"$mobile_switch_binding"; then
+        pass "mobile prefix+s opens the same checkout picker"
+    else
+        fail "mobile prefix+s is not wired to the shared picker" "$mobile_switch_binding"
+    fi
 }
 
 test_managed_shells() {
@@ -1398,6 +1533,7 @@ main() {
     test_install_script
     test_find_git_repos
     test_create_worktree
+    test_mobile_session_control
     test_managed_shells
     test_wt_shells_skill
     test_status_file
