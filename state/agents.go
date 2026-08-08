@@ -83,7 +83,7 @@ var registry = []Agent{
 	{
 		Name:   "codex",
 		Binary: "codex",
-		Hook:   HookSpec{Format: hookTOMLAppend, Template: "codex-notify.toml", Target: ".codex/config.toml", Version: 1},
+		Hook:   HookSpec{Format: hookTOMLAppend, Template: "codex-notify.toml", Target: ".codex/config.toml", Version: 2},
 		Launch: launchDirect,
 	},
 	{

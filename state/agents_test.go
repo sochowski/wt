@@ -156,7 +156,7 @@ func TestInstallTOMLManagedBlockReplace(t *testing.T) {
 func TestInstallTOMLManagedTopLevelKeyBeforeTables(t *testing.T) {
 	dir := t.TempDir()
 	tmpl := filepath.Join(dir, "notify.toml")
-	writeFile(t, tmpl, "notify = \"$HOME/bin/wt-hook stop\"\n")
+	writeFile(t, tmpl, "notify = [\"$HOME/bin/wt-hook\", \"stop\"]\n")
 	target := filepath.Join(dir, "config.toml")
 	writeFile(t, target, "model = \"gpt\"\n\n[features]\njs_repl = false\n")
 
@@ -165,7 +165,7 @@ func TestInstallTOMLManagedTopLevelKeyBeforeTables(t *testing.T) {
 	}
 
 	got := readFile(t, target)
-	if !contains(got, "notify = \"$HOME/bin/wt-hook stop\"") {
+	if !contains(got, "notify = [\"$HOME/bin/wt-hook\", \"stop\"]") {
 		t.Fatalf("managed notify missing: %q", got)
 	}
 	if strings.Index(got, tomlBlockBegin) > strings.Index(got, "[features]") {
@@ -176,7 +176,7 @@ func TestInstallTOMLManagedTopLevelKeyBeforeTables(t *testing.T) {
 func TestInstallTOMLManagedTopLevelKeyConflictSkipsHook(t *testing.T) {
 	dir := t.TempDir()
 	tmpl := filepath.Join(dir, "notify.toml")
-	writeFile(t, tmpl, "notify = \"$HOME/bin/wt-hook stop\"\n")
+	writeFile(t, tmpl, "notify = [\"$HOME/bin/wt-hook\", \"stop\"]\n")
 	target := filepath.Join(dir, "config.toml")
 	writeFile(t, target, "notify = [\"/usr/bin/true\"]\n\n[features]\njs_repl = false\n")
 
