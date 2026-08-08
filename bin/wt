@@ -33,6 +33,7 @@ WT_STATE="${WT_STATE:-$WT_BIN_DIR/wt-state}"
 # Opt-in vim-style modal keybindings for fzf pickers. Off by default; enable
 # with `export WT_FZF_VIM=1`.
 WT_FZF_VIM="${WT_FZF_VIM:-0}"
+WT_MOBILE="${WT_MOBILE:-0}"
 
 # Live nvim diff view. On by default: each worktree session's nvim boots into
 # a diff of the branch vs its base and a watcher keeps it current. Disable with
@@ -93,7 +94,14 @@ pane_by_role() {
 agent_pane_target() {
     local session_name="$1" pane
     pane=$(pane_by_role "$session_name" agent)
-    [[ -n "$pane" ]] && printf '%s\n' "$pane" || printf '=%s:main.1\n' "$session_name"
+    if [[ -n "$pane" ]]; then
+        printf '%s\n' "$pane"
+    elif tmux display-message -p -t "=$session_name:agent.0" '#{pane_id}' &>/dev/null; then
+        # Master sessions predate semantic pane roles and use an `agent` window.
+        tmux display-message -p -t "=$session_name:agent.0" '#{pane_id}'
+    else
+        printf '=%s:main.1\n' "$session_name"
+    fi
 }
 
 mark_primary_panes() {
@@ -894,7 +902,12 @@ switch_to() {
     fi
 
     if [[ -n "${TMUX:-}" ]]; then
+        if [[ "$WT_MOBILE" == 1 || "$WT_MOBILE" == true ]]; then
+            tmux refresh-client -f '!active-pane,no-detach-on-destroy' 2>/dev/null || true
+        fi
         tmux switch-client -t "=$session_name"
+    elif [[ "$WT_MOBILE" == 1 || "$WT_MOBILE" == true ]]; then
+        tmux attach-session -f no-detach-on-destroy -t "=$session_name"
     else
         tmux attach-session -t "=$session_name"
     fi
@@ -1503,58 +1516,86 @@ preview_pane() {
     printf '%s\n' "$footer"
 }
 
+picker_is_portrait() {
+    local cols="${COLUMNS:-}"
+    [[ "$WT_MOBILE" == 1 || "$WT_MOBILE" == true ]] && return 0
+    [[ "$cols" =~ ^[0-9]+$ ]] || cols=$(tput cols 2>/dev/null || echo 120)
+    (( cols < 100 ))
+}
+
+# The one session menu used by `wt pick`, `wt switch`, prefix+s, and mobile.
+# Only its data scope and responsive layout vary: narrow clients stack the raw
+# Git diff below the list, while wider clients retain the richer right preview.
+session_picker() {
+    local scope="${1:-all}" allow_delete="${2:-false}"
+    local rows selection rc=0 header preview preview_window delete_bind=""
+
+    rows=$(pick_list)
+    if [[ "$scope" == live ]]; then
+        rows=$(while IFS=: read -r name path rest; do
+            tmux has-session -t "=$name" 2>/dev/null && printf '%s:%s:%s\n' "$name" "$path" "$rest"
+        done <<<"$rows")
+    fi
+
+    if picker_is_portrait; then
+        header="Select session · Enter open · ? diff"
+        preview="$WT_BIN_DIR/wt session diff {1}"
+        preview_window='down,50%,border-top,wrap'
+    else
+        header="Select worktree (Enter=switch"
+        [[ "$allow_delete" == true ]] && header+=", Ctrl-D=delete"
+        header+=")"
+        preview="$WT_BIN_DIR/wt preview-pane {1} {2}"
+        preview_window='right,60%,border-left'
+    fi
+
+    if [[ "$allow_delete" == true ]]; then
+        delete_bind="ctrl-d:execute($WT_BIN_DIR/wt delete {1} --force)+reload($WT_BIN_DIR/wt pick-list)"
+    fi
+
+    local -a fzf_args=(
+        "${WT_FZF_VIM_ARGS[@]}"
+        --ansi
+        --delimiter=:
+        --with-nth=3
+        --layout=reverse
+        --header="$header"
+        --preview="$preview"
+        --preview-window="$preview_window"
+        --bind='?:toggle-preview'
+    )
+    [[ -n "$delete_bind" ]] && fzf_args+=(--bind="$delete_bind")
+
+    selection=$(printf '%s\n' "$rows" | fzf "${fzf_args[@]}") || rc=$?
+    if (( rc == 130 )); then return 0; fi
+    [[ -n "$selection" ]] && printf '%s\n' "$selection"
+}
+
 pick_worktree() {
     check_deps
 
     # Rows arrive most-recently-active first (recency ranking in list_worktrees).
-    local selection rc=0
-    selection=$(pick_list | fzf \
-        "${WT_FZF_VIM_ARGS[@]}" \
-        --delimiter=: \
-        --with-nth=3 \
-        --header="Select worktree (Enter=switch, Ctrl-D=delete)" \
-        --preview="$WT_BIN_DIR/wt preview-pane {1} {2}" \
-        --preview-window=right:60% \
-        --bind="ctrl-d:execute(wt delete {1} --force)+reload($WT_BIN_DIR/wt pick-list)") || rc=$?
-    if (( rc == 130 )); then echo "Cancelled." >&2; return 0; fi
-
-    if [[ -n "$selection" ]]; then
-        local session_name wt_path
-        session_name=$(echo "$selection" | cut -d: -f1)
-        wt_path=$(echo "$selection" | cut -d: -f2)
-        if ! tmux has-session -t "=$session_name" 2>/dev/null; then
-            printf "Session '%s' is not running. Reviving...\n" "$session_name" >/dev/tty
-            revive_worktree_session "$session_name" "$wt_path" || return 1
-        fi
-        switch_to "$session_name"
+    local selection session_name wt_path
+    selection=$(session_picker all true) || return
+    [[ -n "$selection" ]] || return 0
+    session_name=${selection%%:*}
+    wt_path=${selection#*:}; wt_path=${wt_path%%:*}
+    if ! tmux has-session -t "=$session_name" 2>/dev/null; then
+        printf "Session '%s' is not running. Reviving...\n" "$session_name" >/dev/tty
+        revive_worktree_session "$session_name" "$wt_path" || return 1
     fi
+    switch_to "$session_name"
 }
 
-# Recency-ranked session switcher (bound to prefix+W via a tmux popup). Unlike
-# pick_worktree it only lists sessions with a live tmux session — switching, not
-# reviving — so it shares the exact recency order that choose-tree couldn't.
+# Live-only wrapper around the shared picker, used by prefix+W / `wt switch`.
 switch_picker() {
     check_deps
 
-    local selection rc=0
-    selection=$(pick_list \
-        | while IFS=: read -r name path rest; do
-              tmux has-session -t "=$name" 2>/dev/null && printf '%s:%s:%s\n' "$name" "$path" "$rest"
-          done \
-        | fzf \
-            "${WT_FZF_VIM_ARGS[@]}" \
-            --delimiter=: \
-            --with-nth=3 \
-            --header="Switch session (recent first)" \
-            --preview="$WT_BIN_DIR/wt preview-pane {1} {2}" \
-            --preview-window=right:60%) || rc=$?
-    if (( rc == 130 )); then echo "Cancelled." >&2; return 0; fi
-
-    if [[ -n "$selection" ]]; then
-        local session_name
-        session_name=$(echo "$selection" | cut -d: -f1)
-        switch_to "$session_name"
-    fi
+    local selection session_name
+    selection=$(session_picker live false) || return
+    [[ -n "$selection" ]] || return 0
+    session_name=${selection%%:*}
+    switch_to "$session_name"
 }
 
 # -----------------------------------------------------------------------------
@@ -2313,6 +2354,256 @@ shell_command() {
 }
 
 # -----------------------------------------------------------------------------
+#  Session control API (used by the mobile SSH interface)
+# -----------------------------------------------------------------------------
+# These commands deliberately sit above both wt-state and tmux. Consumers get
+# one stable interface instead of learning the SQLite schema, pane numbering,
+# or how offline status is derived.
+
+session_live_names_json() {
+    tmux list-sessions -F '#{session_name}' 2>/dev/null \
+        | jq -R -s 'split("\n") | map(select(length > 0))'
+}
+
+session_list_json() {
+    local live
+    live=$(session_live_names_json)
+    "$WT_STATE" list 2>/dev/null | jq --argjson live "$live" '
+        def effective($is_live):
+            if $is_live then (.status // "unknown") else "offline" end;
+        def rank:
+            if .effective_status == "input" then 0
+            elif .effective_status == "error" then 1
+            elif .effective_status == "idle" then 2
+            elif .effective_status == "working" then 3
+            elif .effective_status == "offline" then 4
+            else 5 end;
+        map(. as $session
+            | ($live | index($session.name) != null) as $is_live
+            | . + {live: $is_live, effective_status: effective($is_live)})
+        | sort_by(rank, -(.status_changed_at // 0), -(.updated_at // 0), .name)
+    '
+}
+
+session_show_json() {
+    local session_name="$1" live=false record
+    record=$("$WT_STATE" get "$session_name" 2>/dev/null) \
+        || { echo "Session '$session_name' is not tracked" >&2; return 1; }
+    tmux has-session -t "=$session_name" 2>/dev/null && live=true
+    jq --argjson live "$live" \
+        '. + {live: $live,
+              effective_status: (if $live then (.status // "unknown") else "offline" end)}' \
+        <<<"$record"
+}
+
+session_agent_pane() {
+    local session_name="$1" pane
+    "$WT_STATE" get "$session_name" >/dev/null 2>&1 \
+        || { echo "Session '$session_name' is not tracked" >&2; return 1; }
+    tmux has-session -t "=$session_name" 2>/dev/null \
+        || { echo "Session '$session_name' is offline" >&2; return 1; }
+    pane=$(agent_pane_target "$session_name")
+    tmux display-message -p -t "$pane" '#{pane_id}' 2>/dev/null \
+        || { echo "Agent pane for '$session_name' was not found" >&2; return 1; }
+}
+
+tail_terminal_content() {
+    local lines="$1"
+    awk -v limit="$lines" '
+        { content[NR] = $0; if ($0 !~ /^[[:space:]]*$/) last = NR }
+        END {
+            if (!last) exit
+            start = last - limit + 1
+            if (start < 1) start = 1
+            for (i = start; i <= last; i++) print content[i]
+        }
+    '
+}
+
+session_capture() {
+    local session_name="${1:-}" lines=80 plain=false pane
+    [[ -n "$session_name" ]] || { echo "Usage: wt session capture NAME [--lines N] [--plain]" >&2; return 2; }
+    shift
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --lines) lines="${2:-}"; shift 2 ;;
+            --plain) plain=true; shift ;;
+            *) echo "Unknown session capture option: $1" >&2; return 2 ;;
+        esac
+    done
+    [[ "$lines" =~ ^[1-9][0-9]*$ ]] \
+        || { echo "--lines must be a positive integer" >&2; return 2; }
+    pane=$(session_agent_pane "$session_name") || return
+    if [[ "$plain" == true ]]; then
+        tmux capture-pane -p -e -J -S "-$lines" -t "$pane" 2>/dev/null \
+            | tail_terminal_content "$lines" | strip_terminal_control
+    else
+        tmux capture-pane -p -e -J -S "-$lines" -t "$pane" 2>/dev/null \
+            | tail_terminal_content "$lines"
+    fi
+}
+
+session_send() {
+    local session_name="${1:-}" enter=false text_set=false value="" pane buffer
+    [[ -n "$session_name" ]] || { echo "Usage: wt session send NAME [--text TEXT] [--enter]" >&2; return 2; }
+    shift
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --text) text_set=true; value="${2:-}"; shift 2 ;;
+            --enter) enter=true; shift ;;
+            *) echo "Unknown session send option: $1" >&2; return 2 ;;
+        esac
+    done
+    pane=$(session_agent_pane "$session_name") || return
+    buffer="wt-session-${session_name//[^A-Za-z0-9]/_}-$$"
+    if [[ "$text_set" == true ]]; then
+        tmux set-buffer -b "$buffer" -- "$value"
+    else
+        # Reading stdin directly avoids command substitution, which would strip
+        # trailing newlines and makes arbitrary user text much harder to quote.
+        tmux load-buffer -b "$buffer" -
+    fi
+    tmux paste-buffer -d -p -r -b "$buffer" -t "$pane"
+    [[ "$enter" == true ]] && tmux send-keys -t "$pane" Enter
+}
+
+session_key() {
+    local session_name="${1:-}" key="${2:-}" pane
+    [[ -n "$session_name" && -n "$key" ]] \
+        || { echo "Usage: wt session key NAME KEY" >&2; return 2; }
+    case "$key" in
+        Enter|Escape|Tab|BSpace|DC|Up|Down|Left|Right|PageUp|PageDown|C-c|C-d|C-u)
+            ;;
+        *) echo "Unsupported key '$key'" >&2; return 2 ;;
+    esac
+    pane=$(session_agent_pane "$session_name") || return
+    tmux send-keys -t "$pane" "$key"
+}
+
+session_diff_path() {
+    local session_name="$1" wt_path
+    wt_path=$("$WT_STATE" get "$session_name" --field wt_path 2>/dev/null) \
+        || { echo "Session '$session_name' is not tracked" >&2; return 1; }
+    [[ -n "$wt_path" && -e "$wt_path/.git" ]] \
+        || { echo "Git worktree for '$session_name' was not found" >&2; return 1; }
+    printf '%s\n' "$wt_path"
+}
+
+session_diff_files() {
+    local wt_path="$1" base="$2" file
+    git -C "$wt_path" diff --name-status --find-renames "$base" -- 2>/dev/null || true
+    while IFS= read -r file; do
+        [[ -n "$file" ]] && printf '?\t%s\n' "$file"
+    done < <(git -C "$wt_path" ls-files --others --exclude-standard 2>/dev/null)
+}
+
+session_diff_file_known() {
+    local wt_path="$1" base="$2" wanted="$3" status path extra
+    while IFS=$'\t' read -r status path extra; do
+        [[ "$path" == "$wanted" || "$extra" == "$wanted" ]] && return 0
+    done < <(session_diff_files "$wt_path" "$base")
+    return 1
+}
+
+session_diff() {
+    local session_name="${1:-}" mode=all file="" color=always wt_path base rc=0
+    [[ -n "$session_name" ]] \
+        || { echo "Usage: wt session diff NAME [--stat|--files|--file PATH] [--no-color]" >&2; return 2; }
+    shift
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --stat) mode=stat; shift ;;
+            --files) mode=files; shift ;;
+            --file) mode=file; file="${2:-}"; shift 2 ;;
+            --no-color) color=never; shift ;;
+            *) echo "Unknown session diff option: $1" >&2; return 2 ;;
+        esac
+    done
+    wt_path=$(session_diff_path "$session_name") || return
+    base=$(diff_merge_base "$wt_path")
+    [[ -n "$base" ]] || { echo "Could not determine a diff base for '$session_name'" >&2; return 1; }
+
+    case "$mode" in
+        stat)
+            git -C "$wt_path" -c "color.ui=$color" diff --stat "$base" --
+            local untracked
+            untracked=$(git -C "$wt_path" ls-files --others --exclude-standard 2>/dev/null || true)
+            [[ -z "$untracked" ]] || { printf '\nUntracked:\n'; printf '%s\n' "$untracked"; }
+            ;;
+        files)
+            session_diff_files "$wt_path" "$base"
+            ;;
+        file)
+            [[ -n "$file" ]] || { echo "--file requires a path" >&2; return 2; }
+            session_diff_file_known "$wt_path" "$base" "$file" \
+                || { echo "File '$file' is not changed in '$session_name'" >&2; return 1; }
+            if git -C "$wt_path" ls-files --others --exclude-standard -- "$file" | grep -Fxq "$file"; then
+                git -C "$wt_path" -c "color.ui=$color" diff --no-index -- /dev/null "$wt_path/$file" || rc=$?
+                (( rc <= 1 )) || return "$rc"
+            else
+                git -C "$wt_path" -c "color.ui=$color" diff "$base" -- "$file"
+            fi
+            ;;
+        all)
+            git -C "$wt_path" -c "color.ui=$color" diff "$base" --
+            local new_file
+            while IFS= read -r new_file; do
+                [[ -n "$new_file" ]] || continue
+                rc=0
+                git -C "$wt_path" -c "color.ui=$color" diff --no-index -- /dev/null "$wt_path/$new_file" || rc=$?
+                (( rc <= 1 )) || return "$rc"
+            done < <(git -C "$wt_path" ls-files --others --exclude-standard 2>/dev/null)
+            ;;
+    esac
+}
+
+session_command() {
+    local cmd="${1:-}"
+    shift || true
+    case "$cmd" in
+        list) session_list_json ;;
+        show) session_show_json "${1:-}" ;;
+        pane) session_agent_pane "${1:-}" ;;
+        capture) session_capture "$@" ;;
+        send) session_send "$@" ;;
+        key) session_key "$@" ;;
+        diff) session_diff "$@" ;;
+        *)
+            echo "Usage: wt session {list|show|pane|capture|send|key|diff} ..." >&2
+            return 2
+            ;;
+    esac
+}
+
+load_mobile_bindings() {
+    local pane_config="$WT_BIN_DIR/../config/tmux-panes.conf"
+    local mobile_shell mobile_tmux installed_shell installed_tmux
+
+    [[ -f "$pane_config" ]] || pane_config="$WT_CONFIG_DIR/tmux-panes.conf"
+    [[ -f "$pane_config" ]] && tmux source-file "$pane_config" 2>/dev/null || true
+
+    # During checkout testing, prefix+s must use this checkout's shared picker,
+    # not the separately installed wt. The condition is client-local: ordinary
+    # desktop clients retain their installed binding.
+    printf -v mobile_shell 'env WT_MOBILE=1 %q pick' "$WT_BIN_DIR/wt"
+    printf -v installed_shell '%q pick' "$HOME/bin/wt"
+    mobile_tmux="display-popup -E -w 100% -h 100% \"$mobile_shell\""
+    installed_tmux="display-popup -E -w 100% -h 100% \"$installed_shell\""
+    tmux bind-key -T prefix s if-shell -F '#{m:*no-detach-on-destroy*,#{client_flags}}' \
+        "$mobile_tmux" "$installed_tmux" 2>/dev/null || true
+}
+
+mobile_mode() {
+    WT_MOBILE=1
+    load_mobile_bindings
+    if [[ "${1:-}" == --once ]]; then
+        pick_list
+        return
+    fi
+    pick_worktree
+}
+
+# -----------------------------------------------------------------------------
 #  Agent Integration
 # -----------------------------------------------------------------------------
 start_agent() {
@@ -2380,6 +2671,14 @@ Status:
   status <session>                        Get session status
   set-status <session> <status> [msg]     Set session status
   sync-tmux                               Restore tmux options from status files
+
+Mobile / Session Control:
+  mobile                                  Narrow SSH control interface
+  session list|show <name>                JSON session metadata
+  session capture <name> [--lines N]      Read the agent pane
+  session send <name> [--enter]           Paste stdin literally into the agent
+  session key <name> <key>                Send a supported terminal key
+  session diff <name> [--stat|--files]    Render changes without Neovim
 
 Options for 'new':
   --agent <name>        Agent: claude, codex, gemini, opencode (default: \$WT_DEFAULT_AGENT)
@@ -2560,6 +2859,12 @@ main() {
             ;;
         shell)
             shell_command "$@"
+            ;;
+        session)
+            session_command "$@"
+            ;;
+        mobile)
+            mobile_mode "$@"
             ;;
         status)
             get_status "${1:-}"

@@ -120,6 +120,63 @@ wt shell watch server --on error      # Queue matching output as an event
 wt shell events --consume             # Read and clear queued events
 ```
 
+## Mobile SSH interface
+
+`wt mobile`, `wt pick`, and `prefix + s` use the same responsive session menu.
+On a narrow terminal it becomes a phone-friendly 50/50 session-and-diff stack;
+on a wider terminal it keeps the richer side preview. Selecting a row attaches
+to that tmux session exactly as it is. Typing, terminal shortcuts, and mouse
+events go directly to tmux without a capture-and-reply layer.
+
+The portrait picker uses a 50/50 stack: the session menu is on top and the
+selected session's Git diff is always visible below. Arrow keys navigate,
+typing filters, Enter attaches, and `?` hides or shows the diff. This maps
+directly to Termius on iOS gestures that emit arrow keys.
+
+Mobile tmux clients get a directional fullscreen pane map. After the prefix,
+`h`, `j`, `k`, or `l` selects the pane in that direction and zooms it to fill
+the screen; `prefix + z` restores the split. A client-local marker applies this
+map only to mobile clients, so desktop clients retain the normal wt bindings.
+Tmux zoom itself is window-global, so simultaneous clients viewing the same
+window see the same zoom state.
+
+For voice prompts in Termius on iOS, switch the input selector above the
+shortcut bar to **Paste** mode, tap the microphone on the iOS keyboard, then
+send the completed text.
+
+```bash
+ssh -t devbox 'wt mobile'
+```
+
+To try the version in a checkout without installing it or touching existing wt
+state, run the disposable demo harness:
+
+```bash
+./mobile-dev.sh
+
+# From a phone (use the checkout's actual path on the host):
+ssh -t devbox 'cd ~/src/wt && ./mobile-dev.sh'
+
+# Remove its private tmux server, fake HOME, worktree, and state:
+./mobile-dev.sh --clean
+```
+
+The harness stores everything below `/tmp/wt-mobile-dev-$USER`, uses a private
+tmux socket and stub agents, and shadows Neovim. It neither replaces the
+installed `wt` nor connects to live sessions. To test this checkout's UI against
+your real sessions without installing it, run `./bin/wt mobile`; that command
+does control the live sessions shown in your normal wt state.
+
+The reusable commands beneath the UI are also available directly:
+
+```bash
+wt session list
+wt session capture <session> --lines 100
+printf '%s' 'reply text' | wt session send <session> --enter
+wt session key <session> Escape
+wt session diff <session> --files
+```
+
 ## Managed Shells
 
 Worktree sessions start with only the `main` window: Neovim on the left and the
