@@ -20,7 +20,7 @@ WT_DEFAULT_AGENT="${WT_DEFAULT_AGENT:-opencode}"
 # Optional TUI in the left pane of the master session. An explicitly empty
 # command preserves the legacy single-pane master. The cwd defaults to the
 # master's own workspace; width is the percentage assigned to the new pane.
-WT_MASTER_TUI_CMD="${WT_MASTER_TUI_CMD-linear-tui}"
+WT_MASTER_TUI_CMD="${WT_MASTER_TUI_CMD-linear-curses}"
 WT_MASTER_TUI_WIDTH="${WT_MASTER_TUI_WIDTH:-50}"
 WT_MASTER_TUI_CWD="${WT_MASTER_TUI_CWD:-$WT_BASE_DIR/.master}"
 
@@ -148,12 +148,13 @@ create_master_tui_pane() {
 
     [[ -n "$configured_cmd" ]] || return 0
 
-    # linear-tui is the friendly default, not a hard dependency. Resolve its
+    # Linear Curses is the friendly default, not a hard dependency. Resolve its
     # absolute path here so a tmux server with an older sticky PATH can run it.
-    if [[ "$configured_cmd" == "linear-tui" ]]; then
-        binary=$(command -v linear-tui 2>/dev/null || true)
+    # Keep recognizing the upstream binary name for compatibility.
+    if [[ "$configured_cmd" == "linear-curses" || "$configured_cmd" == "linear-tui" ]]; then
+        binary=$(command -v "$configured_cmd" 2>/dev/null || true)
         if [[ -z "$binary" ]]; then
-            echo "linear-tui not found; starting master without a TUI pane." >&2
+            echo "$configured_cmd not found; starting master without a TUI pane." >&2
             echo "Install it, set WT_MASTER_TUI_CMD, or set WT_MASTER_TUI_CMD= to disable this hint." >&2
             return 0
         fi
@@ -2793,7 +2794,7 @@ Environment:
   WT_BASE_DIR        Base directory for worktrees (default: ~/worktrees)
   WT_STATUS_DIR      Status file directory (default: ~/.local/state/wt)
   WT_DEFAULT_AGENT   Default agent CLI (default: opencode)
-  WT_MASTER_TUI_CMD  Command for the master's left pane (default: linear-tui;
+  WT_MASTER_TUI_CMD  Command for the master's left pane (default: linear-curses;
                      set empty to keep a single-pane master)
   WT_MASTER_TUI_WIDTH Percentage of the master window used by the TUI (default: 50)
   WT_MASTER_TUI_CWD  Working directory for the master TUI (default: master workspace)

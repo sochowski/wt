@@ -413,11 +413,11 @@ Workflow:
 ### Master TUI
 
 The master session mirrors a worktree's `nvim | agent` layout. By default it
-starts `linear-tui` on the left when that command is installed, with the master
+starts `linear-curses` on the left when that command is installed, with the master
 agent on the right. The separate `shell` window remains available.
 
 ```bash
-export WT_MASTER_TUI_CMD="linear-tui" # Any interactive terminal command
+export WT_MASTER_TUI_CMD="linear-curses" # Any interactive terminal command
 export WT_MASTER_TUI_WIDTH=50         # Percentage assigned to the left pane
 export WT_MASTER_TUI_CWD="$HOME"      # Optional; defaults to the master workspace
 ```
@@ -473,7 +473,7 @@ Status bar → wt-tmux-status aggregates status counts from wt-state
 | `WT_STATE` | `<bin>/wt-state` | Path to the `wt-state` binary |
 | `WT_LOG_FILE` | `$WT_STATUS_DIR/wt.log` | Log file path |
 | `WT_DEFAULT_AGENT` | `opencode` | Default agent CLI (opencode, claude, codex, gemini) |
-| `WT_MASTER_TUI_CMD` | `linear-tui` | Command for the master session's left pane; set empty to disable |
+| `WT_MASTER_TUI_CMD` | `linear-curses` | Command for the master session's left pane; set empty to disable |
 | `WT_MASTER_TUI_WIDTH` | `50` | Percentage of the master window assigned to the left TUI |
 | `WT_MASTER_TUI_CWD` | `$WT_BASE_DIR/.master` | Working directory for the master TUI |
 | `WT_DIFF_VIEW` | `1` | Boot session nvim into the live diffview.nvim diff; set `0` to disable |

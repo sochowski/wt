@@ -974,6 +974,12 @@ test_wt_status() {
 test_master_session() {
     section "Master Session"
 
+    if grep -q 'WT_MASTER_TUI_CMD="${WT_MASTER_TUI_CMD-linear-curses}"' "$WT_BIN_DIR/wt"; then
+        pass "default master TUI = linear-curses"
+    else
+        fail "default master TUI is not linear-curses"
+    fi
+
     if [[ -z "${TMUX:-}" ]]; then
         fail "skipped: not inside tmux"
         return
