@@ -47,8 +47,9 @@ the thing you're waiting on is never buried.
   `.env` and friends into each new worktree, which git won't do for you.
 - **Live diff in the editor.** nvim boots into a diffview of your branch against
   its base and refreshes as files change.
-- **A master session** with its own MCP profile, for orchestrating work across
-  the others.
+- **A split master session** with a configurable TUI on the left and an agent
+  with its own MCP profile on the right, for orchestrating work across the
+  others.
 - **Desktop notifications** when an agent needs your attention.
 
 Runs on macOS and Linux.
@@ -409,6 +410,22 @@ Workflow:
 6. Child session starts autonomously with full context
 7. You monitor via `wt pick` or `prefix+W`
 
+### Master TUI
+
+The master session mirrors a worktree's `nvim | agent` layout. By default it
+starts `linear-tui` on the left when that command is installed, with the master
+agent on the right. The separate `shell` window remains available.
+
+```bash
+export WT_MASTER_TUI_CMD="linear-tui" # Any interactive terminal command
+export WT_MASTER_TUI_WIDTH=50         # Percentage assigned to the left pane
+export WT_MASTER_TUI_CWD="$HOME"      # Optional; defaults to the master workspace
+```
+
+Set `WT_MASTER_TUI_CMD=` to keep the legacy single-pane master. Because the TUI
+and agent panes have semantic roles, session-control commands continue to
+target the agent even if panes are reordered.
+
 ## Architecture
 
 ```
@@ -456,6 +473,9 @@ Status bar → wt-tmux-status aggregates status counts from wt-state
 | `WT_STATE` | `<bin>/wt-state` | Path to the `wt-state` binary |
 | `WT_LOG_FILE` | `$WT_STATUS_DIR/wt.log` | Log file path |
 | `WT_DEFAULT_AGENT` | `opencode` | Default agent CLI (opencode, claude, codex, gemini) |
+| `WT_MASTER_TUI_CMD` | `linear-tui` | Command for the master session's left pane; set empty to disable |
+| `WT_MASTER_TUI_WIDTH` | `50` | Percentage of the master window assigned to the left TUI |
+| `WT_MASTER_TUI_CWD` | `$WT_BASE_DIR/.master` | Working directory for the master TUI |
 | `WT_DIFF_VIEW` | `1` | Boot session nvim into the live diffview.nvim diff; set `0` to disable |
 | `WT_NVIM_SOCK_DIR` | `$WT_STATUS_DIR/nvim-sockets` | Where per-session nvim RPC sockets live |
 | `WT_FZF_VIM` | `0` | Set `1` for vim-style modal keybindings in the fzf pickers |

@@ -982,8 +982,18 @@ test_master_session() {
     # Kill existing master if any
     tmux kill-session -t wt-master 2>/dev/null || true
 
-    # Create master (in background, don't switch to it)
+    # Create the master layout directly on the private test server. Use the
+    # production pane helper with a harmless shell builtin; never launch a real
+    # TUI or agent from the regression suite.
     tmux new-session -d -s wt-master -c "$HOME" -n agent 2>/dev/null
+    local helper agent_pane tui_pane
+    helper=$(sed -n '/^create_master_tui_pane()/,/^}/p' "$WT_BIN_DIR/wt")
+    eval "$helper"
+    agent_pane=$(tmux display-message -p -t wt-master:agent '#{pane_id}')
+    tmux set-option -pqt "$agent_pane" @wt-pane-role agent
+    tui_pane=$(WT_MASTER_TUI_CMD="printf 'master-tui-ready\\n'" \
+        WT_MASTER_TUI_WIDTH=40 WT_MASTER_TUI_CWD="$HOME" \
+        create_master_tui_pane wt-master "$agent_pane" "$HOME")
     tmux new-window -t wt-master -n shell -c "$HOME" 2>/dev/null
     tmux set-option -qt wt-master @wt-master "1" 2>/dev/null
     tmux set-option -qt wt-master @wt-icon "◆" 2>/dev/null
@@ -996,6 +1006,44 @@ test_master_session() {
         fail "master session not created"
         return
     fi
+
+    local pane_count tui_role agent_role tui_left agent_left
+    pane_count=$(tmux list-panes -t wt-master:agent | wc -l | tr -d ' ')
+    tui_role=$(tmux show-option -pqv -t "$tui_pane" @wt-pane-role 2>/dev/null)
+    agent_role=$(tmux show-option -pqv -t "$agent_pane" @wt-pane-role 2>/dev/null)
+    tui_left=$(tmux display-message -p -t "$tui_pane" '#{pane_left}')
+    agent_left=$(tmux display-message -p -t "$agent_pane" '#{pane_left}')
+    if [[ "$pane_count" == "2" && "$tui_role" == "tui" && "$agent_role" == "agent" \
+        && "$tui_left" -lt "$agent_left" ]]; then
+        pass "master layout is TUI left, agent right with semantic roles"
+    else
+        fail "master split layout is incorrect" \
+            "panes=$pane_count tui_role=$tui_role agent_role=$agent_role left=$tui_left/$agent_left"
+    fi
+
+    local before disabled after
+    before="$pane_count"
+    disabled=$(WT_MASTER_TUI_CMD= WT_MASTER_TUI_WIDTH=50 WT_MASTER_TUI_CWD="$HOME" \
+        create_master_tui_pane wt-master "$agent_pane" "$HOME")
+    after=$(tmux list-panes -t wt-master:agent | wc -l | tr -d ' ')
+    if [[ -z "$disabled" && "$before" == "$after" ]]; then
+        pass "empty WT_MASTER_TUI_CMD disables the TUI pane"
+    else
+        fail "empty WT_MASTER_TUI_CMD created a pane" "before=$before after=$after output=$disabled"
+    fi
+
+    # Session-control commands must resolve the semantic agent pane, not pane 0
+    # (which is now the TUI).
+    "$WT_STATE" set wt-master --is-master 1 --status idle --message Orchestrator \
+        --agent test >/dev/null 2>&1
+    local resolved
+    resolved=$("$WT_BIN_DIR/wt" session pane wt-master 2>/dev/null || true)
+    if [[ "$resolved" == "$agent_pane" ]]; then
+        pass "master session control resolves the right-side agent pane"
+    else
+        fail "master session control resolved '$resolved'" "expected $agent_pane"
+    fi
+    "$WT_STATE" delete wt-master >/dev/null 2>&1 || true
 
     # Check options
     local master_flag

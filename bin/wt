@@ -17,6 +17,13 @@ WT_LOG_FILE="${WT_LOG_FILE:-$WT_STATUS_DIR/wt.log}"
 WT_BIN_DIR="$(dirname "$(readlink -f "$0")")"
 WT_DEFAULT_AGENT="${WT_DEFAULT_AGENT:-opencode}"
 
+# Optional TUI in the left pane of the master session. An explicitly empty
+# command preserves the legacy single-pane master. The cwd defaults to the
+# master's own workspace; width is the percentage assigned to the new pane.
+WT_MASTER_TUI_CMD="${WT_MASTER_TUI_CMD-linear-tui}"
+WT_MASTER_TUI_WIDTH="${WT_MASTER_TUI_WIDTH:-50}"
+WT_MASTER_TUI_CWD="${WT_MASTER_TUI_CWD:-$WT_BASE_DIR/.master}"
+
 # Colon-separated (PATH-style) list of directories the repo picker scans for
 # git repos. If set, it fully replaces the built-in defaults below. Each entry
 # is included if it is itself a primary repo, and its immediate children are
@@ -108,6 +115,66 @@ mark_primary_panes() {
     local session_name="$1"
     tmux set-option -pqt "=$session_name:main.0" @wt-pane-role editor
     tmux set-option -pqt "=$session_name:main.1" @wt-pane-role agent
+}
+
+# Restore semantic roles on a master layout that predates them. The TUI is the
+# left pane and the agent is the right pane; a legacy one-pane master is all
+# agent. Existing roles win so manual pane swaps do not change identity.
+mark_master_panes() {
+    local session_name="$1" pane left
+    local panes=()
+
+    [[ -n "$(pane_by_role "$session_name" agent)" ]] && return 0
+    while IFS=$'\037' read -r pane left; do
+        [[ -n "$pane" ]] && panes+=("$pane")
+    done < <(tmux list-panes -t "=$session_name:agent" \
+        -F $'#{pane_id}\037#{pane_left}' 2>/dev/null | sort -t $'\037' -k2,2n)
+
+    if [[ ${#panes[@]} -ge 2 ]]; then
+        tmux set-option -pqt "${panes[0]}" @wt-pane-role tui
+        tmux set-option -pqt "${panes[1]}" @wt-pane-role agent
+    elif [[ ${#panes[@]} -eq 1 ]]; then
+        tmux set-option -pqt "${panes[0]}" @wt-pane-role agent
+    fi
+}
+
+# Add the configured master TUI before (to the left of) the existing agent
+# pane. The command is typed literally into an ordinary shell so quitting the
+# TUI leaves a usable pane instead of collapsing the layout.
+create_master_tui_pane() {
+    local session_name="$1" agent_pane="$2" fallback_cwd="$3"
+    local configured_cmd="$WT_MASTER_TUI_CMD" launch_cmd="$WT_MASTER_TUI_CMD"
+    local width="$WT_MASTER_TUI_WIDTH" cwd="$WT_MASTER_TUI_CWD" tui_pane binary
+
+    [[ -n "$configured_cmd" ]] || return 0
+
+    # linear-tui is the friendly default, not a hard dependency. Resolve its
+    # absolute path here so a tmux server with an older sticky PATH can run it.
+    if [[ "$configured_cmd" == "linear-tui" ]]; then
+        binary=$(command -v linear-tui 2>/dev/null || true)
+        if [[ -z "$binary" ]]; then
+            echo "linear-tui not found; starting master without a TUI pane." >&2
+            echo "Install it, set WT_MASTER_TUI_CMD, or set WT_MASTER_TUI_CMD= to disable this hint." >&2
+            return 0
+        fi
+        launch_cmd=$(shell_quote "$binary")
+    fi
+
+    if [[ ! "$width" =~ ^[0-9]+$ ]] || (( width < 10 || width > 90 )); then
+        echo "Invalid WT_MASTER_TUI_WIDTH '$width'; using 50." >&2
+        width=50
+    fi
+    if [[ ! -d "$cwd" ]]; then
+        echo "WT_MASTER_TUI_CWD '$cwd' does not exist; using '$fallback_cwd'." >&2
+        cwd="$fallback_cwd"
+    fi
+
+    tui_pane=$(tmux split-window -b -h -p "$width" -P -F '#{pane_id}' \
+        -t "$agent_pane" -c "$cwd")
+    tmux set-option -pqt "$tui_pane" @wt-pane-role tui
+    tmux send-keys -l -t "$tui_pane" "$launch_cmd"
+    tmux send-keys -t "$tui_pane" Enter
+    printf '%s\n' "$tui_pane"
 }
 
 # Launch nvim in pane 0 of the session's main window. With the diff view enabled
@@ -1613,6 +1680,9 @@ sync_tmux() {
         tmux has-session -t "=$name" 2>/dev/null || continue
 
         if [[ "$is_master" == "1" ]]; then
+            if tmux list-panes -t "=$name:agent" >/dev/null 2>&1; then
+                mark_master_panes "$name"
+            fi
             tmux set-option -qt "$name" @wt-master  "1"
             tmux set-option -qt "$name" @wt-icon    "◆"
             tmux set-option -qt "$name" @wt-status  "${status:-idle}"
@@ -1681,8 +1751,13 @@ master() {
     opencode_config=$(agent_session_setup "$master_dir" "$agent" "master" "$session" || true)
 
     tmux new-session -d -s "$session" -c "$master_dir" -n agent
+    local agent_pane tui_pane=""
+    agent_pane=$(tmux display-message -p -t "=$session:agent" '#{pane_id}')
+    tmux set-option -pqt "$agent_pane" @wt-pane-role agent
+    tui_pane=$(create_master_tui_pane "$session" "$agent_pane" "$master_dir")
     tmux new-window -t "=$session" -n shell -c "$HOME"
     tmux select-window -t "=$session:agent"
+    tmux select-pane -t "$agent_pane"
 
     tmux set-option -qt "$session" @wt-opencode-config "$opencode_config"
     if [[ -n "$opencode_config" ]]; then
@@ -1691,9 +1766,9 @@ master() {
 
     # Start agent without --ide (master has no nvim)
     if [[ "$agent" == "opencode" && -n "$opencode_config" ]]; then
-        tmux send-keys -t "=$session:agent" "OPENCODE_CONFIG=$(shell_quote "$opencode_config") $bin" Enter
+        tmux send-keys -t "$agent_pane" "OPENCODE_CONFIG=$(shell_quote "$opencode_config") $bin" Enter
     else
-        tmux send-keys -t "=$session:agent" "$bin" Enter
+        tmux send-keys -t "$agent_pane" "$bin" Enter
     fi
 
     # Set tmux metadata
@@ -2718,6 +2793,10 @@ Environment:
   WT_BASE_DIR        Base directory for worktrees (default: ~/worktrees)
   WT_STATUS_DIR      Status file directory (default: ~/.local/state/wt)
   WT_DEFAULT_AGENT   Default agent CLI (default: opencode)
+  WT_MASTER_TUI_CMD  Command for the master's left pane (default: linear-tui;
+                     set empty to keep a single-pane master)
+  WT_MASTER_TUI_WIDTH Percentage of the master window used by the TUI (default: 50)
+  WT_MASTER_TUI_CWD  Working directory for the master TUI (default: master workspace)
   WT_REPO_DIRS       Colon-separated dirs the repo picker scans; replaces the
                      built-in defaults (~/gt:~/code:~/projects:~/src:~/dev:
                      ~/work:~/workspace:~/repos). Each dir is listed if it is
