@@ -338,7 +338,7 @@ test_mobile_session_control() {
         return
     fi
 
-    picker_source=$(sed -n '/^session_picker()/,/^}/p; /^mobile_mode()/,/^}/p' "$WT_BIN_DIR/wt")
+    picker_source=$(sed -n '/^session_picker_rows()/,/^}/p; /^session_picker()/,/^}/p; /^mobile_mode()/,/^}/p' "$WT_BIN_DIR/wt")
     if grep -Fq 'selection=$(session_picker all true)' "$WT_BIN_DIR/wt" \
         && grep -Fq 'pick_worktree' <<<"$picker_source" \
         && grep -Fq "preview_window='down,50%,border-top,wrap'" <<<"$picker_source" \
@@ -346,6 +346,13 @@ test_mobile_session_control() {
         pass "mobile and prefix+s share the responsive session picker"
     else
         fail "mobile still has a separate session-menu implementation" "$picker_source"
+    fi
+
+    if grep -Fq 'session_picker_rows "$scope" | fzf' <<<"$picker_source" \
+        && ! grep -Fq 'rows=$(pick_list)' <<<"$picker_source"; then
+        pass "shared picker starts fzf concurrently with candidate generation"
+    else
+        fail "shared picker buffers candidates before starting fzf" "$picker_source"
     fi
 
     local pane_conf mobile_bindings
