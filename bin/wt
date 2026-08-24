@@ -1594,16 +1594,23 @@ picker_is_portrait() {
 # The one session menu used by `wt pick`, `wt switch`, prefix+s, and mobile.
 # Only its data scope and responsive layout vary: narrow clients stack the raw
 # Git diff below the list, while wider clients retain the richer right preview.
+session_picker_rows() {
+    local scope="${1:-all}"
+
+    if [[ "$scope" == live ]]; then
+        while IFS=: read -r name path rest; do
+            if tmux has-session -t "=$name" 2>/dev/null; then
+                printf '%s:%s:%s\n' "$name" "$path" "$rest"
+            fi
+        done < <(pick_list)
+    else
+        pick_list
+    fi
+}
+
 session_picker() {
     local scope="${1:-all}" allow_delete="${2:-false}"
-    local rows selection rc=0 header preview preview_window delete_bind=""
-
-    rows=$(pick_list)
-    if [[ "$scope" == live ]]; then
-        rows=$(while IFS=: read -r name path rest; do
-            tmux has-session -t "=$name" 2>/dev/null && printf '%s:%s:%s\n' "$name" "$path" "$rest"
-        done <<<"$rows")
-    fi
+    local selection rc=0 header preview preview_window delete_bind=""
 
     if picker_is_portrait; then
         header="Select session · Enter open · ? diff"
@@ -1634,7 +1641,9 @@ session_picker() {
     )
     [[ -n "$delete_bind" ]] && fzf_args+=(--bind="$delete_bind")
 
-    selection=$(printf '%s\n' "$rows" | fzf "${fzf_args[@]}") || rc=$?
+    # Keep fzf concurrent with candidate generation so its UI appears while
+    # the recency-ranked worktree list is still being assembled.
+    selection=$(session_picker_rows "$scope" | fzf "${fzf_args[@]}") || rc=$?
     if (( rc == 130 )); then return 0; fi
     [[ -n "$selection" ]] && printf '%s\n' "$selection"
 }
