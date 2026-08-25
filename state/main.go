@@ -221,6 +221,10 @@ func fieldValue(s Session, col string) string {
 		return s.OpencodeConfig
 	case "is_master":
 		return fmt.Sprintf("%d", b2i(s.IsMaster))
+	case "kind":
+		return s.Kind
+	case "workspace_path":
+		return s.WorkspacePath
 	case "updated_at":
 		return fmt.Sprintf("%d", s.UpdatedAt)
 	case "status_changed_at":
@@ -239,7 +243,7 @@ func fieldValue(s Session, col string) string {
 
 // flagName/colName map between column names (snake_case) and CLI flag names
 // (kebab-case), e.g. wt_path <-> wt-path.
-func flagName(col string) string { return replaceAll(col, '_', '-') }
+func flagName(col string) string  { return replaceAll(col, '_', '-') }
 func colName(flagN string) string { return replaceAll(flagN, '-', '_') }
 
 func replaceAll(s string, from, to byte) string {
@@ -267,6 +271,7 @@ session store:
   wt-state set <name> [--status S] [--message M] [--repo R] [--branch B]
                       [--wt-path P] [--pr N] [--agent A]
                       [--opencode-config C] [--is-master 0|1]
+                      [--kind worktree|workspace|master] [--workspace-path P]
                       [--pr-state merged|open|closed|draft|none]
                       [--agent-session-id ID]
   wt-state get <name> [--field COL | --json]

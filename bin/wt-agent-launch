@@ -34,6 +34,10 @@ resume_session_id=""
 if [[ -n "${TMUX:-}" ]]; then
     local_session=$(tmux display-message -p '#{session_name}' 2>/dev/null || true)
     if [[ -n "$local_session" ]]; then
+        # Hooks inherit this stable identity through the agent process. Unlike
+        # cwd-derived repo/branch names, it remains correct when the agent
+        # visits another checkout in a future workspace session.
+        export WT_SESSION="$local_session"
         tmux_agent=$(tmux show-option -qv -t "$local_session" @wt-agent 2>/dev/null || true)
         opencode_candidate=$(tmux show-option -qv -t "$local_session" @wt-opencode-config 2>/dev/null || true)
         if json=$("$WT_STATE" get "$local_session" --json 2>/dev/null); then

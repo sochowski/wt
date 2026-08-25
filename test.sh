@@ -619,7 +619,7 @@ test_status_file() {
     # Check required fields are present in the JSON row
     local json
     json=$("$WT_STATE" get "$TEST_SESSION" --json 2>/dev/null)
-    for field in status message repo branch wt_path agent opencode_config updated_at status_changed_at; do
+    for field in status message repo branch wt_path agent opencode_config kind workspace_path updated_at status_changed_at; do
         if echo "$json" | jq -e "has(\"$field\")" >/dev/null 2>&1; then
             pass "field present: $field=$(echo "$json" | jq -r ".$field")"
         else
@@ -675,7 +675,7 @@ test_tmux_options() {
         return
     fi
 
-    for opt in @wt-status @wt-icon @wt-message @wt-repo @wt-branch @wt-wt-path @wt-agent @wt-master @wt-opencode-config; do
+    for opt in @wt-status @wt-icon @wt-message @wt-repo @wt-branch @wt-wt-path @wt-agent @wt-master @wt-opencode-config @wt-session; do
         local val
         val=$(tmux show-option -qv -t "$TEST_SESSION" "$opt" 2>/dev/null)
         if [[ -n "$val" || "$opt" == "@wt-wt-path" || "$opt" == "@wt-master" || "$opt" == "@wt-opencode-config" ]]; then
@@ -684,6 +684,14 @@ test_tmux_options() {
             fail "$opt not set"
         fi
     done
+
+    local session_env
+    session_env=$(tmux show-environment -t "=$TEST_SESSION" WT_SESSION 2>/dev/null || true)
+    if [[ "$session_env" == "WT_SESSION=$TEST_SESSION" ]]; then
+        pass "tmux session environment carries WT_SESSION=$TEST_SESSION"
+    else
+        fail "tmux WT_SESSION identity missing" "$session_env"
+    fi
 }
 
 test_diff_view() {
@@ -831,6 +839,52 @@ test_wt_hook_dual_write() {
     else
         fail "stop hook: status is '$tmux_status' (expected 'idle')"
     fi
+}
+
+test_wt_hook_stable_session_identity() {
+    section "wt-hook: stable session identity"
+
+    if [[ -z "$TEST_SESSION" ]]; then
+        fail "skipped: no test session"
+        return
+    fi
+
+    # A future workspace agent can run tools outside its original checkout.
+    # The exported identity must keep those hook writes on the owning session.
+    local outside
+    outside=$(mktemp -d)
+    (cd "$outside" && WT_SESSION="$TEST_SESSION" "$WT_BIN_DIR/wt-hook" pre-tool CrossRepo) 2>/dev/null
+
+    local status message
+    status=$(state_field "$TEST_SESSION" status)
+    message=$(state_field "$TEST_SESSION" message)
+    if [[ "$status" == "working" && "$message" == "Using CrossRepo" ]]; then
+        pass "WT_SESSION routes hooks independently of cwd"
+    else
+        fail "stable hook identity did not update owning session" "status=$status message=$message"
+    fi
+
+    # An agent that predates this feature cannot inherit a newly set tmux env
+    # variable. Run a hook in a target-session pane with WT_SESSION explicitly
+    # removed; the @wt-session/tracked-tmux fallback must still route it.
+    local pane command i
+    pane=$(tmux new-window -d -P -F '#{pane_id}' -t "$TEST_SESSION" \
+        -n hook-identity -c "$outside")
+    printf -v command 'unset WT_SESSION; %q pre-tool LegacyCrossRepo' "$WT_BIN_DIR/wt-hook"
+    tmux send-keys -t "$pane" -l "$command"
+    tmux send-keys -t "$pane" Enter
+    for i in $(seq 1 20); do
+        message=$(state_field "$TEST_SESSION" message)
+        [[ "$message" == "Using LegacyCrossRepo" ]] && break
+        sleep 0.1
+    done
+    tmux kill-window -t "$TEST_SESSION:hook-identity" 2>/dev/null || true
+    if [[ "$message" == "Using LegacyCrossRepo" ]]; then
+        pass "tracked tmux fallback routes already-running agents"
+    else
+        fail "tracked tmux fallback did not route hook" "$message"
+    fi
+    rm -rf "$outside"
 }
 
 test_sync_tmux() {
@@ -1603,6 +1657,7 @@ main() {
     test_diff_view
     test_status_metadata_recovery
     test_wt_hook_dual_write
+    test_wt_hook_stable_session_identity
     test_sync_tmux
     test_wt_list
     test_pr_badge

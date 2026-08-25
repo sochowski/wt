@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"os"
 	"path/filepath"
 	"testing"
@@ -54,6 +55,101 @@ func TestAgentSessionIDRoundTrips(t *testing.T) {
 	after, _ := st.Set("s", map[string]string{"status": "offline"})
 	if after.AgentSessionID != "abc-123" {
 		t.Errorf("agent_session_id not preserved: %q", after.AgentSessionID)
+	}
+}
+
+func TestSessionScopeRoundTrips(t *testing.T) {
+	st, _ := newStore(t)
+
+	// Legacy worktree callers only set wt_path; the scope defaults should make
+	// that checkout the session workspace without requiring a coordinated write.
+	worktree, err := st.Set("repo-feature", map[string]string{"wt_path": "/worktrees/repo/feature"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if worktree.Kind != "worktree" || worktree.WorkspacePath != worktree.WtPath {
+		t.Fatalf("worktree scope = kind %q workspace %q, want worktree/%q",
+			worktree.Kind, worktree.WorkspacePath, worktree.WtPath)
+	}
+
+	workspace, err := st.Set("investigate-auth", map[string]string{
+		"kind": "workspace", "workspace_path": "/workspaces/investigate-auth",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if workspace.Kind != "workspace" || workspace.WorkspacePath != "/workspaces/investigate-auth" || workspace.IsMaster {
+		t.Fatalf("workspace scope wrong: %+v", workspace)
+	}
+
+	// Old and new callers can each describe a master while is_master remains
+	// available for the existing list/count filters.
+	legacyMaster, err := st.Set("legacy-master", map[string]string{"is_master": "1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacyMaster.Kind != "master" || !legacyMaster.IsMaster {
+		t.Fatalf("legacy master scope wrong: %+v", legacyMaster)
+	}
+	newMaster, err := st.Set("new-master", map[string]string{"kind": "master"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if newMaster.Kind != "master" || !newMaster.IsMaster {
+		t.Fatalf("new master scope wrong: %+v", newMaster)
+	}
+
+	if _, err := st.Set("bad", map[string]string{"kind": "repository"}); err == nil {
+		t.Fatal("invalid session kind was accepted")
+	}
+}
+
+func TestOpenBackfillsSessionScope(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`
+CREATE TABLE sessions (
+  name TEXT PRIMARY KEY, status TEXT NOT NULL DEFAULT 'unknown',
+  message TEXT NOT NULL DEFAULT '', repo TEXT NOT NULL DEFAULT '',
+  branch TEXT NOT NULL DEFAULT '', wt_path TEXT NOT NULL DEFAULT '',
+  pr TEXT NOT NULL DEFAULT '', agent TEXT NOT NULL DEFAULT '',
+  opencode_config TEXT NOT NULL DEFAULT '', is_master INTEGER NOT NULL DEFAULT 0,
+  updated_at INTEGER NOT NULL DEFAULT 0, status_changed_at INTEGER NOT NULL DEFAULT 0,
+  pr_state TEXT NOT NULL DEFAULT '', pr_state_checked_at INTEGER NOT NULL DEFAULT 0,
+  agent_session_id TEXT NOT NULL DEFAULT ''
+);
+INSERT INTO sessions (name, wt_path) VALUES ('repo-feature', '/worktrees/repo/feature');
+INSERT INTO sessions (name, is_master) VALUES ('wt-master', 1);`)
+	if err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	st, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	worktree, ok, err := st.Get("repo-feature")
+	if err != nil || !ok {
+		t.Fatalf("get worktree = %v, %v", ok, err)
+	}
+	if worktree.Kind != "worktree" || worktree.WorkspacePath != worktree.WtPath {
+		t.Errorf("backfilled worktree scope wrong: %+v", worktree)
+	}
+	master, ok, err := st.Get("wt-master")
+	if err != nil || !ok {
+		t.Fatalf("get master = %v, %v", ok, err)
+	}
+	if master.Kind != "master" || !master.IsMaster {
+		t.Errorf("backfilled master scope wrong: %+v", master)
 	}
 }
 

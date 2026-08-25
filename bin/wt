@@ -312,6 +312,26 @@ shell_quote() {
     printf "%q" "$1"
 }
 
+# Give every managed tmux session a stable identity independent of its panes'
+# working directories. Future panes inherit the session environment;
+# wt-agent-launch also exports the live tmux name for the initial agent pane,
+# whose shell was created before set-environment can run.
+set_tmux_session_identity() {
+    local session_name="$1" session_id="" candidate candidate_id sep=$'\037'
+    # Resolve by exact name from the server's session list. display-message's
+    # target-pane resolution can fall back to the caller's pane for a bare
+    # =session target, which would silently stamp the invoking session instead.
+    while IFS="$sep" read -r candidate candidate_id; do
+        if [[ "$candidate" == "$session_name" ]]; then
+            session_id="$candidate_id"
+            break
+        fi
+    done < <(tmux list-sessions -F "#{session_name}${sep}#{session_id}")
+    [[ -n "$session_id" ]] || return 1
+    tmux set-option -qt "$session_id" @wt-session "$session_name"
+    tmux set-environment -t "$session_id" WT_SESSION "$session_name"
+}
+
 # Check for required commands
 check_deps() {
     local missing=()
@@ -458,12 +478,16 @@ load_session() {
 # Persist the current status/* vars for a session (full overwrite). Relies on
 # bash dynamic scoping: the caller's locals are visible here.
 save_session() {
-    local name="$1"
+    local name="$1" scope_kind="${2:-}" scope_path="${3:-}"
+    local -a scope_args=()
+    [[ -n "$scope_kind" ]] && scope_args+=(--kind "$scope_kind")
+    [[ -n "$scope_path" ]] && scope_args+=(--workspace-path "$scope_path")
     "$WT_STATE" set "$name" \
         --status "${status:-}" --message "${message:-}" \
         --repo "${repo:-}" --branch "${branch:-}" --wt-path "${wt_path:-}" \
         --pr "${pr:-}" --agent "${agent:-}" \
-        --opencode-config "${opencode_config:-}" >/dev/null
+        --opencode-config "${opencode_config:-}" \
+        "${scope_args[@]}" >/dev/null
 }
 
 set_status() {
@@ -805,6 +829,7 @@ create_worktree() {
     local base_branch="${5:-}"
     local agent="${6:-$WT_DEFAULT_AGENT}"
     local switch_after="${7:-false}"  # only steal the client's focus when asked
+    local kind="worktree" workspace_path=""
 
     # Resolve to absolute path
     repo_path=$(cd "$repo_path" && pwd)
@@ -818,6 +843,7 @@ create_worktree() {
 
     # Check if worktree already exists on disk
     if [[ -d "$wt_path" ]] && tmux has-session -t "=$session_name" 2>/dev/null; then
+        set_tmux_session_identity "$session_name"
         echo "Worktree already exists at $wt_path"
         [[ "$switch_after" == "true" ]] && switch_to "$session_name"
         return
@@ -868,11 +894,13 @@ create_worktree() {
     else
         echo "Worktree exists at $wt_path, recreating session..."
     fi
+    workspace_path="$wt_path"
 
     # Create tmux session
     echo "Creating tmux session: $session_name"
 
     if tmux has-session -t "=$session_name" 2>/dev/null; then
+        set_tmux_session_identity "$session_name"
         echo "Session already exists, attaching..."
         status=idle
         message=Ready
@@ -882,7 +910,7 @@ create_worktree() {
         pr=
         agent=$agent
         opencode_config=$(tmux show-option -qv -t "$session_name" @wt-opencode-config 2>/dev/null || true)
-        save_session "$session_name"
+        save_session "$session_name" "$kind" "$workspace_path"
     else
         local opencode_config=""
         opencode_config=$(agent_session_setup "$wt_path" "$agent" "default" "$session_name" || true)
@@ -892,6 +920,7 @@ create_worktree() {
 
         # Create session with main window (nvim left, agent right)
         tmux new-session -d -s "$session_name" -c "$wt_path" -n main
+        set_tmux_session_identity "$session_name"
 
         # Start nvim in the left pane (boots into the live diff view)
         launch_nvim "$session_name" "$wt_path"
@@ -913,7 +942,7 @@ create_worktree() {
         pr=
         agent=$agent
         opencode_config=$opencode_config
-        save_session "$session_name"
+        save_session "$session_name" "$kind" "$workspace_path"
 
         # Set tmux session options (status + metadata)
         tmux set-option -qt "$session_name" @wt-status  "idle"
@@ -1425,6 +1454,7 @@ revive_worktree_session() {
     opencode_config=$(agent_session_setup "$wt_path" "$agent" "default" "$session_name" || true)
 
     tmux new-session -d -s "$session_name" -c "$wt_path" -n main
+    set_tmux_session_identity "$session_name"
     launch_nvim "$session_name" "$wt_path"
     tmux split-window -h -t "=$session_name:main" -c "$wt_path"
     tmux select-window -t "=$session_name:main"
@@ -1688,6 +1718,7 @@ sync_tmux() {
     local name status message repo branch wt_path pr agent opencode_config is_master icon
     while IFS=$'\037' read -r name status message repo branch wt_path pr agent opencode_config is_master; do
         tmux has-session -t "=$name" 2>/dev/null || continue
+        set_tmux_session_identity "$name"
 
         if [[ "$is_master" == "1" ]]; then
             if tmux list-panes -t "=$name:agent" >/dev/null 2>&1; then
@@ -1731,8 +1762,10 @@ master() {
     local agent="${1:-$WT_DEFAULT_AGENT}"
     local force="${2:-false}"
     local session="wt-master"
+    local master_dir="$WT_BASE_DIR/.master"
 
     if tmux has-session -t "=$session" 2>/dev/null; then
+        set_tmux_session_identity "$session"
         if [[ "$force" == "true" ]]; then
             echo "Replacing existing master session..."
             # Switch away first so killing doesn't disconnect the client
@@ -1743,6 +1776,8 @@ master() {
             fi
             tmux kill-session -t "=$session"
         else
+            "$WT_STATE" set "$session" --is-master 1 --kind master \
+                --workspace-path "$master_dir" >/dev/null
             echo "Master session already exists, switching..."
             switch_to "$session"
             return
@@ -1755,12 +1790,12 @@ master() {
     echo "Creating master session ($agent)..."
 
     # Set up master working directory with MCP profile
-    local master_dir="$WT_BASE_DIR/.master"
     mkdir -p "$master_dir"
     local opencode_config=""
     opencode_config=$(agent_session_setup "$master_dir" "$agent" "master" "$session" || true)
 
     tmux new-session -d -s "$session" -c "$master_dir" -n agent
+    set_tmux_session_identity "$session"
     local agent_pane tui_pane=""
     agent_pane=$(tmux display-message -p -t "=$session:agent" '#{pane_id}')
     tmux set-option -pqt "$agent_pane" @wt-pane-role agent
@@ -1776,9 +1811,9 @@ master() {
 
     # Start agent without --ide (master has no nvim)
     if [[ "$agent" == "opencode" && -n "$opencode_config" ]]; then
-        tmux send-keys -t "$agent_pane" "OPENCODE_CONFIG=$(shell_quote "$opencode_config") $bin" Enter
+        tmux send-keys -t "$agent_pane" "WT_SESSION=$(shell_quote "$session") OPENCODE_CONFIG=$(shell_quote "$opencode_config") $bin" Enter
     else
-        tmux send-keys -t "$agent_pane" "$bin" Enter
+        tmux send-keys -t "$agent_pane" "WT_SESSION=$(shell_quote "$session") $bin" Enter
     fi
 
     # Set tmux metadata
@@ -1793,6 +1828,7 @@ master() {
 
     # Persist master as a row (is_master=1 keeps it out of status-bar counts)
     "$WT_STATE" set "$session" --is-master 1 --status idle --message Orchestrator \
+        --kind master --workspace-path "$master_dir" \
         --agent "$agent" --opencode-config "$opencode_config" >/dev/null
 
     switch_to "$session"
@@ -2699,6 +2735,7 @@ start_agent() {
         echo "Session '$session_name' does not exist"
         return 1
     fi
+    set_tmux_session_identity "$session_name"
 
     # Send agent launch command
     if [[ -n "$task" ]]; then
