@@ -21,12 +21,36 @@ WT_STATE="${WT_STATE:-$WT_HOOK_DIR/wt-state}"
 mkdir -p "$WT_STATUS_DIR"
 
 # -----------------------------------------------------------------------------
-#  Determine Session Name from CWD
+#  Determine Session Name
 # -----------------------------------------------------------------------------
 get_session_name() {
     local cwd="${1:-$(pwd)}"
 
-    # Check if we're in a worktree under WT_BASE_DIR
+    # Managed launches export the stable tmux session identity. This must win
+    # over cwd: a workspace agent may legitimately operate in several repos.
+    if [[ -n "${WT_SESSION:-}" ]]; then
+        printf '%s\n' "$WT_SESSION"
+        return 0
+    fi
+
+    # Upgrade path for agents that were already running when WT_SESSION was
+    # introduced. A marked or state-tracked tmux session is authoritative even
+    # though its long-lived agent process cannot inherit a later env update.
+    if [[ -n "${TMUX:-}" ]]; then
+        local tmux_session tmux_session_id marked_session
+        tmux_session=$(tmux display-message -p '#{session_name}' 2>/dev/null || true)
+        tmux_session_id=$(tmux display-message -p '#{session_id}' 2>/dev/null || true)
+        if [[ -n "$tmux_session" ]]; then
+            marked_session=$(tmux show-option -qv -t "$tmux_session_id" @wt-session 2>/dev/null || true)
+            if [[ "$marked_session" == "$tmux_session" ]] \
+                || "$WT_STATE" get "$tmux_session" >/dev/null 2>&1; then
+                printf '%s\n' "$tmux_session"
+                return 0
+            fi
+        fi
+    fi
+
+    # Legacy fallback: infer repo/branch from cwd.
     if [[ "$cwd" == "$WT_BASE_DIR"/* ]]; then
         # Extract repo/branch from path like ~/worktrees/repo/branch
         local rel_path="${cwd#$WT_BASE_DIR/}"

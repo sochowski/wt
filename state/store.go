@@ -23,6 +23,8 @@ type Session struct {
 	Agent           string `json:"agent"`
 	OpencodeConfig  string `json:"opencode_config"`
 	IsMaster        bool   `json:"is_master"`
+	Kind            string `json:"kind"`
+	WorkspacePath   string `json:"workspace_path"`
 	UpdatedAt       int64  `json:"updated_at"`
 	StatusChangedAt int64  `json:"status_changed_at"`
 	// PRState caches the GitHub PR state for this session's branch
@@ -41,7 +43,7 @@ type Session struct {
 // column names that `set` and `get --field` accept, in a stable order.
 var columns = []string{
 	"status", "message", "repo", "branch", "wt_path",
-	"pr", "agent", "opencode_config", "is_master",
+	"pr", "agent", "opencode_config", "is_master", "kind", "workspace_path",
 	"updated_at", "status_changed_at",
 	"pr_state", "pr_state_checked_at",
 	"agent_session_id",
@@ -95,6 +97,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   agent             TEXT    NOT NULL DEFAULT '',
   opencode_config   TEXT    NOT NULL DEFAULT '',
   is_master         INTEGER NOT NULL DEFAULT 0,
+  kind              TEXT    NOT NULL DEFAULT 'worktree',
+  workspace_path    TEXT    NOT NULL DEFAULT '',
   updated_at        INTEGER NOT NULL DEFAULT 0,
   status_changed_at INTEGER NOT NULL DEFAULT 0,
   pr_state            TEXT    NOT NULL DEFAULT '',
@@ -111,25 +115,39 @@ CREATE TABLE IF NOT EXISTS sessions (
 		`ALTER TABLE sessions ADD COLUMN pr_state TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE sessions ADD COLUMN pr_state_checked_at INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE sessions ADD COLUMN agent_session_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE sessions ADD COLUMN kind TEXT NOT NULL DEFAULT 'worktree'`,
+		`ALTER TABLE sessions ADD COLUMN workspace_path TEXT NOT NULL DEFAULT ''`,
 	} {
 		if _, err := s.db.Exec(stmt); err != nil &&
 			!strings.Contains(err.Error(), "duplicate column name") {
 			return err
 		}
 	}
+	// Backfill the new scope fields without requiring callers to rewrite every
+	// existing row. A normal worktree's workspace is its checkout today; master
+	// remains the one legacy row whose path was not previously persisted.
+	if _, err := s.db.Exec(`
+UPDATE sessions
+SET kind = CASE WHEN is_master = 1 THEN 'master' ELSE 'worktree' END
+WHERE kind = '' OR (is_master = 1 AND kind = 'worktree');
+UPDATE sessions
+SET workspace_path = wt_path
+WHERE workspace_path = '' AND wt_path <> '';`); err != nil {
+		return err
+	}
 	return nil
 }
 
 const selectCols = `name, status, message, repo, branch, wt_path, pr, agent,
-	opencode_config, is_master, updated_at, status_changed_at,
+	opencode_config, is_master, kind, workspace_path, updated_at, status_changed_at,
 	pr_state, pr_state_checked_at, agent_session_id`
 
 func scanSession(row interface{ Scan(...any) error }) (Session, error) {
 	var s Session
 	err := row.Scan(&s.Name, &s.Status, &s.Message, &s.Repo, &s.Branch,
 		&s.WtPath, &s.PR, &s.Agent, &s.OpencodeConfig, &s.IsMaster,
-		&s.UpdatedAt, &s.StatusChangedAt, &s.PRState, &s.PRStateCheckedAt,
-		&s.AgentSessionID)
+		&s.Kind, &s.WorkspacePath, &s.UpdatedAt, &s.StatusChangedAt,
+		&s.PRState, &s.PRStateCheckedAt, &s.AgentSessionID)
 	return s, err
 }
 
@@ -161,7 +179,7 @@ func (s *Store) Set(name string, fields map[string]string) (Session, error) {
 	existed := true
 	if err == sql.ErrNoRows {
 		existed = false
-		cur = Session{Name: name, Status: "unknown"}
+		cur = Session{Name: name, Status: "unknown", Kind: "worktree"}
 	} else if err != nil {
 		return Session{}, err
 	}
@@ -191,6 +209,15 @@ func (s *Store) Set(name string, fields map[string]string) (Session, error) {
 			cur.OpencodeConfig = v
 		case "is_master":
 			cur.IsMaster = v == "1" || strings.EqualFold(v, "true")
+		case "kind":
+			switch v {
+			case "worktree", "workspace", "master":
+				cur.Kind = v
+			default:
+				return Session{}, fmt.Errorf("invalid session kind %q", v)
+			}
+		case "workspace_path":
+			cur.WorkspacePath = v
 		case "pr_state":
 			// pr_state_checked_at auto-stamps on every write, even when the
 			// state is unchanged, so a TTL refresh that re-confirms the same
@@ -203,6 +230,28 @@ func (s *Store) Set(name string, fields map[string]string) (Session, error) {
 			return Session{}, fmt.Errorf("unknown field %q", k)
 		}
 	}
+	// Keep the legacy master bit and the new kind coherent while both APIs are
+	// supported. Callers that only know is_master continue to produce a master;
+	// callers using kind=master continue to work with old list/count filters.
+	_, kindProvided := fields["kind"]
+	if _, masterProvided := fields["is_master"]; masterProvided && !kindProvided {
+		if cur.IsMaster {
+			cur.Kind = "master"
+		} else if cur.Kind == "master" {
+			cur.Kind = "worktree"
+		}
+	}
+	if kindProvided {
+		cur.IsMaster = cur.Kind == "master"
+	}
+	if cur.Kind == "" {
+		cur.Kind = "worktree"
+	}
+	// A worktree session's checkout is also its workspace in the legacy model.
+	// Explicit workspace_path always wins, including an intentionally empty one.
+	if _, provided := fields["workspace_path"]; !provided && cur.WorkspacePath == "" && cur.WtPath != "" {
+		cur.WorkspacePath = cur.WtPath
+	}
 
 	cur.Name = name
 	cur.UpdatedAt = now
@@ -212,21 +261,22 @@ func (s *Store) Set(name string, fields map[string]string) (Session, error) {
 
 	_, err = tx.Exec(`
 INSERT INTO sessions (name, status, message, repo, branch, wt_path, pr, agent,
-	opencode_config, is_master, updated_at, status_changed_at,
+	opencode_config, is_master, kind, workspace_path, updated_at, status_changed_at,
 	pr_state, pr_state_checked_at, agent_session_id)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(name) DO UPDATE SET
 	status=excluded.status, message=excluded.message, repo=excluded.repo,
 	branch=excluded.branch, wt_path=excluded.wt_path, pr=excluded.pr,
 	agent=excluded.agent, opencode_config=excluded.opencode_config,
-	is_master=excluded.is_master, updated_at=excluded.updated_at,
+	is_master=excluded.is_master, kind=excluded.kind,
+	workspace_path=excluded.workspace_path, updated_at=excluded.updated_at,
 	status_changed_at=excluded.status_changed_at,
 	pr_state=excluded.pr_state, pr_state_checked_at=excluded.pr_state_checked_at,
 	agent_session_id=excluded.agent_session_id`,
 		cur.Name, cur.Status, cur.Message, cur.Repo, cur.Branch, cur.WtPath,
 		cur.PR, cur.Agent, cur.OpencodeConfig, b2i(cur.IsMaster),
-		cur.UpdatedAt, cur.StatusChangedAt, cur.PRState, cur.PRStateCheckedAt,
-		cur.AgentSessionID)
+		cur.Kind, cur.WorkspacePath, cur.UpdatedAt, cur.StatusChangedAt,
+		cur.PRState, cur.PRStateCheckedAt, cur.AgentSessionID)
 	if err != nil {
 		return Session{}, err
 	}
