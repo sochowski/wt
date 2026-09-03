@@ -24,9 +24,9 @@ Each agent gets its own worktree and its own tmux session — agent and editor
 side by side, with managed shells on demand — plus a live status you can see at a glance, so you always know
 which one is working, which is waiting on you, and which is done.
 
-It works with Claude, Codex, Gemini, and opencode: one session on Claude, the
-next on Codex. The switcher lists whichever session you touched last first, so
-the thing you're waiting on is never buried.
+It works with Claude, Codex, Gemini, opencode, and Pi: one session on Claude,
+the next on Pi. The switcher lists whichever session you touched last first,
+so the thing you're waiting on is never buried.
 
 ## What you get
 
@@ -71,10 +71,11 @@ The installer will:
   - Gemini: `~/.gemini/settings.json`
   - Codex: `~/.codex/config.toml`
   - opencode: `~/.config/opencode/plugins/wt-status.js`
-- Install the shared `wt-shells` Agent Skill for Claude, Codex, Gemini, and
-  OpenCode using user-level skill symlinks
+  - Pi: `~/.pi/agent/extensions/wt`
+- Install the shared `wt-shells` Agent Skill for Claude, Codex, Gemini,
+  OpenCode, and Pi using user-level skill symlinks
 
-Requires: git, tmux, fzf, jq, go (to build `wt-state`), and at least one agent CLI ([Claude Code](https://github.com/anthropics/claude-code), [Codex](https://github.com/openai/codex), [Gemini CLI](https://github.com/google/gemini-cli), or [opencode](https://opencode.ai/))
+Requires: git, tmux, fzf, jq, go (to build `wt-state`), and at least one agent CLI ([Claude Code](https://github.com/anthropics/claude-code), [Codex](https://github.com/openai/codex), [Gemini CLI](https://github.com/google/gemini-cli), [opencode](https://opencode.ai/), or [Pi](https://pi.dev/))
 
 Optional: [gh](https://cli.github.com/) (for PR lookup), [claudecode.nvim](https://github.com/anthropics/claudecode.nvim) (for Claude IDE integration), [diffview.nvim](https://github.com/sindrets/diffview.nvim) + a file watcher ([watchexec](https://github.com/watchexec/watchexec), [entr](https://eradman.com/entrproject/), or `inotifywait`) for the live diff view
 
@@ -86,6 +87,7 @@ wt new                                # Interactive: pick repo, branch, agent
 wt new ~/code feature-x              # Direct: create worktree (background)
 wt new ~/code feature-x --switch      # Create and switch to it
 wt new ~/code feature-x --agent codex # Use specific agent
+wt new ~/code feature-y --agent pi    # Use Pi
 wt pick                               # fzf picker (? to toggle preview)
 wt switch <session>                   # Switch to a session (alias: s)
 wt ls                                 # List sessions with status
@@ -221,7 +223,7 @@ session, such as the master orchestrator.
 skill locations:
 
 ```text
-~/.agents/skills/wt-shells   # Codex + OpenCode
+~/.agents/skills/wt-shells   # Codex + OpenCode + Pi
 ~/.claude/skills/wt-shells   # Claude
 ~/.gemini/skills/wt-shells   # Gemini
 ```
@@ -231,6 +233,19 @@ harnesses also detect it live). Invoke it explicitly as `$wt-shells`, or let an
 agent load it when a task calls for a persistent server, watcher, REPL, debugger,
 or log stream. The skill teaches agents to inspect existing shells before
 starting duplicates and to keep one-shot commands in their native shell tool.
+
+## Pi Integration
+
+When Pi is installed, `install.sh` live-symlinks the bundled extension from
+`config/pi-wt/` into `~/.pi/agent/extensions/wt`. The extension stays inert in
+ordinary Pi sessions and activates only when `wt-agent-launch` exports a
+`WT_SESSION` identity.
+
+Pi lifecycle events update the same working, idle, and input states used by the
+other agents. Its native session id is also captured, so `wt revive` resumes
+the exact conversation with `pi --session <id>`. Accurate settled status needs
+Pi 0.80.4 or newer; blocking extension-UI prompt status needs Pi 0.84.4 or
+newer.
 
 ## Tmux Keybindings
 
@@ -429,7 +444,7 @@ target the agent even if panes are reordered.
 ## Architecture
 
 ```
-Agent hook event
+Agent hook/extension event
   ├── wt-hook writes session state via wt-state (SQLite: ~/.local/state/wt/wt.db)
   ├── wt-hook writes tmux @wt-* session options
   └── wt-hook calls tmux refresh-client -S (instant redraw)
@@ -461,6 +476,7 @@ Status bar → wt-tmux-status aggregates status counts from wt-state
 | `config/claude-hooks.json` | Claude Code hook configuration |
 | `config/hooks-gemini.json` | Gemini CLI hook configuration |
 | `config/opencode-wt-plugin.js` | opencode status plugin |
+| `config/pi-wt/` | Pi status and native-session extension |
 
 ## Environment Variables
 
@@ -472,7 +488,7 @@ Status bar → wt-tmux-status aggregates status counts from wt-state
 | `WT_DB` | `$WT_STATUS_DIR/wt.db` | Path to the SQLite state file |
 | `WT_STATE` | `<bin>/wt-state` | Path to the `wt-state` binary |
 | `WT_LOG_FILE` | `$WT_STATUS_DIR/wt.log` | Log file path |
-| `WT_DEFAULT_AGENT` | `opencode` | Default agent CLI (opencode, claude, codex, gemini) |
+| `WT_DEFAULT_AGENT` | `opencode` | Default agent CLI (opencode, claude, codex, gemini, pi) |
 | `WT_MASTER_TUI_CMD` | `linear-curses` | Command for the master session's left pane; set empty to disable |
 | `WT_MASTER_TUI_WIDTH` | `50` | Percentage of the master window assigned to the left TUI |
 | `WT_MASTER_TUI_CWD` | `$WT_BASE_DIR/.master` | Working directory for the master TUI |

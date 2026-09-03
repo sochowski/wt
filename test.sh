@@ -839,6 +839,34 @@ test_wt_hook_dual_write() {
     else
         fail "stop hook: status is '$tmux_status' (expected 'idle')"
     fi
+
+    # Agent adapters such as Pi use the semantic protocol: native session
+    # identity changes independently of working/idle activity.
+    WT_SESSION="$TEST_SESSION" "$WT_BIN_DIR/wt-hook" session-id pi-native-123 2>/dev/null
+    if [[ "$(state_field "$TEST_SESSION" agent_session_id)" == "pi-native-123" ]]; then
+        pass "semantic session-id records native conversation"
+    else
+        fail "semantic session-id was not recorded" "$(state_field "$TEST_SESSION" agent_session_id)"
+    fi
+
+    WT_SESSION="$TEST_SESSION" "$WT_BIN_DIR/wt-hook" working "Pi working" 2>/dev/null
+    local semantic_status semantic_message
+    semantic_status=$(state_field "$TEST_SESSION" status)
+    semantic_message=$(state_field "$TEST_SESSION" message)
+    if [[ "$semantic_status" == "working" && "$semantic_message" == "Pi working" ]]; then
+        pass "semantic working status preserves adapter message"
+    else
+        fail "semantic working status incorrect" "status=$semantic_status message=$semantic_message"
+    fi
+
+    WT_SESSION="$TEST_SESSION" "$WT_BIN_DIR/wt-hook" idle "Pi finished" 2>/dev/null
+    semantic_status=$(state_field "$TEST_SESSION" status)
+    semantic_message=$(state_field "$TEST_SESSION" message)
+    if [[ "$semantic_status" == "idle" && "$semantic_message" == "Pi finished" ]]; then
+        pass "semantic idle status preserves adapter message"
+    else
+        fail "semantic idle status incorrect" "status=$semantic_status message=$semantic_message"
+    fi
 }
 
 test_wt_hook_stable_session_identity() {
@@ -1377,6 +1405,119 @@ test_opencode_plugin() {
     done
 }
 
+test_pi_extension() {
+    section "Pi Extension"
+
+    local extension_dir="$(dirname "$WT_BIN_DIR")/config/pi-wt"
+    local extension_file="$extension_dir/index.js"
+    if [[ -f "$extension_file" ]]; then
+        pass "pi-wt extension exists"
+    else
+        fail "pi-wt extension not found"
+        return
+    fi
+
+    if ! command -v node >/dev/null 2>&1; then
+        pass "skipped Pi extension runtime test (node not installed)"
+        return
+    fi
+    if node --check "$extension_file" >/dev/null 2>&1; then
+        pass "Pi extension has valid JavaScript"
+    else
+        fail "Pi extension has invalid JavaScript" "$(node --check "$extension_file" 2>&1)"
+        return
+    fi
+
+    # Exercise the extension without invoking Pi or touching real wt state. A
+    # mock ExtensionAPI delivers native events to a stub WT_HOOK, and the copy
+    # gets an .mjs suffix so Node loads the dependency-free source as ESM.
+    local tmp; tmp=$(mktemp -d)
+    cp "$extension_file" "$tmp/index.mjs"
+    cat > "$tmp/wt-hook" <<'SH'
+#!/bin/sh
+printf '%s\n' "$*" >> "$WT_TEST_PI_EVENTS"
+SH
+    chmod +x "$tmp/wt-hook"
+    : > "$tmp/events"
+
+    WT_SESSION=wt-pi-test WT_HOOK="$tmp/wt-hook" WT_TEST_PI_EVENTS="$tmp/events" \
+        node --input-type=module - "$tmp/index.mjs" "$tmp" <<'JS'
+import { pathToFileURL } from "node:url"
+
+const extensionPath = process.argv[2]
+const cwd = process.argv[3]
+const handlers = new Map()
+const pi = { on: (name, handler) => handlers.set(name, handler) }
+const { default: extension } = await import(pathToFileURL(extensionPath))
+extension(pi)
+
+let idle = true
+const ctx = {
+  cwd,
+  isIdle: () => idle,
+  sessionManager: { getSessionId: () => "pi-session-123" },
+}
+await handlers.get("session_start")({ type: "session_start", reason: "startup" }, ctx)
+idle = false
+await handlers.get("agent_start")({ type: "agent_start" }, ctx)
+await handlers.get("tool_execution_start")({ type: "tool_execution_start", toolName: "bash" }, ctx)
+await handlers.get("ui_prompt_start")({ type: "ui_prompt_start", kind: "confirm", title: "Approve?" }, ctx)
+await handlers.get("ui_prompt_end")({ type: "ui_prompt_end", kind: "confirm", title: "Approve?" }, ctx)
+idle = true
+await handlers.get("agent_settled")({ type: "agent_settled" }, ctx)
+await handlers.get("session_shutdown")({ type: "session_shutdown", reason: "quit" }, ctx)
+JS
+    local node_rc=$?
+
+    cat > "$tmp/expected" <<'EOF'
+session-id pi-session-123
+idle Pi ready
+working Pi working
+working Using bash
+input Waiting: Approve?
+working Pi working
+idle Pi finished
+idle Pi stopped
+EOF
+    if [[ $node_rc -eq 0 ]] && cmp -s "$tmp/expected" "$tmp/events"; then
+        pass "Pi lifecycle maps to semantic wt-hook events"
+    else
+        fail "Pi lifecycle event mapping failed" "$(diff -u "$tmp/expected" "$tmp/events" 2>&1 || true)"
+    fi
+
+    # The extension is installed globally but must not register handlers for a
+    # Pi process that was not launched by wt.
+    env -u WT_SESSION WT_HOOK="$tmp/wt-hook" node --input-type=module - "$tmp/index.mjs" <<'JS'
+import { pathToFileURL } from "node:url"
+const handlers = []
+const { default: extension } = await import(pathToFileURL(process.argv[2]))
+extension({ on: (name) => handlers.push(name) })
+if (handlers.length !== 0) process.exit(1)
+JS
+    if [[ $? -eq 0 ]]; then
+        pass "Pi extension stays inert outside wt"
+    else
+        fail "Pi extension registered outside a wt launch"
+    fi
+
+    # Exercise the real registry installer against a fake HOME with only a Pi
+    # stub on PATH. The target must be the auto-discovered extension directory.
+    local stub_bin="$tmp/bin"
+    mkdir -p "$stub_bin"
+    ln -s "$(dirname "$WT_BIN_DIR")/staging/stub-agent" "$stub_bin/pi"
+    PATH="$stub_bin:/usr/bin:/bin" "$WT_STATE" agents install-hooks \
+        --template-dir "$(dirname "$WT_BIN_DIR")/config" \
+        --home "$tmp/home" --state-dir "$tmp/state" >/dev/null 2>&1
+    local installed="$tmp/home/.pi/agent/extensions/wt"
+    if [[ -L "$installed" && "$(readlink -f "$installed")" == "$(readlink -f "$extension_dir")" ]]; then
+        pass "installer links Pi extension into fake HOME"
+    else
+        fail "Pi extension install target is missing or incorrect" "$installed"
+    fi
+
+    rm -rf "$tmp"
+}
+
 test_opencode_mcp_config() {
     section "opencode MCP Config"
 
@@ -1437,7 +1578,7 @@ test_agent_profiles() {
 
     # Binary lookup comes from the wt-state registry now.
     local a bin
-    for a in claude codex gemini opencode; do
+    for a in claude codex gemini opencode pi; do
         bin=$("$WT_STATE" agent "$a" --field binary 2>/dev/null)
         [[ "$bin" == "$a" ]] && pass "agent binary $a = $a" || fail "agent binary $a = $bin"
     done
@@ -1445,8 +1586,8 @@ test_agent_profiles() {
     # The full roster is listed in registry order.
     local list
     list=$("$WT_STATE" agents list 2>/dev/null | tr '\n' ' ')
-    if [[ "$list" == *claude* && "$list" == *codex* && "$list" == *gemini* && "$list" == *opencode* ]]; then
-        pass "agents list includes all four"
+    if [[ "$list" == *claude* && "$list" == *codex* && "$list" == *gemini* && "$list" == *opencode* && "$list" == *pi* ]]; then
+        pass "agents list includes all five"
     else
         fail "agents list = $list"
     fi
@@ -1486,6 +1627,16 @@ test_agent_launch_plan() {
     grep -q "WT_LAUNCH_BINARY='frobnicate'" <<<"$plan" \
         && pass "unknown agent launch-plan execs its name" \
         || fail "unknown launch-plan unexpected" "$plan"
+
+    # Pi launches directly and revives an exact captured conversation.
+    plan=$("$WT_STATE" agent pi launch-plan --resume \
+        --resume-session-id pi-session-123 --sh 2>/dev/null)
+    if grep -q "WT_LAUNCH_BINARY='pi'" <<<"$plan" \
+        && grep -q "WT_LAUNCH_ARGS=('--session' 'pi-session-123')" <<<"$plan"; then
+        pass "Pi launch-plan resumes exact native session"
+    else
+        fail "Pi launch-plan unexpected" "$plan"
+    fi
 }
 
 # Guard the hook wiring: tool data arrives on stdin, not via a made-up env var,
@@ -1641,6 +1792,7 @@ main() {
     test_claude_hooks_json
     test_gemini_hooks_json
     test_opencode_plugin
+    test_pi_extension
     test_opencode_mcp_config
     test_agent_profiles
     test_agent_launch_plan

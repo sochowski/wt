@@ -14,6 +14,13 @@ func TestLookupAgentKnownAndFallback(t *testing.T) {
 	if c.Binary != "claude" || c.Launch != launchClaudeIDE {
 		t.Fatalf("claude lookup = %+v", c)
 	}
+	p := lookupAgent("pi")
+	if p.Binary != "pi" || p.Launch != launchDirect || p.Resume.IDFlag != "--session" {
+		t.Fatalf("pi lookup = %+v", p)
+	}
+	if lookupAgent("opencode").Hook.Format != hookSymlinkPlugin {
+		t.Fatal("opencode hook format changed; keep the legacy public value")
+	}
 	// Unknown names fall back to a direct-launch agent named after the binary.
 	u := lookupAgent("frobnicate")
 	if u.Name != "frobnicate" || u.Binary != "frobnicate" || u.Launch != launchDirect {
@@ -193,7 +200,7 @@ func TestInstallTOMLManagedTopLevelKeyConflictSkipsHook(t *testing.T) {
 	}
 }
 
-func TestInstallSymlinkPluginReplacesAndBacksUp(t *testing.T) {
+func TestInstallSymlinkResourceReplacesAndBacksUp(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "plugin.js")
 	writeFile(t, src, "// plugin")
@@ -204,7 +211,7 @@ func TestInstallSymlinkPluginReplacesAndBacksUp(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeFile(t, target, "old")
-	if err := installSymlinkPlugin(src, target); err != nil {
+	if err := installSymlinkResource(src, target); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(target + ".bak"); err != nil {
@@ -214,8 +221,29 @@ func TestInstallSymlinkPluginReplacesAndBacksUp(t *testing.T) {
 		t.Fatalf("target is not a symlink")
 	}
 	// Re-running replaces the symlink cleanly (no second backup).
-	if err := installSymlinkPlugin(src, target); err != nil {
+	if err := installSymlinkResource(src, target); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestInstallSymlinkResourceSupportsDirectory(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "pi-wt")
+	if err := os.MkdirAll(src, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(src, "index.js"), "export default () => {}\n")
+	target := filepath.Join(dir, ".pi", "agent", "extensions", "wt")
+
+	if err := installSymlinkResource(src, target); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.Readlink(target)
+	if err != nil {
+		t.Fatalf("target is not a directory symlink: %v", err)
+	}
+	if got != src {
+		t.Fatalf("target points to %q, want %q", got, src)
 	}
 }
 
@@ -346,6 +374,7 @@ func TestIDELockCount(t *testing.T) {
 func TestResumeArgs(t *testing.T) {
 	claude := lookupAgent("claude")
 	opencode := lookupAgent("opencode")
+	pi := lookupAgent("pi")
 	gemini := lookupAgent("gemini")
 	home := t.TempDir()
 
@@ -368,6 +397,14 @@ func TestResumeArgs(t *testing.T) {
 	// opencode has no cwd fallback, so no id means fresh.
 	if got := resumeArgs(opencode, "", home); got != nil {
 		t.Fatalf("opencode no-id: want nil, got %v", got)
+	}
+	// Pi accepts an exact native session id via --session. Like opencode, its
+	// session store is opaque to wt, so a captured id passes through as-is.
+	if got := resumeArgs(pi, "0199-pi", home); !reflect.DeepEqual(got, []string{"--session", "0199-pi"}) {
+		t.Fatalf("pi id: %v", got)
+	}
+	if got := resumeArgs(pi, "", home); got != nil {
+		t.Fatalf("pi no-id: want nil, got %v", got)
 	}
 	// gemini has no ResumeSpec, so it never resumes even with an id.
 	if got := resumeArgs(gemini, "anything", home); got != nil {

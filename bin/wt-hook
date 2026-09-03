@@ -357,6 +357,41 @@ handle_stop() {
     fi
 }
 
+# Agent-neutral status protocol. Native hook adapters should translate their
+# lifecycle into these semantic states rather than pretending to use another
+# agent's hook vocabulary. Existing event-shaped commands remain supported for
+# Claude, Gemini, Codex, and OpenCode.
+handle_status_event() {
+    local next_status="$1" requested_message="${2:-}"
+    local session_name notification_message="$requested_message"
+    if ! session_name=$(get_session_name); then
+        return
+    fi
+
+    local label branch message="$requested_message"
+    label=$(get_agent_label "$session_name")
+    branch=$(get_branch "$session_name")
+    case "$next_status" in
+        working) [[ -n "$message" ]] || message="$label working" ;;
+        idle)    [[ -n "$message" ]] || message="$label finished" ;;
+        input)   [[ -n "$message" ]] || message="Waiting for input" ;;
+        error)   [[ -n "$message" ]] || message="$label encountered an error" ;;
+        *) return 2 ;;
+    esac
+
+    set_status "$session_name" "$next_status" "$message"
+    case "$next_status" in
+        input) notify "$label needs input" "$message" "normal" "$branch" "$session_name" ;;
+        error) notify "$label error" "${notification_message:-Something went wrong}" "critical" "$branch" "$session_name" ;;
+    esac
+}
+
+# Record a native conversation id without changing activity. This matters for
+# agents such as Pi that create/load a session while sitting idle at an editor.
+handle_session_id() {
+    store_session_id authoritative "${1:-}"
+}
+
 handle_notification() {
     local notification_type="${1:-}"
     local session_name
@@ -396,14 +431,7 @@ handle_tool_use() {
 }
 
 handle_error() {
-    local session_name
-    if session_name=$(get_session_name); then
-        local label branch
-        label=$(get_agent_label "$session_name")
-        branch=$(get_branch "$session_name")
-        set_status "$session_name" "error" "$label encountered an error"
-        notify "$label error" "Something went wrong" "critical" "$branch" "$session_name"
-    fi
+    handle_status_event error "${1:-}"
 }
 
 # -----------------------------------------------------------------------------
@@ -426,7 +454,7 @@ main() {
     # other hook backfills it (empty-only) so a session already running when
     # the hooks were installed is picked up without a restart.
     case "$hook_type" in
-        session-start|stop) : ;;
+        session-start|session-id|stop) : ;;
         *) store_session_id backfill "$(stdin_session_id "$stdin_data")" ;;
     esac
 
@@ -437,6 +465,12 @@ main() {
         stop)
             handle_stop "$stdin_data"
             ;;
+        session-id)
+            handle_session_id "$extra"
+            ;;
+        working|idle|input)
+            handle_status_event "$hook_type" "$extra"
+            ;;
         notification)
             handle_notification "$extra"
             ;;
@@ -444,7 +478,7 @@ main() {
             handle_tool_use "$tool_name"
             ;;
         error)
-            handle_error
+            handle_error "$extra"
             ;;
         *)
             # Unknown hook type, ignore

@@ -36,7 +36,7 @@ mkdir -p "$STAGE" "$STUB_BIN"
 # --- Stub agents: shadow the real CLIs so install.sh detects "agents" and so
 #     sessions launch the no-op stub instead of a real claude/codex/etc. -------
 chmod +x "$REPO/staging/stub-agent"
-for a in claude codex gemini opencode; do
+for a in claude codex gemini opencode pi; do
     ln -sf "$REPO/staging/stub-agent" "$STUB_BIN/$a"
 done
 
@@ -76,6 +76,7 @@ Staging ready.  Everything below lives under $STAGE — nothing touched your rea
   wt binary     = $STAGE/bin/wt  ->  $REPO/bin/wt   (edits here apply live)
   state / db    = $STAGE/.local/state/wt
   hooks         = $STAGE/.claude/settings.json  (isolated copy)
+                  $STAGE/.pi/agent/extensions/wt
   tmux config   = $STAGE/.tmux.conf             (isolated copy)
   demo repo     = $DEMO
   agent         = stub (no real CLI launched)
