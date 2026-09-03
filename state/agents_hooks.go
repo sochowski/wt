@@ -1,8 +1,8 @@
 // install-hooks: wire wt-hook into each installed agent's own config format.
 // Replaces the hand-coded per-agent blocks that used to live in install.sh
-// (jq merges for Claude/Gemini, a TOML append for Codex, a symlink for
-// opencode). Templates stay on disk under --template-dir so the opencode plugin
-// can remain a live symlink into the checkout.
+// (jq merges for Claude/Gemini, a TOML append for Codex, symlinked resources
+// for opencode/Pi). Templates stay on disk under --template-dir so extensions
+// can remain live symlinks into the checkout.
 //
 // Installs are surgical and versioned: wt owns its own hook entries (identified
 // by hookMarker) and rewrites them from the current template every run, so a
@@ -124,8 +124,8 @@ func installAgentHooks(a Agent, templateDir, home string) (string, error) {
 		return target, installJSONManaged(src, target)
 	case hookTOMLAppend:
 		return target, installTOMLManaged(src, target, spec.Version)
-	case hookSymlinkPlugin:
-		return target, installSymlinkPlugin(src, target)
+	case hookSymlinkPlugin, hookSymlinkResource:
+		return target, installSymlinkResource(src, target)
 	default:
 		return "", fmt.Errorf("unknown hook format %q", spec.Format)
 	}
@@ -385,9 +385,9 @@ func writeJSON(path string, v any) error {
 	return os.WriteFile(path, append(b, '\n'), 0o644)
 }
 
-// installSymlinkPlugin points target at src. An existing symlink is replaced; a
-// real file is backed up to .bak first.
-func installSymlinkPlugin(src, target string) error {
+// installSymlinkResource points target at a source file or directory. An
+// existing symlink is replaced; a real resource is backed up to .bak first.
+func installSymlinkResource(src, target string) error {
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 		return err
 	}

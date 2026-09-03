@@ -21,11 +21,12 @@ test a change. Use one of the two isolated harnesses below.
   plus its hook template under `config/`. Honors `WT_STATUS_DIR` / `WT_DB`.
   Built into `bin/wt-state` (gitignored) by `install.sh`.
 - `install.sh` — symlinks `bin/*` into `~/bin`, merges hooks into `~/.claude`,
-  `~/.gemini`, `~/.codex` via `wt-state agents install-hooks`, edits
+  `~/.gemini`, `~/.codex`, and `~/.pi` via `wt-state agents install-hooks`, edits
   `~/.tmux.conf`, builds `wt-state`. Derives **everything** from `$HOME` — the
   basis of the staging harness below.
 - `config/` — tmux config, menu config, agent hook templates (read by
-  `install-hooks`; the opencode plugin stays a live symlink into the checkout).
+  `install-hooks`; the OpenCode plugin and Pi extension stay live symlinks into
+  the checkout).
 
 ## Testing changes e2e
 
@@ -80,7 +81,7 @@ this checkout, **edits here apply live; no reinstall between changes.**
   paths explicitly (staging.sh does this) rather than relying on `$HOME` alone,
   or a stale server will silently write to the wrong paths.
 - The sandboxes use a **stub agent** (`staging/stub-agent`) that shadows
-  `claude`/`codex`/`gemini`/`opencode`: `wt` drives it like a real agent but it
+  `claude`/`codex`/`gemini`/`opencode`/`pi`: `wt` drives it like a real agent but it
   launches no real CLI (no creds, no API calls). Keep it that way unless you're
   specifically testing real-agent launch.
 - `wt-state` writes SQLite with WAL; concurrent writers are fine, but always let

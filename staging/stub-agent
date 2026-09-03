@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  wt staging stub agent
-#  Stands in for claude/codex/gemini/opencode inside the sandbox. wt drives it
+#  Stands in for claude/codex/gemini/opencode/pi inside the sandbox. wt drives it
 #  exactly like a real agent (wt-agent-launch does `exec "$AGENT" "$@"`), but it
 #  launches no real CLI — no creds, no API calls, no contact with your prod env.
 #  Drops into an interactive shell so the pane stays alive and usable.

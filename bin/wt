@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  wt - Worktree Manager for Multi-Agent CLI Workflow
-#  Supports: Claude, Codex, Gemini, opencode
+#  Supports: Claude, Codex, Gemini, opencode, Pi
 #  Cross-platform: Arch Linux / macOS
 # =============================================================================
 
@@ -2803,7 +2803,7 @@ Mobile / Session Control:
   session diff <name> [--stat|--files]    Render changes without Neovim
 
 Options for 'new':
-  --agent <name>        Agent: claude, codex, gemini, opencode (default: \$WT_DEFAULT_AGENT)
+  --agent <name>        Agent: claude, codex, gemini, opencode, pi (default: \$WT_DEFAULT_AGENT)
   --base <branch>       Base a new branch off <branch> (default: repo's default branch)
   --start-agent         Start agent immediately after creating session
   --task <task>         Task description for agent

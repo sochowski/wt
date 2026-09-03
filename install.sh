@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  wt installer - Sets up symlinks and merges config
-#  Supports: Claude, Codex, Gemini, opencode
+#  Supports: Claude, Codex, Gemini, opencode, Pi
 #  Run: ./install.sh
 # =============================================================================
 
@@ -36,11 +36,6 @@ else
     echo "  gh: not found (optional - needed for PR lookup)"
 fi
 
-agents=()
-for agent in claude codex gemini opencode; do
-    command -v "$agent" &>/dev/null && agents+=("$agent")
-done
-
 if [[ ${#missing[@]} -gt 0 ]]; then
     echo ""
     echo "Error: missing required commands: ${missing[*]}"
@@ -53,10 +48,25 @@ if [[ ${#missing[@]} -gt 0 ]]; then
     exit 1
 fi
 
+# Build before agent detection so the registry really is the only roster wt
+# maintains. Adding an agent should not require another hard-coded shell list.
+echo "Building wt-state..."
+( cd "$SCRIPT_DIR/state" && go build -o "$SCRIPT_DIR/bin/wt-state" . )
+echo "  wt-state -> $SCRIPT_DIR/bin/wt-state"
+
+agents=()
+while IFS= read -r agent; do
+    [[ -n "$agent" ]] && agents+=("$agent")
+done < <("$SCRIPT_DIR/bin/wt-state" agents list --available)
+
 if [[ ${#agents[@]} -eq 0 ]]; then
+    supported_agents=()
+    while IFS= read -r agent; do
+        [[ -n "$agent" ]] && supported_agents+=("$agent")
+    done < <("$SCRIPT_DIR/bin/wt-state" agents list)
     echo ""
     echo "Error: no agent CLI found. Install at least one of:"
-    echo "  claude, codex, gemini, opencode"
+    echo "  ${supported_agents[*]}"
     exit 1
 fi
 echo "  agents: ${agents[*]}"
@@ -71,13 +81,6 @@ mkdir -p "$CONFIG_DIR"
 mkdir -p "$HOME/.claude"
 mkdir -p "$HOME/.local/state/wt"
 mkdir -p "$HOME/worktrees"
-
-# -----------------------------------------------------------------------------
-#  Build wt-state (Go binary backing the session store)
-# -----------------------------------------------------------------------------
-echo "Building wt-state..."
-( cd "$SCRIPT_DIR/state" && go build -o "$SCRIPT_DIR/bin/wt-state" . )
-echo "  wt-state -> $SCRIPT_DIR/bin/wt-state"
 
 # -----------------------------------------------------------------------------
 #  Symlink bin scripts
@@ -160,8 +163,8 @@ echo "Configuring agent hooks..."
 # -----------------------------------------------------------------------------
 #  Install Agent Skill
 # -----------------------------------------------------------------------------
-# One open-standard skill is shared by every harness. Codex and OpenCode scan
-# ~/.agents/skills; Claude and Gemini use their own user-level skill roots.
+# One open-standard skill is shared by every harness. Codex, OpenCode, and Pi
+# scan ~/.agents/skills; Claude and Gemini use their own user-level skill roots.
 # Symlink instead of copying so updates in this checkout apply immediately.
 echo "Installing wt-shells agent skill..."
 skill_source="$SCRIPT_DIR/config/skills/wt-shells"

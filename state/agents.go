@@ -16,9 +16,10 @@ import "os/exec"
 // Hook install formats. Each agent wires wt-hook into its own config in its own
 // way; the format tells install-hooks which mechanism to use for the template.
 const (
-	hookJSONMerge     = "json-merge"     // deep-merge template into a JSON settings file
-	hookTOMLAppend    = "toml-append"    // append a TOML block if the marker is absent
-	hookSymlinkPlugin = "symlink-plugin" // symlink the template into a plugins dir
+	hookJSONMerge       = "json-merge"       // deep-merge template into a JSON settings file
+	hookTOMLAppend      = "toml-append"      // append a TOML block if the marker is absent
+	hookSymlinkPlugin   = "symlink-plugin"   // legacy public format used by the OpenCode profile
+	hookSymlinkResource = "symlink-resource" // symlink a file or directory into an agent resource dir
 )
 
 // Launch styles. How wt-agent-launch should start the binary.
@@ -98,6 +99,13 @@ var registry = []Agent{
 		Hook:   HookSpec{Format: hookSymlinkPlugin, Template: "opencode-wt-plugin.js", Target: ".config/opencode/plugins/wt-status.js", Version: 1},
 		Launch: launchOpencode,
 		Setup:  []string{setupOpencodeMCP},
+		Resume: ResumeSpec{IDFlag: "--session"},
+	},
+	{
+		Name:   "pi",
+		Binary: "pi",
+		Hook:   HookSpec{Format: hookSymlinkResource, Template: "pi-wt", Target: ".pi/agent/extensions/wt", Version: 1},
+		Launch: launchDirect,
 		Resume: ResumeSpec{IDFlag: "--session"},
 	},
 }
