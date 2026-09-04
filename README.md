@@ -47,6 +47,9 @@ so the thing you're waiting on is never buried.
   `.env` and friends into each new worktree, which git won't do for you.
 - **Live diff in the editor.** nvim boots into a diffview of your branch against
   its base and refreshes as files change.
+- **User-paced agent presentations.** Pi can walk through code and changes, ask
+  code-grounded questions, or present trees and Markdown while nvim acts as a
+  shared visual canvas.
 - **A split master session** with a configurable TUI on the left and an agent
   with its own MCP profile on the right, for orchestrating work across the
   others.
@@ -77,7 +80,7 @@ The installer will:
 
 Requires: git, tmux, fzf, jq, go (to build `wt-state`), and at least one agent CLI ([Claude Code](https://github.com/anthropics/claude-code), [Codex](https://github.com/openai/codex), [Gemini CLI](https://github.com/google/gemini-cli), [opencode](https://opencode.ai/), or [Pi](https://pi.dev/))
 
-Optional: [gh](https://cli.github.com/) (for PR lookup), [claudecode.nvim](https://github.com/anthropics/claudecode.nvim) (for Claude IDE integration), [diffview.nvim](https://github.com/sindrets/diffview.nvim) + a file watcher ([watchexec](https://github.com/watchexec/watchexec), [entr](https://eradman.com/entrproject/), or `inotifywait`) for the live diff view
+Optional: [Neovim](https://neovim.io/) (editor and presentation canvas), [gh](https://cli.github.com/) (for PR lookup), [claudecode.nvim](https://github.com/anthropics/claudecode.nvim) (for Claude IDE integration), [Unified.nvim](https://github.com/axkirillov/unified.nvim) or [diffview.nvim](https://github.com/sindrets/diffview.nvim) + a file watcher ([watchexec](https://github.com/watchexec/watchexec), [entr](https://eradman.com/entrproject/), or `inotifywait`) for the live diff view
 
 ## Usage
 
@@ -243,9 +246,22 @@ ordinary Pi sessions and activates only when `wt-agent-launch` exports a
 
 Pi lifecycle events update the same working, idle, and input states used by the
 other agents. Its native session id is also captured, so `wt revive` resumes
-the exact conversation with `pi --session <id>`. Accurate settled status needs
-Pi 0.80.4 or newer; blocking extension-UI prompt status needs Pi 0.84.4 or
-newer.
+the exact conversation with `pi --session <id>`.
+
+The extension also registers one sequential `present` tool. Ask Pi to explain
+existing code, walk through its changes, quiz you on a selection, or present a
+project tree or Markdown document. Each call advances one scene: Pi provides
+the narration while an optional `file`, `diff`, `tree`, or `markdown` artifact
+appears in the managed nvim pane, then Pi waits for Continue, a choice,
+free-form text, or a visual selection before moving on. The canvas restores the
+prior editor view when the presentation ends; `/presentation-end` ends it
+explicitly. The versioned scene
+transport (`wt-present`) is agent-neutral so other integrations can drive the
+same canvas later. Presentations require nvim; diff scenes use Unified.nvim when
+available and gracefully fall back to a normal file view.
+
+Accurate settled status needs Pi 0.80.4 or newer; blocking extension-UI prompt
+status needs Pi 0.84.4 or newer.
 
 ## Tmux Keybindings
 
@@ -455,6 +471,7 @@ wt-state → Go binary, authoritative SQLite session store (status, agent, PR
 prefix+W → fzf popup (wt switch) lists live sessions, most-recently-active first
 prefix+w → display-menu launches wt subcommands in popups
 Status bar → wt-tmux-status aggregates status counts from wt-state
+Pi present tool → wt-present → fixed nvim RPC API → shared presentation canvas
 ```
 
 ## Files
@@ -467,16 +484,18 @@ Status bar → wt-tmux-status aggregates status counts from wt-state
 | `bin/wt-agent-launch` | Multi-agent launcher with per-agent logic |
 | `bin/wt-bind-menu` | Builds the `prefix+w` action menu from live sessions |
 | `bin/wt-diff-watch` | Watches the worktree and refreshes the nvim diff view |
+| `bin/wt-present` | Agent-neutral JSON transport for the nvim presentation canvas |
 | `bin/wt-state` | Go+SQLite session store (built from `state/`, gitignored) |
 | `bin/claude-ide` | Backward-compat wrapper for wt-agent-launch |
 | `state/` | `wt-state` Go source (SQLite store + migrations) |
 | `config/tmux-wt.conf` | Tmux keybindings and hooks |
 | `config/wt-menu.conf` | `prefix+w` action-menu definition |
 | `config/wt-diff.lua` | nvim config for the live diffview |
+| `config/wt-present.lua` | Extensible nvim presentation canvas and artifact renderers |
 | `config/claude-hooks.json` | Claude Code hook configuration |
 | `config/hooks-gemini.json` | Gemini CLI hook configuration |
 | `config/opencode-wt-plugin.js` | opencode status plugin |
-| `config/pi-wt/` | Pi status and native-session extension |
+| `config/pi-wt/` | Pi status, native-session, and presentation extension |
 
 ## Environment Variables
 
@@ -494,6 +513,9 @@ Status bar → wt-tmux-status aggregates status counts from wt-state
 | `WT_MASTER_TUI_CWD` | `$WT_BASE_DIR/.master` | Working directory for the master TUI |
 | `WT_DIFF_VIEW` | `1` | Boot session nvim into the live diffview.nvim diff; set `0` to disable |
 | `WT_NVIM_SOCK_DIR` | `$WT_STATUS_DIR/nvim-sockets` | Where per-session nvim RPC sockets live |
+| `WT_NVIM_SOCKET` | _(session option)_ | Override the nvim socket used by `wt-present` |
+| `WT_PRESENT` | `wt-present` | Override the presentation transport used by the Pi extension |
+| `WT_PRESENT_TIMEOUT_MS` | `15000` | Timeout for one Pi-to-nvim presentation operation |
 | `WT_FZF_VIM` | `0` | Set `1` for vim-style modal keybindings in the fzf pickers |
 | `WT_PR_TTL` | `900` | Seconds a cached PR badge stays fresh before re-querying `gh` |
 

@@ -178,41 +178,49 @@ create_master_tui_pane() {
     printf '%s\n' "$tui_pane"
 }
 
-# Launch nvim in pane 0 of the session's main window. With the diff view enabled
-# (WT_DIFF_VIEW=1) and nvim present, nvim listens on a per-session socket, boots
-# into diffview.nvim against the branch base, and a file watcher keeps it live.
-# Falls back to a plain `nvim` otherwise.
+# Launch nvim in pane 0 of the session's main window. Every managed Neovim
+# listens on a per-session socket and loads wt-present, even when the live diff
+# is disabled: presentations are an editor capability, not a diff capability.
+# With WT_DIFF_VIEW=1 it also boots into the branch diff and starts its watcher.
 launch_nvim() {
     local session_name="$1" wt_path="$2"
 
-    if [[ "$WT_DIFF_VIEW" != "1" ]] || ! command -v nvim >/dev/null 2>&1; then
+    if ! command -v nvim >/dev/null 2>&1; then
         tmux send-keys -t "=$session_name:main" "nvim" Enter
         return
     fi
 
-    local sock base lua cmd
+    local sock base="" diff_lua present_lua cmd
     sock=$(nvim_socket_path "$session_name")
     mkdir -p "$WT_NVIM_SOCK_DIR"
     rm -f "$sock"
-    base=$(diff_merge_base "$wt_path")
-    lua="$WT_BIN_DIR/../config/wt-diff.lua"
+    present_lua="$WT_BIN_DIR/../config/wt-present.lua"
+    diff_lua="$WT_BIN_DIR/../config/wt-diff.lua"
 
-    # WT_DIFF_BASE / WT_DIFF_TOOL are read by wt-diff.lua on VimEnter to pick
-    # the plugin and open the diff.
-    cmd=$(printf 'WT_DIFF_BASE=%q WT_DIFF_TOOL=%q nvim --listen %q -c %q' \
-                 "$base" "$WT_DIFF_TOOL" "$sock" "luafile $lua")
+    if [[ "$WT_DIFF_VIEW" == "1" ]]; then
+        base=$(diff_merge_base "$wt_path")
+    fi
+
+    # WT_SESSION / WT_WORKTREE let the generic presentation module validate
+    # scene paths without deriving identity from whichever buffer is open.
+    cmd=$(printf 'WT_SESSION=%q WT_WORKTREE=%q WT_DIFF_BASE=%q WT_DIFF_TOOL=%q nvim --listen %q -c %q' \
+                 "$session_name" "$wt_path" "$base" "$WT_DIFF_TOOL" "$sock" "luafile $present_lua")
+    if [[ "$WT_DIFF_VIEW" == "1" ]]; then
+        cmd+=$(printf ' -c %q' "luafile $diff_lua")
+    fi
+    tmux set-option -qt "$session_name" @wt-nvim-socket "$sock"
     tmux send-keys -t "=$session_name:main" "$cmd" Enter
 
     # Watcher: refreshes the view on file changes. Only meaningful when there's
     # a diffable worktree; it self-exits when the socket disappears.
-    if [[ -n "$base" ]]; then
+    if [[ "$WT_DIFF_VIEW" == "1" && -n "$base" ]]; then
         nohup "$WT_BIN_DIR/wt-diff-watch" "$sock" "$wt_path" >/dev/null 2>&1 &
         tmux set-option -qt "$session_name" @wt-diff-pid "$!"
     fi
 }
 
-# Stop a session's diff-view watcher and remove its socket. Read @wt-diff-pid
-# before killing the tmux session, since the option vanishes with it.
+# Stop a session's diff-view watcher and remove its editor socket. Read
+# @wt-diff-pid before killing tmux, since the option vanishes with the session.
 stop_diff_view() {
     local session_name="$1" diff_pid
     diff_pid=$(tmux show-option -qv -t "$session_name" @wt-diff-pid 2>/dev/null || true)

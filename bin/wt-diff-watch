@@ -19,7 +19,7 @@ set -euo pipefail
 if [[ "${1:-}" == "--refresh" ]]; then
     sock="${2:?socket path required}"
     [[ -S "$sock" ]] || exit 0
-    nvim --server "$sock" --remote-expr \
+    nvim --headless --server "$sock" --remote-expr \
         'luaeval("pcall(function() require([[wt_diff]]).refresh() end)")' \
         >/dev/null 2>&1 || true
     exit 0
