@@ -616,6 +616,16 @@ test_wt_shells_skill() {
             fail "$skill openai.yaml missing"
         fi
 
+        if [[ "$skill" == "wt-presentations" ]]; then
+            if grep -q 'Treat fenced Mermaid diagrams as the default visual language' "$skill_dir/SKILL.md" \
+                && grep -q '`sequenceDiagram`' "$skill_dir/SKILL.md" \
+                && grep -q "user's Neovim Mermaid plugin" "$skill_dir/SKILL.md"; then
+                pass "wt-presentations skill teaches Mermaid-first Markdown"
+            else
+                fail "wt-presentations skill is missing Mermaid guidance"
+            fi
+        fi
+
         if grep -q "for skill_name in wt-shells wt-presentations" "$install" \
             && grep -q '"$HOME/.agents/skills/$skill_name"' "$install" \
             && grep -q '"$HOME/.claude/skills/$skill_name"' "$install" \
@@ -738,6 +748,7 @@ test_presentation_canvas() {
     printf 'notes\n' > "$tmp/docs/notes.md"
 
     WT_WORKTREE="$tmp" nvim --clean --headless --listen "$sock" \
+        -c 'lua vim.api.nvim_create_autocmd("FileType", { pattern = "markdown", callback = function(args) vim.b[args.buf].wt_markdown_plugin_attached = true end })' \
         -c "luafile $lua" >"$tmp/nvim.log" 2>&1 &
     pid=$!
     local i
@@ -782,13 +793,18 @@ test_presentation_canvas() {
         fail "wt-present tree scene failed" "$response"
     fi
 
+    local markdown_state
     response=$(printf '%s' \
-        '{"version":1,"title":"Notes","narrative":"Summary","artifact":{"kind":"markdown","content":"# Notes\n\nA non-code artifact."}}' \
+        '{"version":1,"title":"Request flow","narrative":"Summary","artifact":{"kind":"markdown","content":"# Request flow\n\n```mermaid\nsequenceDiagram\n    User->>Pi: Present\n    Pi->>Neovim: Markdown\n```"}}' \
         | WT_SESSION=canvas-test WT_NVIM_SOCKET="$sock" "$WT_BIN_DIR/wt-present" show 2>&1)
-    if jq -e '.ok == true and .kind == "markdown" and .rendered.lines == 3' <<<"$response" >/dev/null 2>&1; then
-        pass "wt-present renders Markdown scenes"
+    markdown_state=$(nvim --headless --server "$sock" --remote-expr \
+        'luaeval("vim.json.encode({name=vim.api.nvim_buf_get_name(0), filetype=vim.bo.filetype, attached=vim.b.wt_markdown_plugin_attached == true, has_mermaid=table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), [[\n]]):find([=[```mermaid]=], 1, true) ~= nil})")' 2>&1 || true)
+    if jq -e '.ok == true and .kind == "markdown" and .rendered.lines == 7' <<<"$response" >/dev/null 2>&1 \
+        && jq -e '.filetype == "markdown" and .attached == true and .has_mermaid == true and (.name | endswith(".md"))' \
+            <<<"$markdown_state" >/dev/null 2>&1; then
+        pass "wt-present exposes Mermaid Markdown scenes to Neovim plugins"
     else
-        fail "wt-present Markdown scene failed" "$response"
+        fail "wt-present Mermaid Markdown scene failed" "$response / $markdown_state"
     fi
 
     response=$(printf '%s' \
@@ -1619,6 +1635,14 @@ test_pi_extension() {
         return
     fi
 
+    if grep -q 'render-markdown-mermaid.nvim' "$extension_dir/README.md" \
+        && grep -q 'beautiful-mermaid-cli' "$extension_dir/README.md" \
+        && grep -q "mode = 'unicode'" "$extension_dir/README.md"; then
+        pass "Pi presentation docs recommend Unicode Mermaid rendering"
+    else
+        fail "Pi presentation docs are missing Mermaid plugin setup"
+    fi
+
     if ! command -v node >/dev/null 2>&1; then
         pass "skipped Pi extension runtime test (node not installed)"
         return
@@ -1709,6 +1733,10 @@ await emit("agent_settled", { type: "agent_settled" }, ctx)
 
 const present = tools.get("present")
 if (!present || tools.has("present_deck") || present.executionMode !== "sequential" || !commands.has("presentation-end")) process.exit(2)
+const mermaidGuidance = (present.promptGuidelines || []).join("\n")
+if (!String(present.promptSnippet).includes("Mermaid-first")
+  || !mermaidGuidance.includes("fenced Mermaid diagram by default")
+  || !mermaidGuidance.includes("do not hand-author ASCII diagrams")) process.exit(3)
 const result = await present.execute("tool-1", {
   title: "Example deck",
   scenes: [
@@ -1717,9 +1745,14 @@ const result = await present.execute("tool-1", {
       narrative: "This is the important line.",
       artifact: { kind: "file", path: "src/example.js", startLine: 4, label: "look here" },
     },
+    {
+      title: "Request flow",
+      narrative: "This is how the request moves.",
+      artifact: { kind: "markdown", content: "# Request flow\n\n```mermaid\nflowchart LR\n    User --> Pi --> Neovim\n```" },
+    },
   ],
 }, undefined, undefined, ctx)
-if (result.details?.deck?.scenes?.length !== 1) process.exit(3)
+if (result.details?.deck?.scenes?.length !== 2) process.exit(4)
 
 await emit("session_shutdown", { type: "session_shutdown", reason: "quit" }, ctx)
 JS
@@ -1742,11 +1775,11 @@ EOF
     fi
 
     if awk -F '\t' '$1 == "deck-show"' "$tmp/present-requests" \
-        | cut -f2- | jq -e '.version == 1 and .title == "Example deck" and (.scenes | length) == 1 and .scenes[0].artifact.kind == "file"' \
+        | cut -f2- | jq -e '.version == 1 and .title == "Example deck" and (.scenes | length) == 2 and .scenes[0].artifact.kind == "file" and .scenes[1].artifact.kind == "markdown" and (.scenes[1].artifact.content | contains("```mermaid"))' \
             >/dev/null 2>&1; then
-        pass "Pi present tool sends a versioned deck to wt-present"
+        pass "Pi present tool sends Mermaid-first Markdown in versioned decks"
     else
-        fail "Pi present tool did not send the expected deck" "$(cat "$tmp/present-requests")"
+        fail "Pi present tool did not send the expected Mermaid deck" "$(cat "$tmp/present-requests")"
     fi
 
     # The extension is installed globally but must not register anything for a

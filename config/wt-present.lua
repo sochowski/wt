@@ -329,6 +329,10 @@ end
 local function scratch_buffer(name, lines, filetype)
   local buf = api.nvim_create_buf(false, true)
   state.scratch_buffers[#state.scratch_buffers + 1] = buf
+  -- Keep Markdown scratch names recognizable to plugins that attach by *.md
+  -- rather than by FileType alone. The buffer remains a nofile presentation
+  -- surface; user-installed renderers may enhance fenced Mermaid blocks.
+  if filetype == 'markdown' and name:sub(-3) ~= '.md' then name = name .. '.md' end
   pcall(api.nvim_buf_set_name, buf, name)
   vim.bo[buf].buftype = 'nofile'
   vim.bo[buf].bufhidden = 'hide'

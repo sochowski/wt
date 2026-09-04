@@ -25,7 +25,48 @@ combines narration with one visual artifact:
 - `diff` — source with its Unified.nvim diff against the wt branch base
 - `tree` — a project tree or a focused set of labelled paths; `view: "explorer"`
   uses `nvim-tree.nvim` when available
-- `markdown` — generated non-code material in a temporary buffer
+- `markdown` — generated non-code material in a temporary buffer; Mermaid fences
+  are the preferred representation for architecture, workflows, sequences,
+  state transitions, dependencies, lifecycles, data flow, and decision trees
+
+### Mermaid rendering
+
+`present` deliberately sends standard fenced Mermaid inside Markdown rather than
+adding a Mermaid-specific artifact or renderer. Markdown remains readable when
+no renderer is installed, while the user's Neovim configuration can enhance the
+same scratch buffer with Unicode diagrams.
+
+The recommended stack is:
+
+- [`MeanderingProgrammer/render-markdown.nvim`](https://github.com/MeanderingProgrammer/render-markdown.nvim)
+- [`cavanaug/render-markdown-mermaid.nvim`](https://github.com/cavanaug/render-markdown-mermaid.nvim)
+- [`beautiful-mermaid-cli`](https://www.npmjs.com/package/beautiful-mermaid-cli),
+  which supplies the `bm` renderer
+
+Install the renderer with:
+
+```sh
+npm install -g beautiful-mermaid-cli
+```
+
+After installing the two Neovim plugins with your plugin manager, presentation-
+friendly settings are:
+
+```lua
+require('render-markdown-mermaid').setup({
+  mode = 'unicode',
+  replace = true,
+  hide_source = true,
+  cache = true,
+  cmd = { 'bm' },
+})
+```
+
+The canvas names Markdown scratch buffers with an `.md` suffix and sets their
+filetype to `markdown`, so filename- and FileType-based plugins can attach. The
+buffers keep `buftype=nofile`; `render-markdown.nvim` supports that buffer type.
+Use `:checkhealth render-markdown-mermaid` to verify the renderer and Tree-sitter
+parsers. wt does not install or configure these optional Neovim dependencies.
 
 Neovim owns deck navigation locally: `H`/`L` move between slides, arrow keys also
 work, and `q` exits. The extension is only the agent adapter. It sends versioned

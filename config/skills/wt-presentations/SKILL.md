@@ -1,6 +1,6 @@
 ---
 name: wt-presentations
-description: Present code, diffs, project structure, or generated Markdown in a wt-managed Neovim canvas. Use when the user asks for a walkthrough, review, demo, orientation, explanation of non-trivial code/changes, or when visual navigation would make the answer clearer than text alone.
+description: Present code, diffs, project structure, or Mermaid-first generated Markdown in a wt-managed Neovim canvas. Use when the user asks for a walkthrough, review, demo, orientation, explanation of non-trivial code/changes, or when visual navigation would make the answer clearer than text alone.
 ---
 
 # WT presentations
@@ -45,6 +45,27 @@ Use these artifact kinds:
 - `diff`: show changes for a file; falls back to source if diff tooling is absent
 - `tree`: show a project/package map; use `focus` entries for important paths
 - `markdown`: show generated diagrams, summaries, checklists, or prose
+
+## Prefer Mermaid in Markdown
+
+Treat fenced Mermaid diagrams as the default visual language for relationships.
+When a Markdown scene explains architecture, workflows, request or data flow,
+sequences, state transitions, dependencies, lifecycles, or decision trees, use a
+`mermaid` code fence unless there is no meaningful relationship to diagram.
+Do not substitute a hand-authored ASCII diagram when Mermaid can express it.
+
+Choose the diagram family that matches the explanation:
+
+- `flowchart` for architecture, control flow, dependencies, and decisions
+- `sequenceDiagram` for interactions ordered over time
+- `stateDiagram-v2` for states and transitions
+- `classDiagram` or `erDiagram` for structural and data relationships
+
+Keep one primary diagram focused on one idea per scene. Add a short heading,
+legend, or conclusion in the surrounding Markdown when it helps, and split a
+crowded diagram into multiple scenes. Mermaid stays embedded in the Markdown;
+the user's Neovim Mermaid plugin owns its visual rendering. If that plugin is
+unavailable, the fenced source remains a readable fallback.
 
 Keep labels concise. Prefer multiple slides over overcrowding one slide.
 
