@@ -312,64 +312,11 @@ export default function registerPresentation(pi, { session }) {
   pi.registerTool({
     name: "present",
     label: "Present",
-    description: "Present one user-paced scene through wt's Neovim canvas. It can show source, an inline diff, a project tree, or markdown, and can ask for a choice, text, or a Neovim selection.",
-    promptSnippet: "Present explanations and code-grounded questions through the wt Neovim canvas",
-    promptGuidelines: [
-      "Use present when the user asks for a walkthrough or when a question would benefit from a visible artifact.",
-      "Put the complete explanation for the current scene in present's narrative field.",
-      "Call present exactly once per assistant response and wait for the user's returned action before advancing.",
-      "Use present artifact kind diff for branch changes, file for existing source, tree for project structure, and markdown for non-code material.",
-    ],
-    parameters: presentParameters,
-    executionMode: "sequential",
-
-    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-      const scene = {
-        version: 1,
-        title: params.title,
-        narrative: params.narrative,
-        artifact: params.artifact,
-        interaction: params.interaction || { kind: "continue" },
-      }
-
-      let editor
-      let editorError
-      try {
-        editor = await run(ctx, "show", scene, signal)
-      } catch (error) {
-        editorError = error.message
-        if (ctx.hasUI) ctx.ui.notify(`Editor presentation unavailable: ${editorError}`, "warning")
-      }
-
-      const interaction = await collectInteraction(scene, ctx, run, signal)
-      if (interaction.action === "end") await safelyClear(run, ctx)
-
-      return {
-        content: [{ type: "text", text: resultText(interaction) }],
-        details: { scene, interaction, editor, editorError },
-      }
-    },
-
-    renderCall(args) {
-      const title = args?.title || "Presentation"
-      const narrative = args?.narrative || ""
-      return plainComponent(`${title}\n${artifactSummary(args?.artifact)}\n\n${narrative}`)
-    },
-
-    renderResult(result) {
-      const interaction = result?.details?.interaction || {}
-      const warning = result?.details?.editorError ? `\nEditor unavailable: ${result.details.editorError}` : ""
-      return plainComponent(`${resultText(interaction)}${warning}`)
-    },
-  })
-
-  pi.registerTool({
-    name: "present_deck",
-    label: "Present Deck",
     description: "Present a complete navigable deck through wt's Neovim canvas. Neovim owns slide navigation locally with H/L/q so the user can move without model round trips.",
-    promptSnippet: "Use present_deck for slide-like walkthroughs that should be navigable in Neovim",
+    promptSnippet: "Use present for slide-like walkthroughs that should be navigable in Neovim",
     promptGuidelines: [
-      "Use present_deck when the user wants a slide-like walkthrough or back/forward navigation.",
+      "Use present whenever the user asks for a walkthrough or when a question would benefit from a visible artifact.",
+      "Build a complete deck of scenes up front instead of presenting one scene at a time.",
       "Keep each scene self-contained; Neovim, not the agent, owns deck navigation after the deck is shown.",
       "Use H/L for previous/next and q to end the deck in Neovim.",
     ],

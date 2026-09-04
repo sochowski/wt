@@ -17,20 +17,22 @@ for blocking extension UI requires Pi 0.84.4 or newer.
 
 ## Presentations
 
-The extension registers one `present` tool that lets Pi show a user-paced scene
-through the managed Neovim pane. A scene combines narration, one visual
-artifact, and an optional interaction:
+The extension registers one `present` tool that lets Pi show a navigable deck
+through the managed Neovim pane. A deck contains one or more scenes; each scene
+combines narration with one visual artifact:
 
 - `file` — existing source with an emphasized line range
 - `diff` — source with its Unified.nvim diff against the wt branch base
-- `tree` — a project tree or a focused set of labelled paths
+- `tree` — a project tree or a focused set of labelled paths; `view: "explorer"`
+  uses `nvim-tree.nvim` when available
 - `markdown` — generated non-code material in a temporary buffer
-- `continue`, `choice`, `text`, `selection`, and `none` interactions
 
-The extension is only the agent adapter. It sends versioned scene JSON through
-the agent-neutral `bin/wt-present` transport to `config/wt-present.lua`, where
-Neovim renderers own the visual behavior. This keeps future presentation
-surfaces independent of Pi and allows other agents to use the same transport.
+Neovim owns deck navigation locally: `H`/`L` move between slides, arrow keys also
+work, and `q` exits. The extension is only the agent adapter. It sends versioned
+deck JSON through the agent-neutral `bin/wt-present` transport to
+`config/wt-present.lua`, where Neovim renderers own the visual behavior. This
+keeps future presentation surfaces independent of Pi and allows other agents to
+use the same transport.
 
 Use `/presentation-end` to clear an active scene and restore the buffer that was
 visible before the presentation began. `WT_PRESENT` can override the transport
