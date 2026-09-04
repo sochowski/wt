@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# =============================================================================
+#  wt-present — send presentation scenes to a wt-managed Neovim instance.
+#
+#  Usage:
+#    printf '%s' '<scene-json>' | wt-present show [--session NAME]
+#    wt-present context [--session NAME]
+#    wt-present clear [--session NAME]
+#    wt-present ping [--session NAME]
+#
+#  This is an agent-neutral transport. It accepts data, never Vim commands, and
+#  dispatches only to the fixed require('wt_present').dispatch() entry point.
+# =============================================================================
+set -euo pipefail
+
+WT_STATUS_DIR="${WT_STATUS_DIR:-$HOME/.local/state/wt}"
+WT_NVIM_SOCK_DIR="${WT_NVIM_SOCK_DIR:-$WT_STATUS_DIR/nvim-sockets}"
+
+action="${1:-}"
+[[ -n "$action" ]] && shift || true
+case "$action" in
+    show|context|clear|ping) ;;
+    *)
+        echo "Usage: wt-present {show|context|clear|ping} [--session NAME]" >&2
+        exit 2
+        ;;
+esac
+
+session="${WT_SESSION:-}"
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --session)
+            [[ $# -ge 2 ]] || { echo "wt-present: --session requires a name" >&2; exit 2; }
+            session="$2"
+            shift 2
+            ;;
+        *)
+            echo "wt-present: unknown option: $1" >&2
+            exit 2
+            ;;
+    esac
+done
+
+if [[ -z "$session" && -n "${TMUX:-}" ]]; then
+    session=$(tmux display-message -p '#{session_name}' 2>/dev/null || true)
+fi
+[[ -n "$session" ]] || { echo "wt-present: no wt session selected" >&2; exit 1; }
+
+sock="${WT_NVIM_SOCKET:-}"
+if [[ -z "$sock" && -n "${TMUX:-}" ]]; then
+    sock=$(tmux show-option -qv -t "=$session" @wt-nvim-socket 2>/dev/null || true)
+fi
+[[ -n "$sock" ]] || sock="$WT_NVIM_SOCK_DIR/$session.sock"
+[[ -S "$sock" ]] || { echo "wt-present: Neovim is not listening at $sock" >&2; exit 1; }
+command -v nvim >/dev/null 2>&1 || { echo "wt-present: nvim is not installed" >&2; exit 1; }
+command -v jq >/dev/null 2>&1 || { echo "wt-present: jq is not installed" >&2; exit 1; }
+
+if [[ "$action" == "show" ]]; then
+    scene=$(cat)
+    [[ -n "$scene" ]] || { echo "wt-present: show requires scene JSON on stdin" >&2; exit 2; }
+    if ! jq -e 'type == "object"' >/dev/null 2>&1 <<<"$scene"; then
+        echo "wt-present: scene is not a JSON object" >&2
+        exit 2
+    fi
+    request=$(jq -cn --argjson scene "$scene" '{action:"show", scene:$scene}')
+else
+    request=$(jq -cn --arg action "$action" '{action:$action}')
+fi
+
+# Pass JSON as a string argument to luaeval. `jq -Rs` performs the Vimscript-
+# compatible string quoting, while Lua's JSON decoder reconstructs the data.
+# No model-controlled text is evaluated as Vimscript or Lua.
+encoded=$(printf '%s' "$request" | jq -Rs '.')
+expr=$(printf 'luaeval("vim.json.encode(require([[wt_present]]).dispatch(vim.json.decode(_A)))", %s)' "$encoded")
+
+if ! result=$(nvim --headless --server "$sock" --remote-expr "$expr" 2>&1); then
+    echo "wt-present: Neovim RPC failed: $result" >&2
+    exit 1
+fi
+
+if ! jq -e . >/dev/null 2>&1 <<<"$result"; then
+    echo "wt-present: invalid response from Neovim: $result" >&2
+    exit 1
+fi
+if ! jq -e '.ok == true' >/dev/null 2>&1 <<<"$result"; then
+    error=$(jq -r '.error // "presentation failed"' <<<"$result")
+    echo "wt-present: $error" >&2
+    exit 1
+fi
+
+printf '%s\n' "$result"

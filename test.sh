@@ -66,10 +66,27 @@ setup() {
 # =============================================================================
 #  Teardown: clean up test artifacts
 # =============================================================================
+kill_test_session() {
+    local session="$1" watcher_pid socket
+    watcher_pid=$(tmux show-option -qv -t "$session" @wt-diff-pid 2>/dev/null || true)
+    socket=$(tmux show-option -qv -t "$session" @wt-nvim-socket 2>/dev/null || true)
+    [[ "$watcher_pid" =~ ^[0-9]+$ ]] && kill "$watcher_pid" 2>/dev/null || true
+    [[ -n "$socket" ]] && rm -f "$socket"
+    tmux kill-session -t "$session" 2>/dev/null || true
+}
+
 teardown() {
+    # Live-diff watchers are deliberately detached from their launching shell.
+    # Stop every watcher owned by this private tmux server before its session
+    # options disappear, or a completed test run would leave watchexec orphans.
+    local watcher_pid
+    while IFS= read -r watcher_pid; do
+        [[ "$watcher_pid" =~ ^[0-9]+$ ]] && kill "$watcher_pid" 2>/dev/null || true
+    done < <(tmux list-sessions -F '#{@wt-diff-pid}' 2>/dev/null || true)
+
     # Kill test session if it exists
     if [[ -n "$TEST_SESSION" ]]; then
-        tmux kill-session -t "$TEST_SESSION" 2>/dev/null || true
+        kill_test_session "$TEST_SESSION"
     fi
 
     # Remove test worktree
@@ -307,7 +324,7 @@ test_create_worktree() {
     else
         pass "'wt new --switch' takes the switch path"
     fi
-    tmux kill-session -t "test-wt-repo-switch-branch" 2>/dev/null || true
+    kill_test_session "test-wt-repo-switch-branch"
     git -C "$TEST_REPO" worktree remove "$WT_BASE_DIR/test-wt-repo/switch-branch" --force 2>/dev/null || true
 }
 
@@ -694,6 +711,74 @@ test_tmux_options() {
     fi
 }
 
+test_presentation_canvas() {
+    section "Agent presentation canvas"
+
+    if ! command -v nvim >/dev/null 2>&1; then
+        pass "skipped: nvim not installed"
+        return
+    fi
+
+    local tmp sock pid response context lua
+    tmp=$(mktemp -d)
+    sock="$tmp/nvim.sock"
+    lua="$(dirname "$WT_BIN_DIR")/config/wt-present.lua"
+    printf 'one\ntwo\nthree\nfour\n' > "$tmp/example.txt"
+
+    WT_WORKTREE="$tmp" nvim --clean --headless --listen "$sock" \
+        -c "luafile $lua" >"$tmp/nvim.log" 2>&1 &
+    pid=$!
+    local i
+    for i in $(seq 1 100); do [[ -S "$sock" ]] && break; sleep 0.05; done
+    if [[ ! -S "$sock" ]]; then
+        fail "presentation test Neovim did not start" "$(cat "$tmp/nvim.log" 2>/dev/null)"
+        kill "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
+        rm -rf "$tmp"
+        return
+    fi
+
+    response=$(printf '%s' \
+        '{"version":1,"title":"Example","narrative":"Look here","artifact":{"kind":"file","path":"example.txt","startLine":2,"endLine":3,"label":"important"}}' \
+        | WT_SESSION=canvas-test WT_NVIM_SOCKET="$sock" "$WT_BIN_DIR/wt-present" show 2>&1)
+    context=$(WT_SESSION=canvas-test WT_NVIM_SOCKET="$sock" "$WT_BIN_DIR/wt-present" context 2>&1)
+    if jq -e '.ok == true and .kind == "file" and .rendered.path == "example.txt"' <<<"$response" >/dev/null 2>&1 \
+        && jq -e '.ok == true and .path == "example.txt" and .line == 2' <<<"$context" >/dev/null 2>&1; then
+        pass "wt-present shows and focuses a versioned file scene"
+    else
+        fail "wt-present file scene failed" "$response / $context / $(cat "$tmp/nvim.log" 2>/dev/null)"
+    fi
+
+    response=$(printf '%s' \
+        '{"version":1,"title":"Project map","narrative":"Structure","artifact":{"kind":"tree","root":"."}}' \
+        | WT_SESSION=canvas-test WT_NVIM_SOCKET="$sock" "$WT_BIN_DIR/wt-present" show 2>&1)
+    if jq -e '.ok == true and .kind == "tree" and .rendered.entries >= 2' <<<"$response" >/dev/null 2>&1; then
+        pass "wt-present renders project tree scenes"
+    else
+        fail "wt-present tree scene failed" "$response"
+    fi
+
+    response=$(printf '%s' \
+        '{"version":1,"title":"Notes","narrative":"Summary","artifact":{"kind":"markdown","content":"# Notes\n\nA non-code artifact."}}' \
+        | WT_SESSION=canvas-test WT_NVIM_SOCKET="$sock" "$WT_BIN_DIR/wt-present" show 2>&1)
+    if jq -e '.ok == true and .kind == "markdown" and .rendered.lines == 3' <<<"$response" >/dev/null 2>&1; then
+        pass "wt-present renders Markdown scenes"
+    else
+        fail "wt-present Markdown scene failed" "$response"
+    fi
+
+    response=$(WT_SESSION=canvas-test WT_NVIM_SOCKET="$sock" "$WT_BIN_DIR/wt-present" clear 2>&1)
+    if jq -e '.ok == true and .active == false' <<<"$response" >/dev/null 2>&1; then
+        pass "wt-present clears the scene and restores Neovim"
+    else
+        fail "wt-present clear failed" "$response"
+    fi
+
+    nvim --headless --server "$sock" --remote-expr 'execute("qa!")' >/dev/null 2>&1 || true
+    wait "$pid" 2>/dev/null || true
+    rm -rf "$tmp"
+}
+
 test_diff_view() {
     section "Live diff view (nvim socket + watcher)"
 
@@ -736,6 +821,14 @@ test_diff_view() {
         fail "nvim listen socket never appeared" "$sock"
     fi
 
+    local recorded_sock
+    recorded_sock=$(tmux show-option -qv -t "$sess" @wt-nvim-socket 2>/dev/null || true)
+    if [[ "$recorded_sock" == "$sock" ]]; then
+        pass "managed Neovim records its presentation socket"
+    else
+        fail "managed Neovim presentation socket unavailable" "recorded_sock=$recorded_sock"
+    fi
+
     # delete tears down the watcher and socket.
     "$WT_BIN_DIR/wt" delete "$sess" --force >/dev/null 2>&1 || true
     if [[ ! -e "$sock" ]] && ! { [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; }; then
@@ -744,6 +837,25 @@ test_diff_view() {
         fail "diff view not cleaned up after delete" \
             "sock_present=$([[ -e "$sock" ]] && echo yes || echo no) pid=$pid"
     fi
+
+    # Presentations do not depend on the live diff feature. A no-diff session
+    # still gets an RPC socket, but must not start a file watcher.
+    local no_diff_sess="test-wt-repo-presentation-no-diff"
+    local no_diff_sock="$sock_dir/$no_diff_sess.sock"
+    WT_DIFF_VIEW=0 "$WT_BIN_DIR/wt" new "$TEST_REPO" presentation-no-diff >/dev/null 2>&1 || true
+    for i in $(seq 1 50); do [[ -S "$no_diff_sock" ]] && break; sleep 0.1; done
+    recorded_sock=$(tmux show-option -qv -t "$no_diff_sess" @wt-nvim-socket 2>/dev/null || true)
+    pid=$(tmux show-option -qv -t "$no_diff_sess" @wt-diff-pid 2>/dev/null || true)
+    if [[ -S "$no_diff_sock" && "$recorded_sock" == "$no_diff_sock" && -z "$pid" ]]; then
+        pass "WT_DIFF_VIEW=0 keeps the presentation socket without a watcher"
+    else
+        fail "no-diff presentation socket unavailable" \
+            "socket=$no_diff_sock recorded_sock=$recorded_sock watcher_pid=$pid"
+    fi
+    "$WT_BIN_DIR/wt" delete "$no_diff_sess" --force >/dev/null 2>&1 || true
+    git -C "$TEST_REPO" worktree remove \
+        "$WT_BASE_DIR/test-wt-repo/presentation-no-diff" --force 2>/dev/null || true
+    "$WT_STATE" delete "$no_diff_sess" 2>/dev/null || true
 
     # Safety net in case delete didn't fully clean up.
     git -C "$TEST_REPO" worktree remove "$wt_path" --force 2>/dev/null || true
@@ -1312,7 +1424,7 @@ test_adopt_existing() {
     fi
 
     # Cleanup just this adopted session; leave $TEST_SESSION intact.
-    tmux kill-session -t "$adopt_session" 2>/dev/null || true
+    kill_test_session "$adopt_session"
     "$WT_STATE" delete "$adopt_session" 2>/dev/null || true
 }
 
@@ -1421,51 +1533,101 @@ test_pi_extension() {
         pass "skipped Pi extension runtime test (node not installed)"
         return
     fi
-    if node --check "$extension_file" >/dev/null 2>&1; then
+    local js_file js_error=""
+    for js_file in "$extension_dir"/*.js; do
+        if ! node --check "$js_file" >/dev/null 2>&1; then
+            js_error+="$(node --check "$js_file" 2>&1)"$'\n'
+        fi
+    done
+    if [[ -z "$js_error" ]]; then
         pass "Pi extension has valid JavaScript"
     else
-        fail "Pi extension has invalid JavaScript" "$(node --check "$extension_file" 2>&1)"
+        fail "Pi extension has invalid JavaScript" "$js_error"
         return
     fi
 
-    # Exercise the extension without invoking Pi or touching real wt state. A
-    # mock ExtensionAPI delivers native events to a stub WT_HOOK, and the copy
-    # gets an .mjs suffix so Node loads the dependency-free source as ESM.
+    # Exercise the extension without invoking Pi, Neovim, or real wt state. A
+    # mock ExtensionAPI delivers native events to stub wt-hook/wt-present
+    # commands. Copy the package so Node honors its ESM package boundary.
     local tmp; tmp=$(mktemp -d)
-    cp "$extension_file" "$tmp/index.mjs"
+    cp -R "$extension_dir" "$tmp/pi-wt"
+    extension_file="$tmp/pi-wt/index.js"
     cat > "$tmp/wt-hook" <<'SH'
 #!/bin/sh
 printf '%s\n' "$*" >> "$WT_TEST_PI_EVENTS"
 SH
-    chmod +x "$tmp/wt-hook"
+    cat > "$tmp/wt-present" <<'SH'
+#!/bin/sh
+action="$1"
+payload=$(cat)
+printf '%s\t%s\n' "$action" "$payload" >> "$WT_TEST_PRESENT_REQUESTS"
+case "$action" in
+    context) printf '%s\n' '{"ok":true,"path":"src/example.js","line":4}' ;;
+    *) printf '%s\n' '{"ok":true}' ;;
+esac
+SH
+    chmod +x "$tmp/wt-hook" "$tmp/wt-present"
     : > "$tmp/events"
+    : > "$tmp/present-requests"
 
-    WT_SESSION=wt-pi-test WT_HOOK="$tmp/wt-hook" WT_TEST_PI_EVENTS="$tmp/events" \
-        node --input-type=module - "$tmp/index.mjs" "$tmp" <<'JS'
+    WT_SESSION=wt-pi-test WT_HOOK="$tmp/wt-hook" WT_PRESENT="$tmp/wt-present" \
+        WT_TEST_PI_EVENTS="$tmp/events" WT_TEST_PRESENT_REQUESTS="$tmp/present-requests" \
+        node --input-type=module - "$extension_file" "$tmp" <<'JS'
 import { pathToFileURL } from "node:url"
 
 const extensionPath = process.argv[2]
 const cwd = process.argv[3]
 const handlers = new Map()
-const pi = { on: (name, handler) => handlers.set(name, handler) }
+const tools = new Map()
+const commands = new Map()
+const pi = {
+  on(name, handler) {
+    const list = handlers.get(name) || []
+    list.push(handler)
+    handlers.set(name, list)
+  },
+  registerTool(tool) { tools.set(tool.name, tool) },
+  registerCommand(name, command) { commands.set(name, command) },
+}
+const emit = async (name, event, ctx) => {
+  for (const handler of handlers.get(name) || []) await handler(event, ctx)
+}
 const { default: extension } = await import(pathToFileURL(extensionPath))
 extension(pi)
 
 let idle = true
 const ctx = {
   cwd,
+  hasUI: true,
+  mode: "tui",
   isIdle: () => idle,
   sessionManager: { getSessionId: () => "pi-session-123" },
+  ui: {
+    select: async () => "Continue",
+    input: async () => undefined,
+    notify: () => {},
+  },
 }
-await handlers.get("session_start")({ type: "session_start", reason: "startup" }, ctx)
+await emit("session_start", { type: "session_start", reason: "startup" }, ctx)
 idle = false
-await handlers.get("agent_start")({ type: "agent_start" }, ctx)
-await handlers.get("tool_execution_start")({ type: "tool_execution_start", toolName: "bash" }, ctx)
-await handlers.get("ui_prompt_start")({ type: "ui_prompt_start", kind: "confirm", title: "Approve?" }, ctx)
-await handlers.get("ui_prompt_end")({ type: "ui_prompt_end", kind: "confirm", title: "Approve?" }, ctx)
+await emit("agent_start", { type: "agent_start" }, ctx)
+await emit("tool_execution_start", { type: "tool_execution_start", toolName: "bash" }, ctx)
+await emit("ui_prompt_start", { type: "ui_prompt_start", kind: "confirm", title: "Approve?" }, ctx)
+await emit("ui_prompt_end", { type: "ui_prompt_end", kind: "confirm", title: "Approve?" }, ctx)
 idle = true
-await handlers.get("agent_settled")({ type: "agent_settled" }, ctx)
-await handlers.get("session_shutdown")({ type: "session_shutdown", reason: "quit" }, ctx)
+await emit("agent_settled", { type: "agent_settled" }, ctx)
+
+const present = tools.get("present")
+if (!present || present.executionMode !== "sequential" || !commands.has("presentation-end")) process.exit(2)
+const result = await present.execute("tool-1", {
+  title: "Example scene",
+  narrative: "This is the important line.",
+  artifact: { kind: "file", path: "src/example.js", startLine: 4, label: "look here" },
+  interaction: { kind: "continue" },
+}, undefined, undefined, ctx)
+if (result.details?.interaction?.action !== "continue") process.exit(3)
+
+await emit("session_shutdown", { type: "session_shutdown", reason: "quit" }, ctx)
 JS
     local node_rc=$?
 
@@ -1482,17 +1644,29 @@ EOF
     if [[ $node_rc -eq 0 ]] && cmp -s "$tmp/expected" "$tmp/events"; then
         pass "Pi lifecycle maps to semantic wt-hook events"
     else
-        fail "Pi lifecycle event mapping failed" "$(diff -u "$tmp/expected" "$tmp/events" 2>&1 || true)"
+        fail "Pi lifecycle event mapping failed" "node_rc=$node_rc $(diff -u "$tmp/expected" "$tmp/events" 2>&1 || true)"
     fi
 
-    # The extension is installed globally but must not register handlers for a
+    if awk -F '\t' '$1 == "show"' "$tmp/present-requests" \
+        | cut -f2- | jq -e '.version == 1 and .title == "Example scene" and .artifact.kind == "file"' \
+            >/dev/null 2>&1; then
+        pass "Pi present tool sends a versioned scene to wt-present"
+    else
+        fail "Pi present tool did not send the expected scene" "$(cat "$tmp/present-requests")"
+    fi
+
+    # The extension is installed globally but must not register anything for a
     # Pi process that was not launched by wt.
-    env -u WT_SESSION WT_HOOK="$tmp/wt-hook" node --input-type=module - "$tmp/index.mjs" <<'JS'
+    env -u WT_SESSION WT_HOOK="$tmp/wt-hook" node --input-type=module - "$extension_file" <<'JS'
 import { pathToFileURL } from "node:url"
-const handlers = []
+const registrations = []
 const { default: extension } = await import(pathToFileURL(process.argv[2]))
-extension({ on: (name) => handlers.push(name) })
-if (handlers.length !== 0) process.exit(1)
+extension({
+  on: (name) => registrations.push(["event", name]),
+  registerTool: (tool) => registrations.push(["tool", tool.name]),
+  registerCommand: (name) => registrations.push(["command", name]),
+})
+if (registrations.length !== 0) process.exit(1)
 JS
     if [[ $? -eq 0 ]]; then
         pass "Pi extension stays inert outside wt"
@@ -1806,6 +1980,7 @@ main() {
     test_status_file
     test_status_messages_are_data
     test_tmux_options
+    test_presentation_canvas
     test_diff_view
     test_status_metadata_recovery
     test_wt_hook_dual_write
@@ -1864,7 +2039,19 @@ run_isolated() {
     export TMUX_TMPDIR="$priv"
     export WT_STATUS_DIR="$priv/state"; mkdir -p "$WT_STATUS_DIR"
     export WT_BASE_DIR="$priv/worktrees"; mkdir -p "$WT_BASE_DIR"
-    unset TMUX  # detach from the caller's server before starting ours
+    # Detach from the caller's server and identity. Agents normally inherit a
+    # stable WT_SESSION; carrying it into the private server would route inner
+    # wt-hook calls to the caller's session name instead of the test worktree.
+    unset TMUX WT_SESSION
+
+    # Never launch a real agent (or touch its credentials) from the e2e suite.
+    # Symlink the same inert stand-in used by staging under every known binary.
+    local stub_bin="$priv/stub-bin" agent
+    mkdir -p "$stub_bin"
+    for agent in claude codex gemini opencode pi; do
+        ln -s "$(dirname "$WT_BIN_DIR")/staging/stub-agent" "$stub_bin/$agent"
+    done
+    export PATH="$stub_bin:$PATH"
 
     echo "Running test suite on an isolated tmux server (socket: $sock)..."
     echo "  TMUX_TMPDIR=$priv  WT_STATUS_DIR=$WT_STATUS_DIR  WT_BASE_DIR=$WT_BASE_DIR"
