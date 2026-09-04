@@ -591,30 +591,39 @@ test_managed_shells() {
 }
 
 test_wt_shells_skill() {
-    section "wt-shells Agent Skill"
+    section "wt Agent Skills"
 
-    local skill_dir="$(dirname "$WT_BIN_DIR")/config/skills/wt-shells"
-    if [[ -f "$skill_dir/SKILL.md" ]] \
-        && grep -q '^name: wt-shells$' "$skill_dir/SKILL.md" \
-        && grep -q '^description:' "$skill_dir/SKILL.md"; then
-        pass "wt-shells has valid required skill metadata"
-    else
-        fail "wt-shells skill metadata missing"
-    fi
+    local root install skill skill_dir path display
+    root="$(dirname "$WT_BIN_DIR")"
+    install="$root/install.sh"
 
-    if [[ -f "$skill_dir/agents/openai.yaml" ]] \
-        && grep -q 'display_name: "WT Managed Shells"' "$skill_dir/agents/openai.yaml"; then
-        pass "wt-shells includes Codex UI metadata"
-    else
-        fail "wt-shells openai.yaml missing"
-    fi
+    for skill in wt-shells wt-presentations; do
+        skill_dir="$root/config/skills/$skill"
+        if [[ -f "$skill_dir/SKILL.md" ]] \
+            && grep -q "^name: $skill$" "$skill_dir/SKILL.md" \
+            && grep -q '^description:' "$skill_dir/SKILL.md"; then
+            pass "$skill has valid required skill metadata"
+        else
+            fail "$skill skill metadata missing"
+        fi
 
-    local install="$(dirname "$WT_BIN_DIR")/install.sh"
-    local path
-    for path in '.agents/skills/wt-shells' '.claude/skills/wt-shells' '.gemini/skills/wt-shells'; do
-        grep -q "$path" "$install" \
-            && pass "installer wires $path" \
-            || fail "installer missing $path"
+        display="WT Managed Shells"
+        [[ "$skill" == "wt-presentations" ]] && display="WT Presentations"
+        if [[ -f "$skill_dir/agents/openai.yaml" ]] \
+            && grep -q "display_name: \"$display\"" "$skill_dir/agents/openai.yaml"; then
+            pass "$skill includes Codex UI metadata"
+        else
+            fail "$skill openai.yaml missing"
+        fi
+
+        if grep -q "for skill_name in wt-shells wt-presentations" "$install" \
+            && grep -q '"$HOME/.agents/skills/$skill_name"' "$install" \
+            && grep -q '"$HOME/.claude/skills/$skill_name"' "$install" \
+            && grep -q '"$HOME/.gemini/skills/$skill_name"' "$install"; then
+            pass "installer wires $skill to all agent skill roots"
+        else
+            fail "installer missing $skill wiring"
+        fi
     done
 }
 
@@ -750,6 +759,18 @@ test_presentation_canvas() {
         pass "wt-present shows and focuses a versioned file scene"
     else
         fail "wt-present file scene failed" "$response / $context / $(cat "$tmp/nvim.log" 2>/dev/null)"
+    fi
+
+    local long_label marks
+    long_label="This annotation is intentionally long so the canvas must wrap it into virtual annotation lines instead of cutting it off at the right edge of the editor window."
+    response=$(jq -cn --arg label "$long_label" '{version:1,title:"Long label",narrative:"Look here",artifact:{kind:"file",path:"example.txt",startLine:2,label:$label}}' \
+        | WT_SESSION=canvas-test WT_NVIM_SOCKET="$sock" "$WT_BIN_DIR/wt-present" show 2>&1)
+    marks=$(nvim --headless --server "$sock" --remote-expr 'luaeval("vim.json.encode(vim.api.nvim_buf_get_extmarks(0, vim.api.nvim_create_namespace([[wt_present]]), 0, -1, {details=true}))")' 2>&1 || true)
+    if jq -e '.ok == true' <<<"$response" >/dev/null 2>&1 \
+        && jq -e '.[0][3].virt_lines | length > 1' <<<"$marks" >/dev/null 2>&1; then
+        pass "wt-present wraps long annotations into virtual lines"
+    else
+        fail "wt-present annotation wrapping failed" "$response / marks=$marks"
     fi
 
     response=$(printf '%s' \

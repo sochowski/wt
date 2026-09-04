@@ -161,32 +161,34 @@ echo "Configuring agent hooks..."
 "$SCRIPT_DIR/bin/wt-state" agents install-hooks --template-dir "$SCRIPT_DIR/config"
 
 # -----------------------------------------------------------------------------
-#  Install Agent Skill
+#  Install Agent Skills
 # -----------------------------------------------------------------------------
-# One open-standard skill is shared by every harness. Codex, OpenCode, and Pi
-# scan ~/.agents/skills; Claude and Gemini use their own user-level skill roots.
+# Open-standard skills are shared by every harness. Codex, OpenCode, and Pi scan
+# ~/.agents/skills; Claude and Gemini use their own user-level skill roots.
 # Symlink instead of copying so updates in this checkout apply immediately.
-echo "Installing wt-shells agent skill..."
-skill_source="$SCRIPT_DIR/config/skills/wt-shells"
-skill_targets=(
-    "$HOME/.agents/skills/wt-shells"
-    "$HOME/.claude/skills/wt-shells"
-    "$HOME/.gemini/skills/wt-shells"
-)
-for target in "${skill_targets[@]}"; do
-    mkdir -p "$(dirname "$target")"
-    if [[ -L "$target" ]]; then
-        if [[ "$(readlink -f "$target")" != "$(readlink -f "$skill_source")" ]]; then
-            echo "  Warning: $target is a symlink to another skill; leaving it unchanged"
+for skill_name in wt-shells wt-presentations; do
+    echo "Installing $skill_name agent skill..."
+    skill_source="$SCRIPT_DIR/config/skills/$skill_name"
+    skill_targets=(
+        "$HOME/.agents/skills/$skill_name"
+        "$HOME/.claude/skills/$skill_name"
+        "$HOME/.gemini/skills/$skill_name"
+    )
+    for target in "${skill_targets[@]}"; do
+        mkdir -p "$(dirname "$target")"
+        if [[ -L "$target" ]]; then
+            if [[ "$(readlink -f "$target")" != "$(readlink -f "$skill_source")" ]]; then
+                echo "  Warning: $target is a symlink to another skill; leaving it unchanged"
+                continue
+            fi
+            rm "$target"
+        elif [[ -e "$target" ]]; then
+            echo "  Warning: $target already exists; leaving it unchanged"
             continue
         fi
-        rm "$target"
-    elif [[ -e "$target" ]]; then
-        echo "  Warning: $target already exists; leaving it unchanged"
-        continue
-    fi
-    ln -s "$skill_source" "$target"
-    echo "  wt-shells -> $target"
+        ln -s "$skill_source" "$target"
+        echo "  $skill_name -> $target"
+    done
 done
 
 # -----------------------------------------------------------------------------

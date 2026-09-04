@@ -1,0 +1,4 @@
+interface:
+  display_name: "WT Presentations"
+  short_description: "Show code, diffs, trees, and Markdown in wt's Neovim canvas"
+  default_prompt: "Use $wt-presentations to decide when and how to present a visual walkthrough in wt."

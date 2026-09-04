@@ -36,6 +36,74 @@ vim.cmd('highlight default link WtPresentRange Visual')
 vim.cmd('highlight default link WtPresentLabel DiagnosticInfo')
 vim.cmd('highlight default link WtPresentTree Visual')
 
+local function display_width(text)
+  local ok, width = pcall(vim.fn.strdisplaywidth, text)
+  if ok and tonumber(width) then return width end
+  return #text
+end
+
+local function wrap_text(text, width)
+  width = math.max(10, tonumber(width) or 80)
+  local lines = {}
+
+  local function push_wrapped(raw)
+    local current = ''
+    for word in tostring(raw):gmatch('%S+') do
+      if current == '' then
+        current = word
+      elseif display_width(current .. ' ' .. word) <= width then
+        current = current .. ' ' .. word
+      else
+        lines[#lines + 1] = current
+        current = word
+      end
+
+      while display_width(current) > width do
+        lines[#lines + 1] = current:sub(1, width)
+        current = current:sub(width + 1)
+      end
+    end
+    lines[#lines + 1] = current
+  end
+
+  for raw in tostring(text):gmatch('([^\n]*)\n?') do
+    if raw == '' then
+      lines[#lines + 1] = ''
+    else
+      push_wrapped(raw)
+    end
+  end
+  if #lines > 0 and lines[#lines] == '' and tostring(text):sub(-1) ~= '\n' then
+    table.remove(lines)
+  end
+  if #lines == 0 then lines[1] = '' end
+  return lines
+end
+
+local function annotation_virt_lines(label, win)
+  if type(label) ~= 'string' or label == '' then return nil end
+  local available = 80
+  if win and api.nvim_win_is_valid(win) then available = api.nvim_win_get_width(win) - 8 end
+  available = math.max(24, available)
+
+  local first_prefix = '  ← '
+  local next_prefix = '    '
+  local wrapped = wrap_text(label, available - display_width(first_prefix))
+  local virt_lines = {}
+  for index, line in ipairs(wrapped) do
+    local prefix = index == 1 and first_prefix or next_prefix
+    virt_lines[#virt_lines + 1] = { { prefix .. line, 'WtPresentLabel' } }
+  end
+  return virt_lines
+end
+
+local function add_annotation(opts, label, win)
+  local virt_lines = annotation_virt_lines(label, win)
+  if not virt_lines then return end
+  opts.virt_lines = virt_lines
+  opts.virt_lines_above = false
+end
+
 local function valid_win(win)
   return win and api.nvim_win_is_valid(win)
 end
@@ -227,10 +295,7 @@ function highlight_nvim_tree_focus(buf, artifact)
       for index, line in ipairs(lines) do
         if line:find(name, 1, true) then
           local opts = { line_hl_group = 'WtPresentTree', priority = 210 }
-          if type(entry.label) == 'string' and entry.label ~= '' then
-            opts.virt_text = { { '  ← ' .. entry.label, 'WtPresentLabel' } }
-            opts.virt_text_pos = 'eol'
-          end
+          add_annotation(opts, entry.label, state.nvim_tree_win or api.nvim_get_current_win())
           api.nvim_buf_set_extmark(buf, tree_namespace, index - 1, 0, opts)
           break
         end
@@ -253,10 +318,7 @@ local function focus_range(win, buf, artifact)
       line_hl_group = 'WtPresentRange',
       priority = 210,
     }
-    if line == first and type(artifact.label) == 'string' and artifact.label ~= '' then
-      opts.virt_text = { { '  ← ' .. artifact.label, 'WtPresentLabel' } }
-      opts.virt_text_pos = 'eol'
-    end
+    if line == first then add_annotation(opts, artifact.label, win) end
     api.nvim_buf_set_extmark(buf, namespace, line - 1, 0, opts)
   end
 
@@ -445,10 +507,7 @@ local function render_tree(artifact, scene)
 
   for _, item in ipairs(focus_lines) do
     local opts = { line_hl_group = 'WtPresentTree', priority = 210 }
-    if item.label ~= '' then
-      opts.virt_text = { { '  ← ' .. item.label, 'WtPresentLabel' } }
-      opts.virt_text_pos = 'eol'
-    end
+    add_annotation(opts, item.label, win)
     api.nvim_buf_set_extmark(buf, namespace, item.line - 1, 0, opts)
   end
   if focus_lines[1] then
