@@ -724,6 +724,9 @@ test_presentation_canvas() {
     sock="$tmp/nvim.sock"
     lua="$(dirname "$WT_BIN_DIR")/config/wt-present.lua"
     printf 'one\ntwo\nthree\nfour\n' > "$tmp/example.txt"
+    mkdir -p "$tmp/src/components" "$tmp/docs"
+    printf 'nested\n' > "$tmp/src/components/button.js"
+    printf 'notes\n' > "$tmp/docs/notes.md"
 
     WT_WORKTREE="$tmp" nvim --clean --headless --listen "$sock" \
         -c "luafile $lua" >"$tmp/nvim.log" 2>&1 &
@@ -767,6 +770,40 @@ test_presentation_canvas() {
         fail "wt-present Markdown scene failed" "$response"
     fi
 
+    response=$(printf '%s' \
+        '{"version":1,"title":"Deck","scenes":[{"title":"Intro","narrative":"Start","artifact":{"kind":"markdown","content":"# Intro"}},{"title":"Code","narrative":"Source","artifact":{"kind":"file","path":"example.txt","startLine":4}}]}' \
+        | WT_SESSION=canvas-test WT_NVIM_SOCKET="$sock" "$WT_BIN_DIR/wt-present" deck-show 2>&1)
+    if jq -e '.ok == true and .deck.index == 1 and .deck.count == 2 and .kind == "markdown"' <<<"$response" >/dev/null 2>&1; then
+        pass "wt-present shows a navigable deck"
+    else
+        fail "wt-present deck scene failed" "$response"
+    fi
+
+    response=$(WT_SESSION=canvas-test WT_NVIM_SOCKET="$sock" "$WT_BIN_DIR/wt-present" deck-next 2>&1)
+    context=$(WT_SESSION=canvas-test WT_NVIM_SOCKET="$sock" "$WT_BIN_DIR/wt-present" context 2>&1)
+    if jq -e '.ok == true and .deck.index == 2 and .kind == "file"' <<<"$response" >/dev/null 2>&1 \
+        && jq -e '.ok == true and .path == "example.txt" and .line == 4' <<<"$context" >/dev/null 2>&1; then
+        pass "wt-present deck-next navigates locally"
+    else
+        fail "wt-present deck-next failed" "$response / $context"
+    fi
+
+    response=$(WT_SESSION=canvas-test WT_NVIM_SOCKET="$sock" "$WT_BIN_DIR/wt-present" deck-prev 2>&1)
+    if jq -e '.ok == true and .deck.index == 1 and .kind == "markdown"' <<<"$response" >/dev/null 2>&1; then
+        pass "wt-present deck-prev navigates locally"
+    else
+        fail "wt-present deck-prev failed" "$response"
+    fi
+
+    response=$(printf '%s' \
+        '{"version":1,"title":"Explorer fallback","narrative":"Tree","artifact":{"kind":"tree","view":"explorer","root":".","focus":[{"path":"src/components/button.js","label":"nested"}]}}' \
+        | WT_SESSION=canvas-test WT_NVIM_SOCKET="$sock" "$WT_BIN_DIR/wt-present" show 2>&1)
+    if jq -e '.ok == true and .kind == "tree" and .rendered.entries >= 1 and (.rendered.explorer // "") != "nvim-tree"' <<<"$response" >/dev/null 2>&1; then
+        pass "wt-present explorer tree falls back without nvim-tree"
+    else
+        fail "wt-present explorer fallback failed" "$response"
+    fi
+
     response=$(WT_SESSION=canvas-test WT_NVIM_SOCKET="$sock" "$WT_BIN_DIR/wt-present" clear 2>&1)
     if jq -e '.ok == true and .active == false' <<<"$response" >/dev/null 2>&1; then
         pass "wt-present clears the scene and restores Neovim"
@@ -776,6 +813,38 @@ test_presentation_canvas() {
 
     nvim --headless --server "$sock" --remote-expr 'execute("qa!")' >/dev/null 2>&1 || true
     wait "$pid" 2>/dev/null || true
+
+    local tree_plugin sock_tree pid_tree maps marks
+    tree_plugin=$(find "${XDG_DATA_HOME:-$HOME/.local/share}/nvim" -path '*/nvim-tree.lua' -type d 2>/dev/null | head -1 || true)
+    if [[ -n "$tree_plugin" ]]; then
+        sock_tree="$tmp/nvim-tree.sock"
+        WT_WORKTREE="$tmp" nvim --clean --headless --cmd "set rtp+=$tree_plugin" --listen "$sock_tree" \
+            -c 'lua require("nvim-tree").setup({ actions = { open_file = { quit_on_open = false } } })' \
+            -c "luafile $lua" >"$tmp/nvim-tree.log" 2>&1 &
+        pid_tree=$!
+        for i in $(seq 1 100); do [[ -S "$sock_tree" ]] && break; sleep 0.05; done
+        if [[ -S "$sock_tree" ]]; then
+            response=$(printf '%s' \
+                '{"version":1,"title":"Explorer","narrative":"Tree","artifact":{"kind":"tree","view":"explorer","root":".","focus":[{"path":"src/components/button.js","label":"nested"},{"path":"docs/notes.md","label":"docs"}]}}' \
+                | WT_SESSION=canvas-test WT_NVIM_SOCKET="$sock_tree" "$WT_BIN_DIR/wt-present" show 2>&1)
+            maps=$(nvim --headless --server "$sock_tree" --remote-expr 'execute("silent! nmap <buffer> h") . execute("silent! nmap <buffer> l") . execute("silent! nmap <buffer> H") . execute("silent! nmap <buffer> L")' 2>&1 || true)
+            marks=$(nvim --headless --server "$sock_tree" --remote-expr 'luaeval("#vim.api.nvim_buf_get_extmarks(0, vim.api.nvim_create_namespace([[wt_present_tree_focus]]), 0, -1, {})")' 2>&1 || true)
+            if jq -e '.ok == true and .kind == "tree" and .rendered.explorer == "nvim-tree" and .rendered.focused == "src/components/button.js"' <<<"$response" >/dev/null 2>&1 \
+                && [[ "$maps" == *" h "* && "$maps" == *" l "* && "$maps" == *" H "* && "$maps" == *" L "* ]] \
+                && [[ "$marks" =~ ^[1-9][0-9]*$ ]]; then
+                pass "wt-present explorer tree uses nvim-tree with controls and highlights"
+            else
+                fail "wt-present nvim-tree explorer failed" "$response / maps=$maps / marks=$marks / $(cat "$tmp/nvim-tree.log" 2>/dev/null)"
+            fi
+            nvim --headless --server "$sock_tree" --remote-expr 'execute("qa!")' >/dev/null 2>&1 || true
+        else
+            fail "wt-present nvim-tree test Neovim did not start" "$(cat "$tmp/nvim-tree.log" 2>/dev/null)"
+        fi
+        wait "$pid_tree" 2>/dev/null || true
+    else
+        pass "skipped: nvim-tree not installed for explorer integration test"
+    fi
+
     rm -rf "$tmp"
 }
 

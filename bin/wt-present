@@ -4,6 +4,9 @@
 #
 #  Usage:
 #    printf '%s' '<scene-json>' | wt-present show [--session NAME]
+#    printf '%s' '<deck-json>' | wt-present deck-show [--session NAME]
+#    wt-present deck-next|deck-prev [--session NAME]
+#    wt-present deck-goto INDEX [--session NAME]
 #    wt-present context [--session NAME]
 #    wt-present clear [--session NAME]
 #    wt-present ping [--session NAME]
@@ -18,10 +21,16 @@ WT_NVIM_SOCK_DIR="${WT_NVIM_SOCK_DIR:-$WT_STATUS_DIR/nvim-sockets}"
 
 action="${1:-}"
 [[ -n "$action" ]] && shift || true
+goto_index=""
 case "$action" in
-    show|context|clear|ping) ;;
+    show|deck-show|deck-next|deck-prev|context|clear|ping) ;;
+    deck-goto)
+        goto_index="${1:-}"
+        [[ -n "$goto_index" ]] && shift || { echo "wt-present: deck-goto requires an index" >&2; exit 2; }
+        [[ "$goto_index" =~ ^[0-9]+$ ]] || { echo "wt-present: deck-goto index must be a positive integer" >&2; exit 2; }
+        ;;
     *)
-        echo "Usage: wt-present {show|context|clear|ping} [--session NAME]" >&2
+        echo "Usage: wt-present {show|deck-show|deck-next|deck-prev|deck-goto INDEX|context|clear|ping} [--session NAME]" >&2
         exit 2
         ;;
 esac
@@ -55,14 +64,24 @@ fi
 command -v nvim >/dev/null 2>&1 || { echo "wt-present: nvim is not installed" >&2; exit 1; }
 command -v jq >/dev/null 2>&1 || { echo "wt-present: jq is not installed" >&2; exit 1; }
 
-if [[ "$action" == "show" ]]; then
-    scene=$(cat)
-    [[ -n "$scene" ]] || { echo "wt-present: show requires scene JSON on stdin" >&2; exit 2; }
-    if ! jq -e 'type == "object"' >/dev/null 2>&1 <<<"$scene"; then
-        echo "wt-present: scene is not a JSON object" >&2
+if [[ "$action" == "show" || "$action" == "deck-show" ]]; then
+    payload=$(cat)
+    [[ -n "$payload" ]] || { echo "wt-present: $action requires JSON on stdin" >&2; exit 2; }
+    if ! jq -e 'type == "object"' >/dev/null 2>&1 <<<"$payload"; then
+        echo "wt-present: $action payload is not a JSON object" >&2
         exit 2
     fi
-    request=$(jq -cn --argjson scene "$scene" '{action:"show", scene:$scene}')
+    if [[ "$action" == "show" ]]; then
+        request=$(jq -cn --argjson scene "$payload" '{action:"show", scene:$scene}')
+    else
+        request=$(jq -cn --argjson deck "$payload" '{action:"deck_show", deck:$deck}')
+    fi
+elif [[ "$action" == "deck-next" ]]; then
+    request=$(jq -cn '{action:"deck_next"}')
+elif [[ "$action" == "deck-prev" ]]; then
+    request=$(jq -cn '{action:"deck_prev"}')
+elif [[ "$action" == "deck-goto" ]]; then
+    request=$(jq -cn --argjson index "$goto_index" '{action:"deck_goto", index:$index}')
 else
     request=$(jq -cn --arg action "$action" '{action:$action}')
 fi

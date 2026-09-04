@@ -54,6 +54,11 @@ const presentParameters = {
           type: "string",
           description: "Worktree-relative directory for a tree artifact",
         },
+        view: {
+          type: "string",
+          enum: ["summary", "explorer"],
+          description: "Tree rendering style. summary uses a scratch overview; explorer uses nvim-tree.nvim when available.",
+        },
         focus: {
           type: "array",
           description: "Important paths to show in a tree artifact",
@@ -90,6 +95,38 @@ const presentParameters = {
           type: "array",
           items: { type: "string" },
           description: "Available answers for a choice interaction",
+        },
+      },
+    },
+  },
+}
+
+const deckParameters = {
+  type: "object",
+  additionalProperties: false,
+  required: ["title", "scenes"],
+  properties: {
+    title: {
+      type: "string",
+      description: "Short title for the presentation deck",
+    },
+    startIndex: {
+      type: "integer",
+      minimum: 1,
+      description: "One-based slide index to show first",
+    },
+    scenes: {
+      type: "array",
+      minItems: 1,
+      description: "Scenes Neovim can navigate locally without another model round trip",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["title", "narrative", "artifact"],
+        properties: {
+          title: presentParameters.properties.title,
+          narrative: presentParameters.properties.narrative,
+          artifact: presentParameters.properties.artifact,
         },
       },
     },
@@ -323,6 +360,53 @@ export default function registerPresentation(pi, { session }) {
       const interaction = result?.details?.interaction || {}
       const warning = result?.details?.editorError ? `\nEditor unavailable: ${result.details.editorError}` : ""
       return plainComponent(`${resultText(interaction)}${warning}`)
+    },
+  })
+
+  pi.registerTool({
+    name: "present_deck",
+    label: "Present Deck",
+    description: "Present a complete navigable deck through wt's Neovim canvas. Neovim owns slide navigation locally with H/L/q so the user can move without model round trips.",
+    promptSnippet: "Use present_deck for slide-like walkthroughs that should be navigable in Neovim",
+    promptGuidelines: [
+      "Use present_deck when the user wants a slide-like walkthrough or back/forward navigation.",
+      "Keep each scene self-contained; Neovim, not the agent, owns deck navigation after the deck is shown.",
+      "Use H/L for previous/next and q to end the deck in Neovim.",
+    ],
+    parameters: deckParameters,
+    executionMode: "sequential",
+
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+      const deck = {
+        version: 1,
+        title: params.title,
+        startIndex: params.startIndex || 1,
+        scenes: params.scenes,
+      }
+
+      let editor
+      let editorError
+      try {
+        editor = await run(ctx, "deck-show", deck, signal)
+      } catch (error) {
+        editorError = error.message
+        if (ctx.hasUI) ctx.ui.notify(`Editor deck unavailable: ${editorError}`, "warning")
+      }
+
+      return {
+        content: [{ type: "text", text: editorError ? `Deck unavailable: ${editorError}` : "Deck shown in Neovim. Use H/L to navigate and q to close." }],
+        details: { deck, editor, editorError },
+      }
+    },
+
+    renderCall(args) {
+      const count = Array.isArray(args?.scenes) ? args.scenes.length : 0
+      return plainComponent(`${args?.title || "Presentation deck"}\n${count} slides\n\nNeovim-local navigation: H/L/q`)
+    },
+
+    renderResult(result) {
+      const warning = result?.details?.editorError ? `\nEditor unavailable: ${result.details.editorError}` : ""
+      return plainComponent(`Deck shown in Neovim. Use H/L to navigate and q to close.${warning}`)
     },
   })
 
