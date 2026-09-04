@@ -1687,14 +1687,18 @@ idle = true
 await emit("agent_settled", { type: "agent_settled" }, ctx)
 
 const present = tools.get("present")
-if (!present || present.executionMode !== "sequential" || !commands.has("presentation-end")) process.exit(2)
+if (!present || tools.has("present_deck") || present.executionMode !== "sequential" || !commands.has("presentation-end")) process.exit(2)
 const result = await present.execute("tool-1", {
-  title: "Example scene",
-  narrative: "This is the important line.",
-  artifact: { kind: "file", path: "src/example.js", startLine: 4, label: "look here" },
-  interaction: { kind: "continue" },
+  title: "Example deck",
+  scenes: [
+    {
+      title: "Example scene",
+      narrative: "This is the important line.",
+      artifact: { kind: "file", path: "src/example.js", startLine: 4, label: "look here" },
+    },
+  ],
 }, undefined, undefined, ctx)
-if (result.details?.interaction?.action !== "continue") process.exit(3)
+if (result.details?.deck?.scenes?.length !== 1) process.exit(3)
 
 await emit("session_shutdown", { type: "session_shutdown", reason: "quit" }, ctx)
 JS
@@ -1716,12 +1720,12 @@ EOF
         fail "Pi lifecycle event mapping failed" "node_rc=$node_rc $(diff -u "$tmp/expected" "$tmp/events" 2>&1 || true)"
     fi
 
-    if awk -F '\t' '$1 == "show"' "$tmp/present-requests" \
-        | cut -f2- | jq -e '.version == 1 and .title == "Example scene" and .artifact.kind == "file"' \
+    if awk -F '\t' '$1 == "deck-show"' "$tmp/present-requests" \
+        | cut -f2- | jq -e '.version == 1 and .title == "Example deck" and (.scenes | length) == 1 and .scenes[0].artifact.kind == "file"' \
             >/dev/null 2>&1; then
-        pass "Pi present tool sends a versioned scene to wt-present"
+        pass "Pi present tool sends a versioned deck to wt-present"
     else
-        fail "Pi present tool did not send the expected scene" "$(cat "$tmp/present-requests")"
+        fail "Pi present tool did not send the expected deck" "$(cat "$tmp/present-requests")"
     fi
 
     # The extension is installed globally but must not register anything for a

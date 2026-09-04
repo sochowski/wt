@@ -249,16 +249,16 @@ other agents. Its native session id is also captured, so `wt revive` resumes
 the exact conversation with `pi --session <id>`.
 
 The extension also registers one sequential `present` tool. Ask Pi to explain
-existing code, walk through its changes, quiz you on a selection, or present a
-project tree or Markdown document. Each call advances one scene: Pi provides
-the narration while an optional `file`, `diff`, `tree`, or `markdown` artifact
-appears in the managed nvim pane, then Pi waits for Continue, a choice,
-free-form text, or a visual selection before moving on. The canvas restores the
-prior editor view when the presentation ends; `/presentation-end` ends it
-explicitly. The versioned scene
-transport (`wt-present`) is agent-neutral so other integrations can drive the
-same canvas later. Presentations require nvim; diff scenes use Unified.nvim when
-available and gracefully fall back to a normal file view.
+existing code, walk through its changes, or present a project tree or Markdown
+document. Each call sends a complete navigable deck to managed nvim: Pi provides
+one or more scenes, each with a `file`, `diff`, `tree`, or `markdown` artifact,
+and Neovim owns local slide navigation with `H`/`L` (or arrow keys). `tree`
+artifacts can use `view: "explorer"` for an actual `nvim-tree.nvim` file explorer
+when available. The canvas restores the prior editor view when the presentation
+ends; `/presentation-end` or `q` ends it explicitly. The versioned deck transport
+(`wt-present`) is agent-neutral so other integrations can drive the same canvas
+later. Presentations require nvim; diff scenes use Unified.nvim when available
+and gracefully fall back to a normal file view.
 
 Accurate settled status needs Pi 0.80.4 or newer; blocking extension-UI prompt
 status needs Pi 0.84.4 or newer.
