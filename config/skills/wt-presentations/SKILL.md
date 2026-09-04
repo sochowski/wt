@@ -61,6 +61,14 @@ Choose the diagram family that matches the explanation:
 - `stateDiagram-v2` for states and transitions
 - `classDiagram` or `erDiagram` for structural and data relationships
 
+Design Mermaid for an 80-column terminal canvas:
+
+- default flowcharts to `TD`; use `LR` only for three or fewer short nodes across
+- keep each horizontal rank to three nodes or fewer
+- limit sequence diagrams to four participants
+- keep labels under 24 characters per line and use `<br/>` for intentional wraps
+- split a larger graph across scenes instead of relying on horizontal scrolling
+
 Keep one primary diagram focused on one idea per scene. Add a short heading,
 legend, or conclusion in the surrounding Markdown when it helps, and split a
 crowded diagram into multiple scenes. Mermaid stays embedded in the Markdown;

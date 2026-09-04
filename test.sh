@@ -619,6 +619,8 @@ test_wt_shells_skill() {
         if [[ "$skill" == "wt-presentations" ]]; then
             if grep -q 'Treat fenced Mermaid diagrams as the default visual language' "$skill_dir/SKILL.md" \
                 && grep -q '`sequenceDiagram`' "$skill_dir/SKILL.md" \
+                && grep -q '80-column terminal canvas' "$skill_dir/SKILL.md" \
+                && grep -q 'use `<br/>` for intentional wraps' "$skill_dir/SKILL.md" \
                 && grep -q "user's Neovim Mermaid plugin" "$skill_dir/SKILL.md"; then
                 pass "wt-presentations skill teaches Mermaid-first Markdown"
             else
@@ -1637,7 +1639,9 @@ test_pi_extension() {
 
     if grep -q 'render-markdown-mermaid.nvim' "$extension_dir/README.md" \
         && grep -q 'beautiful-mermaid-cli' "$extension_dir/README.md" \
-        && grep -q "mode = 'unicode'" "$extension_dir/README.md"; then
+        && grep -q "mode = 'unicode'" "$extension_dir/README.md" \
+        && grep -q '80-column canvas' "$extension_dir/README.md" \
+        && grep -q 'padding_x = 1' "$extension_dir/README.md"; then
         pass "Pi presentation docs recommend Unicode Mermaid rendering"
     else
         fail "Pi presentation docs are missing Mermaid plugin setup"
@@ -1736,7 +1740,9 @@ if (!present || tools.has("present_deck") || present.executionMode !== "sequenti
 const mermaidGuidance = (present.promptGuidelines || []).join("\n")
 if (!String(present.promptSnippet).includes("Mermaid-first")
   || !mermaidGuidance.includes("fenced Mermaid diagram by default")
-  || !mermaidGuidance.includes("do not hand-author ASCII diagrams")) process.exit(3)
+  || !mermaidGuidance.includes("do not hand-author ASCII diagrams")
+  || !mermaidGuidance.includes("80-column canvas")
+  || !mermaidGuidance.includes("use <br/> to wrap longer labels")) process.exit(3)
 const result = await present.execute("tool-1", {
   title: "Example deck",
   scenes: [

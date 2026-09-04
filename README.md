@@ -255,9 +255,11 @@ one or more scenes, each with a `file`, `diff`, `tree`, or `markdown` artifact,
 and Neovim owns local slide navigation with `H`/`L` (or arrow keys). Generated
 Markdown is Mermaid-first: agents are instructed to use fenced Mermaid diagrams
 for architecture, workflows, sequences, state, dependencies, and other
-relationships. User-installed Neovim plugins render those fences as Unicode in
-the scratch buffer; without one, the standard Mermaid source remains readable.
-The recommended setup is `render-markdown.nvim` plus
+relationships. Diagrams target an 80-column canvas with compact, primarily
+vertical layouts so Unicode virtual lines do not overflow the Neovim window.
+User-installed Neovim plugins render those fences in the scratch buffer; without
+one, the standard Mermaid source remains readable. The recommended setup is
+`render-markdown.nvim` plus
 `render-markdown-mermaid.nvim` and its `bm` backend; see
 [`config/pi-wt/README.md`](config/pi-wt/README.md#mermaid-rendering). `tree`
 artifacts can use `view: "explorer"` for an actual `nvim-tree.nvim` file explorer

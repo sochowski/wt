@@ -74,7 +74,7 @@ const presentParameters = {
         },
         content: {
           type: "string",
-          description: "Markdown content for a markdown artifact. Prefer fenced Mermaid diagrams for architecture, workflows, sequences, state, dependencies, and other relationships.",
+          description: "Markdown content for a markdown artifact. Prefer fenced Mermaid diagrams for architecture, workflows, sequences, state, dependencies, and other relationships. Design diagrams to fit within 80 terminal columns.",
         },
       },
     },
@@ -319,6 +319,7 @@ export default function registerPresentation(pi, { session }) {
       "When using present, build a complete deck of scenes up front instead of presenting one scene at a time.",
       "For present scenes about architecture, workflows, sequences, state transitions, dependencies, lifecycles, data flow, or decision trees, use a markdown artifact with a fenced Mermaid diagram by default; use prose-only Markdown only when no meaningful relationship can be diagrammed.",
       "Within present Markdown, do not hand-author ASCII diagrams when Mermaid can express the same relationship; raw Mermaid remains readable when the user's Neovim renderer is unavailable.",
+      "Design Mermaid diagrams in present Markdown for an 80-column canvas: default flowcharts to TD, limit LR layouts to three short nodes across, limit sequence diagrams to four participants, keep labels under 24 characters per line, use <br/> to wrap longer labels, and split larger graphs into multiple scenes.",
       "Keep each present scene self-contained and each Mermaid diagram focused; prefer multiple scenes over a crowded diagram.",
       "Use H/L for previous/next and q to end a present deck in Neovim.",
     ],

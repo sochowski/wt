@@ -59,8 +59,20 @@ require('render-markdown-mermaid').setup({
   hide_source = true,
   cache = true,
   cmd = { 'bm' },
+  cli = {
+    border_padding = 1,
+    padding_x = 1,
+    padding_y = 1,
+  },
 })
 ```
+
+`bm` does not expose a maximum width for Unicode output, and Neovim virtual
+lines cannot safely soft-wrap a diagram without breaking its geometry. Present
+therefore asks agents to design for an 80-column canvas: prefer `TD` flowcharts,
+keep horizontal ranks to three short nodes, limit sequences to four participants,
+wrap long labels explicitly with `<br/>`, and split large graphs across scenes.
+The compact CLI padding above preserves more of that width for useful content.
 
 The canvas names Markdown scratch buffers with an `.md` suffix and sets their
 filetype to `markdown`, so filename- and FileType-based plugins can attach. The
