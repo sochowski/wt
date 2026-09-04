@@ -13,19 +13,28 @@ local api = vim.api
 local uv = vim.uv or vim.loop
 
 local namespace = api.nvim_create_namespace('wt_present')
+local tree_namespace = api.nvim_create_namespace('wt_present_tree_focus')
 local renderers = {}
 local state = {
   active = false,
+  mode = nil,
   scene = nil,
+  deck = nil,
+  deck_index = 1,
   snapshot = nil,
   win = nil,
   buf = nil,
   scratch_buffers = {},
+  mapped_buffers = {},
+  nvim_tree_opened = false,
+  nvim_tree_win = nil,
+  nvim_tree_peer_win = nil,
+  nvim_tree_artifact = nil,
 }
 
 vim.cmd('highlight default link WtPresentRange Visual')
 vim.cmd('highlight default link WtPresentLabel DiagnosticInfo')
-vim.cmd('highlight default link WtPresentTree Directory')
+vim.cmd('highlight default link WtPresentTree Visual')
 
 local function valid_win(win)
   return win and api.nvim_win_is_valid(win)
@@ -110,12 +119,123 @@ local function save_snapshot(win)
     target_buf = api.nvim_win_get_buf(win),
     target_cursor = api.nvim_win_get_cursor(win),
     target_view = view,
+    target_winbar = vim.wo[win].winbar,
   }
 end
 
 local function clear_marks()
   for _, buf in ipairs(api.nvim_list_bufs()) do
-    if valid_buf(buf) then pcall(api.nvim_buf_clear_namespace, buf, namespace, 0, -1) end
+    if valid_buf(buf) then
+      pcall(api.nvim_buf_clear_namespace, buf, namespace, 0, -1)
+      pcall(api.nvim_buf_clear_namespace, buf, tree_namespace, 0, -1)
+    end
+  end
+end
+
+local function clear_keymaps()
+  for buf, _ in pairs(state.mapped_buffers) do
+    if valid_buf(buf) then
+      for _, lhs in ipairs({ 'H', 'L', '<Left>', '<Right>', 'q', '?' }) do
+        pcall(vim.keymap.del, 'n', lhs, { buffer = buf })
+      end
+    end
+  end
+  state.mapped_buffers = {}
+end
+
+local function deck_key(action)
+  return function()
+    local ok, result = pcall(action)
+    if not ok then
+      vim.notify('wt presentation: ' .. tostring(result), vim.log.levels.ERROR)
+    elseif type(result) == 'table' and result.ok == false then
+      vim.notify('wt presentation: ' .. tostring(result.error or 'navigation failed'), vim.log.levels.ERROR)
+    end
+  end
+end
+
+local function set_deck_keymaps(buf)
+  if not valid_buf(buf) or state.mode ~= 'deck' then return end
+  if state.mapped_buffers[buf] then return end
+  local opts = { buffer = buf, nowait = true, silent = true }
+  vim.keymap.set('n', 'H', deck_key(M.deck_prev), opts)
+  vim.keymap.set('n', '<Left>', deck_key(M.deck_prev), opts)
+  vim.keymap.set('n', 'L', deck_key(M.deck_next), opts)
+  vim.keymap.set('n', '<Right>', deck_key(M.deck_next), opts)
+  vim.keymap.set('n', 'q', deck_key(M.clear), opts)
+  vim.keymap.set('n', '?', deck_key(M.deck_help), opts)
+  state.mapped_buffers[buf] = true
+end
+
+local function close_nvim_tree()
+  if not state.nvim_tree_opened then return end
+  local ok, tree = pcall(require, 'nvim-tree.api')
+  if ok then pcall(tree.tree.close) end
+  state.nvim_tree_opened = false
+  state.nvim_tree_win = nil
+  state.nvim_tree_peer_win = nil
+  state.nvim_tree_artifact = nil
+end
+
+local function refresh_nvim_tree_highlights()
+  if not valid_buf(state.buf) or not state.nvim_tree_artifact then return end
+  vim.defer_fn(function()
+    if valid_buf(state.buf) then highlight_nvim_tree_focus(state.buf, state.nvim_tree_artifact) end
+  end, 30)
+end
+
+local function open_nvim_tree_node(tree)
+  local node = tree.tree.get_node_under_cursor()
+  if not node then return end
+  if node.type == 'file' and node.absolute_path then
+    local tree_win = api.nvim_get_current_win()
+    local peer = valid_win(state.nvim_tree_peer_win) and state.nvim_tree_peer_win or nil
+    if not peer then
+      vim.cmd('rightbelow vertical new')
+      peer = api.nvim_get_current_win()
+      state.nvim_tree_peer_win = peer
+    end
+    api.nvim_set_current_win(peer)
+    vim.cmd.edit(vim.fn.fnameescape(node.absolute_path))
+    api.nvim_set_current_win(tree_win)
+  else
+    tree.node.open.edit()
+  end
+  refresh_nvim_tree_highlights()
+end
+
+local function set_nvim_tree_keymaps(buf, tree)
+  if not valid_buf(buf) then return end
+  local opts = { buffer = buf, nowait = true, silent = true, desc = 'wt presentation tree' }
+  pcall(vim.keymap.set, 'n', 'l', function() open_nvim_tree_node(tree) end, opts)
+  pcall(vim.keymap.set, 'n', 'h', function()
+    tree.node.navigate.parent_close()
+    refresh_nvim_tree_highlights()
+  end, opts)
+end
+
+function highlight_nvim_tree_focus(buf, artifact)
+  if not valid_buf(buf) then return end
+  pcall(api.nvim_buf_clear_namespace, buf, tree_namespace, 0, -1)
+  local focus = type(artifact.focus) == 'table' and artifact.focus or {}
+  if #focus == 0 then return end
+
+  local lines = api.nvim_buf_get_lines(buf, 0, -1, false)
+  for _, entry in ipairs(focus) do
+    if type(entry) == 'table' and type(entry.path) == 'string' then
+      local name = entry.path:match('[^/]+$') or entry.path
+      for index, line in ipairs(lines) do
+        if line:find(name, 1, true) then
+          local opts = { line_hl_group = 'WtPresentTree', priority = 210 }
+          if type(entry.label) == 'string' and entry.label ~= '' then
+            opts.virt_text = { { '  ← ' .. entry.label, 'WtPresentLabel' } }
+            opts.virt_text_pos = 'eol'
+          end
+          api.nvim_buf_set_extmark(buf, tree_namespace, index - 1, 0, opts)
+          break
+        end
+      end
+    end
   end
 end
 
@@ -185,6 +305,7 @@ local function render_file(artifact)
   state.win = win
   state.buf = buf
   focus_range(win, buf, artifact)
+  set_deck_keymaps(buf)
 
   return {
     path = relative_path(path, root),
@@ -214,6 +335,7 @@ local function render_markdown(artifact, scene)
   state.win = win
   state.buf = buf
   focus_range(win, buf, artifact)
+  set_deck_keymaps(buf)
   return {
     line = api.nvim_win_get_cursor(win)[1],
     lines = #lines,
@@ -221,7 +343,57 @@ local function render_markdown(artifact, scene)
   }
 end
 
+local function render_nvim_tree(artifact)
+  local root_path, project = resolve_path(artifact.root or '.', true)
+  local ok, tree = pcall(require, 'nvim-tree.api')
+  if not ok then return nil end
+
+  local win = current_main_window()
+  save_snapshot(win)
+  tree.tree.open({ path = root_path, focus = true })
+  pcall(tree.tree.reload)
+
+  local focus = type(artifact.focus) == 'table' and artifact.focus or {}
+  local focused
+  local focus_paths = {}
+  for _, entry in ipairs(focus) do
+    if type(entry) == 'table' and type(entry.path) == 'string' then
+      local candidate = vim.fs.normalize(root_path .. '/' .. entry.path)
+      if is_within(candidate, root_path) then
+        focus_paths[#focus_paths + 1] = candidate
+        -- Make every highlighted path visible by expanding parent folders.
+        pcall(tree.tree.find_file, { buf = candidate, focus = false, open = true })
+      end
+    end
+  end
+  if focus_paths[1] then
+    pcall(tree.tree.find_file, { buf = focus_paths[1], focus = true, open = true })
+    focused = relative_path(focus_paths[1], project)
+  end
+
+  state.win = api.nvim_get_current_win()
+  state.buf = api.nvim_win_get_buf(state.win)
+  state.nvim_tree_opened = true
+  state.nvim_tree_win = state.win
+  state.nvim_tree_peer_win = valid_win(win) and win or nil
+  state.nvim_tree_artifact = artifact
+  set_nvim_tree_keymaps(state.buf, tree)
+  set_deck_keymaps(state.buf)
+  highlight_nvim_tree_focus(state.buf, artifact)
+
+  return {
+    root = relative_path(root_path, project),
+    explorer = 'nvim-tree',
+    focused = focused,
+  }
+end
+
 local function render_tree(artifact, scene)
+  if artifact.view == 'explorer' then
+    local rendered = render_nvim_tree(artifact)
+    if rendered then return rendered end
+  end
+
   local root_path, project = resolve_path(artifact.root or '.', true)
   local heading = relative_path(root_path, project)
   if heading == '.' then heading = vim.fn.fnamemodify(project, ':t') end
@@ -269,6 +441,7 @@ local function render_tree(artifact, scene)
   api.nvim_win_set_buf(win, buf)
   state.win = win
   state.buf = buf
+  set_deck_keymaps(buf)
 
   for _, item in ipairs(focus_lines) do
     local opts = { line_hl_group = 'WtPresentTree', priority = 210 }
@@ -300,6 +473,7 @@ function M.show(scene)
   if type(scene.artifact) ~= 'table' then error('scene artifact is required') end
 
   local kind = scene.artifact.kind
+  if kind ~= 'tree' or scene.artifact.view ~= 'explorer' then close_nvim_tree() end
   local renderer = renderers[kind]
   if not renderer then error('unsupported artifact kind: ' .. tostring(kind)) end
 
@@ -315,6 +489,97 @@ function M.show(scene)
     title = scene.title or '',
     rendered = rendered,
   }
+end
+
+local function deck_status(rendered)
+  if state.mode ~= 'deck' or not state.deck then return nil end
+  return {
+    index = state.deck_index,
+    count = #state.deck.scenes,
+    title = state.deck.title or '',
+    rendered = rendered,
+  }
+end
+
+local function status_escape(text)
+  return tostring(text or ''):gsub('%%', '%%%%')
+end
+
+local function apply_deck_chrome()
+  if state.mode ~= 'deck' or not state.deck or not valid_win(state.win) then return end
+  local title = state.deck.title or 'wt presentation'
+  local counter = string.format('%d / %d', state.deck_index, #state.deck.scenes)
+  vim.wo[state.win].winbar = status_escape(title .. '    ' .. counter .. '    H prev · L next · q quit · ? help')
+  if valid_buf(state.buf) then
+    api.nvim_buf_set_extmark(state.buf, namespace, 0, 0, {
+      virt_lines = { { { '', 'Normal' } } },
+      virt_lines_above = true,
+      priority = 219,
+    })
+  end
+end
+
+function M.deck_render()
+  if not state.deck or type(state.deck.scenes) ~= 'table' then error('no active deck') end
+  local scene = state.deck.scenes[state.deck_index]
+  if type(scene) ~= 'table' then error('deck scene is missing: ' .. tostring(state.deck_index)) end
+  scene = vim.deepcopy(scene)
+  if scene.version == nil then scene.version = state.deck.version or 1 end
+  local result = M.show(scene)
+  apply_deck_chrome()
+  result.deck = deck_status(result.rendered)
+  return result
+end
+
+function M.deck_show(deck)
+  if type(deck) ~= 'table' then error('deck must be an object') end
+  if deck.version ~= nil and tonumber(deck.version) ~= 1 then
+    error('unsupported deck protocol version: ' .. tostring(deck.version))
+  end
+  if type(deck.scenes) ~= 'table' or #deck.scenes == 0 then error('deck scenes are required') end
+
+  state.mode = 'deck'
+  state.deck = vim.deepcopy(deck)
+  state.deck_index = math.max(1, math.min(tonumber(deck.startIndex) or 1, #state.deck.scenes))
+  return M.deck_render()
+end
+
+function M.deck_next()
+  if not state.deck then return { ok = false, error = 'no active deck' } end
+  state.deck_index = math.min(state.deck_index + 1, #state.deck.scenes)
+  return M.deck_render()
+end
+
+function M.deck_prev()
+  if not state.deck then return { ok = false, error = 'no active deck' } end
+  state.deck_index = math.max(state.deck_index - 1, 1)
+  return M.deck_render()
+end
+
+function M.deck_goto(index)
+  if not state.deck then return { ok = false, error = 'no active deck' } end
+  local next_index = tonumber(index)
+  if not next_index then error('deck index must be a number') end
+  state.deck_index = math.max(1, math.min(next_index, #state.deck.scenes))
+  return M.deck_render()
+end
+
+function M.deck_help()
+  local lines = {
+    '# wt presentation controls',
+    '',
+    'H / Left   previous slide',
+    'L / Right  next slide',
+    'q          close presentation and restore editor',
+    '?          show this help',
+  }
+  local win = current_main_window()
+  local buf = scratch_buffer('[wt presentation help]', lines, 'markdown')
+  api.nvim_win_set_buf(win, buf)
+  state.win = win
+  state.buf = buf
+  set_deck_keymaps(buf)
+  return { ok = true, active = true, help = true }
 end
 
 function M.reapply()
@@ -375,6 +640,7 @@ function M.context()
 end
 
 function M.clear()
+  clear_keymaps()
   clear_marks()
   local snapshot = state.snapshot
 
@@ -385,6 +651,7 @@ function M.clear()
     if valid_win(snapshot.target_win) and valid_buf(snapshot.target_buf) then
       pcall(api.nvim_win_set_buf, snapshot.target_win, snapshot.target_buf)
       pcall(api.nvim_win_set_cursor, snapshot.target_win, snapshot.target_cursor)
+      pcall(function() vim.wo[snapshot.target_win].winbar = snapshot.target_winbar or '' end)
       pcall(api.nvim_win_call, snapshot.target_win, function()
         if snapshot.target_view then vim.fn.winrestview(snapshot.target_view) end
       end)
@@ -392,16 +659,26 @@ function M.clear()
     if valid_win(snapshot.current_win) then pcall(api.nvim_set_current_win, snapshot.current_win) end
   end
 
+  close_nvim_tree()
+
   for _, buf in ipairs(state.scratch_buffers) do
     if valid_buf(buf) then pcall(api.nvim_buf_delete, buf, { force = true }) end
   end
 
   state.active = false
+  state.mode = nil
   state.scene = nil
+  state.deck = nil
+  state.deck_index = 1
   state.snapshot = nil
   state.win = nil
   state.buf = nil
   state.scratch_buffers = {}
+  state.mapped_buffers = {}
+  state.nvim_tree_opened = false
+  state.nvim_tree_win = nil
+  state.nvim_tree_peer_win = nil
+  state.nvim_tree_artifact = nil
   return { ok = true, active = false }
 end
 
@@ -410,6 +687,10 @@ function M.dispatch(request)
   local action = request.action
   local ok, result = pcall(function()
     if action == 'show' then return M.show(request.scene) end
+    if action == 'deck_show' then return M.deck_show(request.deck) end
+    if action == 'deck_next' then return M.deck_next() end
+    if action == 'deck_prev' then return M.deck_prev() end
+    if action == 'deck_goto' then return M.deck_goto(request.index) end
     if action == 'context' then return M.context() end
     if action == 'clear' then return M.clear() end
     if action == 'ping' then return { ok = true, active = state.active, version = 1 } end
