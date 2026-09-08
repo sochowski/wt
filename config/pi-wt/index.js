@@ -1,13 +1,8 @@
-import registerPresentation from "./presentation.js"
-import registerStatusIntegration from "./status.js"
+import registerExtension from "./extension.js"
+import renderInbox from "./inbox-renderer.js"
 
-// This extension is installed globally so Pi can discover it before project
-// trust is resolved, but it must stay inert outside a wt-managed launch.
-const wtSession = process.env.WT_SESSION
-
+// Static imports let Pi's extension loader resolve its TUI packages. Keep the
+// factory injectable so ordinary Node tests do not load native Pi dependencies.
 export default function WtExtension(pi) {
-  if (!wtSession) return
-
-  registerStatusIntegration(pi)
-  registerPresentation(pi, { session: wtSession })
+  return registerExtension(pi, { renderInbox })
 }

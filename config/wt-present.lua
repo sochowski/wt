@@ -113,7 +113,7 @@ local function valid_buf(buf)
 end
 
 local function project_root()
-  local root = vim.env.WT_WORKTREE
+  local root = vim.env.WT_VIEW_ROOT or vim.env.WT_WORKTREE
   if not root or root == '' then root = vim.fn.getcwd() end
   return vim.fs.normalize(root)
 end
@@ -591,6 +591,7 @@ function M.deck_render()
   local result = M.show(scene)
   apply_deck_chrome()
   result.deck = deck_status(result.rendered)
+  api.nvim_exec_autocmds('User', { pattern = 'WtPresentationChanged' })
   return result
 end
 
@@ -649,6 +650,11 @@ function M.reapply()
   if not state.active or not state.scene or not valid_win(state.win) or not valid_buf(state.buf) then return end
   clear_marks()
   focus_range(state.win, state.buf, state.scene.artifact)
+end
+
+-- Typed adapter checkpoint; no arbitrary editor/process memory.
+function M.snapshot()
+  return { deck = state.deck and vim.deepcopy(state.deck) or nil, slide = state.deck_index }
 end
 
 function M.context()
@@ -742,6 +748,7 @@ function M.clear()
   state.nvim_tree_win = nil
   state.nvim_tree_peer_win = nil
   state.nvim_tree_artifact = nil
+  api.nvim_exec_autocmds('User', { pattern = 'WtPresentationChanged' })
   return { ok = true, active = false }
 end
 

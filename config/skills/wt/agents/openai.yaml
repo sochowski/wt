@@ -1,0 +1,4 @@
+interface:
+  display_name: "WT Environment"
+  short_description: "Manage wt agents, shells, layouts and presentations"
+  default_prompt: "Use wt-managed tools for this environment."

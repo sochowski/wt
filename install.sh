@@ -48,6 +48,39 @@ if [[ ${#missing[@]} -gt 0 ]]; then
     exit 1
 fi
 
+# Unpublished paired-source contract: no guessed npm release and no bare-module
+# resolution across Pi's separate package roots. Runtime acknowledgement remains
+# authoritative even if this checkout is later removed/disabled or fails to load.
+if command -v pi &>/dev/null; then
+    if [[ -z "${WT_PI_SUBAGENTS_SOURCE:-}" ]]; then
+        echo "Error: Pi native delegation requires a compatible local pi-subagents checkout."
+        echo "Set WT_PI_SUBAGENTS_SOURCE to its absolute path (see docs/native-delegation.md)."
+        exit 1
+    fi
+    WT_PI_SUBAGENTS_SOURCE="$(cd "$WT_PI_SUBAGENTS_SOURCE" && pwd -P)"
+    if ! jq -e '.name == "pi-subagents" and .wtNativeProviderContract == 1 and .pi.extensions == ["./index.ts"]' "$WT_PI_SUBAGENTS_SOURCE/package.json" >/dev/null; then
+        echo "Error: pi-subagents checkout does not declare the WT native-provider v1 contract."
+        exit 1
+    fi
+    if [[ ! -f "$WT_PI_SUBAGENTS_SOURCE/index.ts" || ! -f "$WT_PI_SUBAGENTS_SOURCE/node_modules/jiti/package.json" ]]; then
+        echo "Error: compatible pi-subagents source and installed runtime dependencies are required."
+        exit 1
+    fi
+fi
+
+# Check all entries before any install side effects; jq -e on a stream would
+# inspect only the final package and miss an older package earlier in the list.
+if [[ -n "${WT_PI_SUBAGENTS_SOURCE:-}" && -f "$HOME/.pi/agent/settings.json" ]]; then
+    if ! has_old_pi_subagents="$(jq 'any(.packages[]?; (if type == "object" then .source else . end) | test("^npm:pi-subagents(@|$)"))' "$HOME/.pi/agent/settings.json")"; then
+        echo "Error: cannot validate existing Pi package settings."
+        exit 1
+    fi
+    if [[ "$has_old_pi_subagents" == true ]]; then
+        echo "Error: remove the old npm pi-subagents entry before paired-source installation."
+        exit 1
+    fi
+fi
+
 # Build before agent detection so the registry really is the only roster wt
 # maintains. Adding an agent should not require another hard-coded shell list.
 echo "Building wt-state..."
@@ -160,13 +193,34 @@ echo "  wt-menu.conf -> $target"
 echo "Configuring agent hooks..."
 "$SCRIPT_DIR/bin/wt-state" agents install-hooks --template-dir "$SCRIPT_DIR/config"
 
+if [[ -n "${WT_PI_SUBAGENTS_SOURCE:-}" ]]; then
+    pi_settings="$HOME/.pi/agent/settings.json"
+    mkdir -p "$(dirname "$pi_settings")"
+    [[ -f "$pi_settings" ]] || printf '{}\n' > "$pi_settings"
+    # Leave unrelated packages/settings untouched; duplicates were rejected in preflight.
+    tmp_settings="$(mktemp "${pi_settings}.XXXXXX")"
+    jq --arg source "$WT_PI_SUBAGENTS_SOURCE" '.packages = ((.packages // []) | if any(.[]; (if type == "object" then .source else . end) == $source) then . else . + [$source] end)' "$pi_settings" > "$tmp_settings"
+    chmod 600 "$tmp_settings"
+    mv "$tmp_settings" "$pi_settings"
+    echo "  pi-subagents native-provider v1 -> $WT_PI_SUBAGENTS_SOURCE"
+fi
+
 # -----------------------------------------------------------------------------
 #  Install Agent Skills
 # -----------------------------------------------------------------------------
 # Open-standard skills are shared by every harness. Codex, OpenCode, and Pi scan
 # ~/.agents/skills; Claude and Gemini use their own user-level skill roots.
 # Symlink instead of copying so updates in this checkout apply immediately.
-for skill_name in wt-shells wt-presentations; do
+# Remove only obsolete links owned by this checkout, never user skills.
+for skill_root in "$HOME/.agents/skills" "$HOME/.claude/skills" "$HOME/.gemini/skills"; do
+    for old_skill in wt-shells wt-presentations; do
+        old_target="$skill_root/$old_skill"
+        if [[ -L "$old_target" && "$(readlink -f "$old_target")" == "$SCRIPT_DIR/config/skills/$old_skill" ]]; then
+            rm "$old_target"
+        fi
+    done
+done
+for skill_name in wt; do
     echo "Installing $skill_name agent skill..."
     skill_source="$SCRIPT_DIR/config/skills/$skill_name"
     skill_targets=(

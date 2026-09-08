@@ -304,10 +304,10 @@ function resultText(result) {
   }
 }
 
-export default function registerPresentation(pi, { session }) {
+export default function registerPresentation(pi, { session, managedRun }) {
   const command = process.env.WT_PRESENT || `${process.env.HOME}/bin/wt-present`
-  const run = (ctx, action, payload, signal) =>
-    runPresentationCommand(command, session, ctx.cwd, action, payload, signal)
+  const run = managedRun || ((ctx, action, payload, signal) =>
+    runPresentationCommand(command, session, ctx.cwd, action, payload, signal))
 
   pi.registerTool({
     name: "present",
@@ -323,7 +323,7 @@ export default function registerPresentation(pi, { session }) {
       "Keep each present scene self-contained and each Mermaid diagram focused; prefer multiple scenes over a crowded diagram.",
       "Use H/L for previous/next and q to end a present deck in Neovim.",
     ],
-    parameters: deckParameters,
+    parameters: managedRun ? { ...deckParameters, properties: { ...deckParameters.properties, target: { type: "string", description: "Explicit root or attached checkout alias/ID; paths are confined to this target" } } } : deckParameters,
     executionMode: "sequential",
 
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
@@ -332,6 +332,7 @@ export default function registerPresentation(pi, { session }) {
         title: params.title,
         startIndex: params.startIndex || 1,
         scenes: params.scenes,
+        ...(managedRun ? { target: params.target || "root" } : {}),
       }
 
       let editor
@@ -363,12 +364,13 @@ export default function registerPresentation(pi, { session }) {
   pi.registerCommand("presentation-end", {
     description: "End the active wt presentation and restore Neovim",
     handler: async (_args, ctx) => {
-      await safelyClear(run, ctx)
+      if (managedRun) await run(ctx, "clear")
+      else await safelyClear(run, ctx)
       if (ctx.hasUI) ctx.ui.notify("Presentation ended", "info")
     },
   })
 
   pi.on("session_shutdown", async (_event, ctx) => {
-    await safelyClear(run, ctx)
+    if (!managedRun) await safelyClear(run, ctx)
   })
 }

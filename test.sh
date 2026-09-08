@@ -387,10 +387,10 @@ test_mobile_session_control() {
         fail "mobile directional fullscreen bindings are incomplete" "$mobile_bindings"
     fi
 
-    if grep -Fq 'select-pane -t \"{next}\"' <<<"$mobile_bindings" \
-        && grep -Fq 'select-pane -t \"{previous}\"' <<<"$mobile_bindings" \
-        && grep -Fq 'resize-pane -t \"{top-left}\" -L 3' <<<"$mobile_bindings" \
-        && grep -Fq 'resize-pane -t \"{top-left}\" -R 3' <<<"$mobile_bindings"; then
+    if grep -Fq 'select-pane -t "{next}"' <<<"$mobile_bindings" \
+        && grep -Fq 'select-pane -t "{previous}"' <<<"$mobile_bindings" \
+        && grep -Fq 'resize-pane -L -t "{top-left}" 3' <<<"$mobile_bindings" \
+        && grep -Fq 'resize-pane -R -t "{top-left}" 3' <<<"$mobile_bindings"; then
         pass "desktop prefix+h/j/k/l fallbacks retain focus and resize behavior"
     else
         fail "mobile bindings changed the desktop pane fallbacks" "$mobile_bindings"
@@ -439,7 +439,11 @@ test_mobile_session_control() {
     rm -f "$wt_path/mobile-api.txt"
 
     mobile_once=$(COLUMNS=48 "$WT_BIN_DIR/wt" mobile --once 2>&1)
-    if grep -Fq "test-wt-repo@test-branch" <<<"$mobile_once"; then
+    local shared_rows
+    shared_rows=$("$WT_BIN_DIR/wt" pick-list)
+    if [[ "$mobile_once" == "$shared_rows" ]] \
+        && grep -Eq '^[0-9a-f]{32}'$'\t' <<<"$mobile_once" \
+        && grep -Fq "$TEST_SESSION" <<<"$mobile_once"; then
         pass "mobile --once emits the shared picker rows"
     else
         fail "mobile did not reuse shared picker rows" "$mobile_once"
@@ -597,7 +601,7 @@ test_wt_shells_skill() {
     root="$(dirname "$WT_BIN_DIR")"
     install="$root/install.sh"
 
-    for skill in wt-shells wt-presentations; do
+    for skill in wt; do
         skill_dir="$root/config/skills/$skill"
         if [[ -f "$skill_dir/SKILL.md" ]] \
             && grep -q "^name: $skill$" "$skill_dir/SKILL.md" \
@@ -607,8 +611,7 @@ test_wt_shells_skill() {
             fail "$skill skill metadata missing"
         fi
 
-        display="WT Managed Shells"
-        [[ "$skill" == "wt-presentations" ]] && display="WT Presentations"
+        display="WT Environment"
         if [[ -f "$skill_dir/agents/openai.yaml" ]] \
             && grep -q "display_name: \"$display\"" "$skill_dir/agents/openai.yaml"; then
             pass "$skill includes Codex UI metadata"
@@ -616,7 +619,7 @@ test_wt_shells_skill() {
             fail "$skill openai.yaml missing"
         fi
 
-        if [[ "$skill" == "wt-presentations" ]]; then
+        if [[ "$skill" == "wt" ]]; then
             if grep -q 'Treat fenced Mermaid diagrams as the default visual language' "$skill_dir/SKILL.md" \
                 && grep -q '`sequenceDiagram`' "$skill_dir/SKILL.md" \
                 && grep -q '80-column terminal canvas' "$skill_dir/SKILL.md" \
@@ -628,7 +631,7 @@ test_wt_shells_skill() {
             fi
         fi
 
-        if grep -q "for skill_name in wt-shells wt-presentations" "$install" \
+        if grep -q "for skill_name in wt" "$install" \
             && grep -q '"$HOME/.agents/skills/$skill_name"' "$install" \
             && grep -q '"$HOME/.claude/skills/$skill_name"' "$install" \
             && grep -q '"$HOME/.gemini/skills/$skill_name"' "$install"; then
@@ -693,10 +696,10 @@ test_status_messages_are_data() {
 
     local pick_output
     pick_output=$("$WT_BIN_DIR/wt" pick-list 2>&1)
-    if echo "$pick_output" | grep -q "$TEST_SESSION" && echo "$pick_output" | grep -qF "Using grep"; then
-        pass "pick-list renders the message without sourcing it"
+    if echo "$pick_output" | grep -q "$TEST_SESSION" && ! echo "$pick_output" | grep -qF "Using grep"; then
+        pass "name-only pick-list excludes status messages"
     else
-        fail "pick-list did not show message" "$pick_output"
+        fail "pick-list exposed message noise or omitted session name" "$pick_output"
     fi
 }
 
@@ -1666,10 +1669,11 @@ test_pi_extension() {
 
     # Exercise the extension without invoking Pi, Neovim, or real wt state. A
     # mock ExtensionAPI delivers native events to stub wt-hook/wt-present
-    # commands. Copy the package so Node honors its ESM package boundary.
+    # commands. Use the injectable factory, without Pi's TUI entry imports.
+    # Copy the package so Node honors its ESM package boundary.
     local tmp; tmp=$(mktemp -d)
     cp -R "$extension_dir" "$tmp/pi-wt"
-    extension_file="$tmp/pi-wt/index.js"
+    extension_file="$tmp/pi-wt/extension.js"
     cat > "$tmp/wt-hook" <<'SH'
 #!/bin/sh
 printf '%s\n' "$*" >> "$WT_TEST_PI_EVENTS"
@@ -2007,7 +2011,21 @@ test_install_script() {
         fail "install.sh: syntax error"
     fi
 
-    # Check symlinks exist
+    # Exercise the installer only through its fake-HOME staging harness.
+    local stage_home="$HOME/install-stage"
+    # Only stub Pi runs here. Supply a local dependency manifest fixture; the
+    # independent runtime acknowledgement is exercised by native bootstrap tests.
+    local native_package="$HOME/native-package-fixture"
+    mkdir -p "$native_package/node_modules/jiti"
+    printf '{"name":"pi-subagents","wtNativeProviderContract":1,"pi":{"extensions":["./index.ts"]}}\n' > "$native_package/package.json"
+    printf '{}' > "$native_package/node_modules/jiti/package.json"
+    printf 'export default function () {}\n' > "$native_package/index.ts"
+    if ! WT_PI_SUBAGENTS_SOURCE="$native_package" WT_STAGING_HOME="$stage_home" bash "$(dirname "$WT_BIN_DIR")/staging.sh" > "$HOME/install.log" 2>&1; then
+        fail "isolated staging install failed" "$(tail -20 "$HOME/install.log")"
+        return
+    fi
+    local HOME="$stage_home"
+    # Check sandbox symlinks, never depend on the developer's installation.
     for script in wt wt-hook wt-tmux-status wt-agent-launch claude-ide; do
         if [[ -L "$HOME/bin/$script" ]]; then
             local target
@@ -2021,6 +2039,7 @@ test_install_script() {
             fail "symlink missing: ~/bin/$script"
         fi
     done
+    WT_STAGING_HOME="$stage_home" bash "$(dirname "$WT_BIN_DIR")/staging.sh" --clean >/dev/null
 }
 
 test_go_unit() {
@@ -2169,13 +2188,25 @@ run_isolated() {
 
     # Private tmux server + isolated state. Exported so the inner run and every
     # tmux/wt subprocess it spawns inherit them.
+    export GOMODCACHE="$(go env GOMODCACHE)" GOCACHE="$(go env GOCACHE)"
+    local inherited
+    for inherited in ${!WT_@}; do
+        case "$inherited" in WT_BIN_DIR|WT_STATE) ;; *) unset "$inherited" ;; esac
+    done
+    export HOME="$priv/home"; mkdir -p "$HOME"
+    export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL="$HOME/.gitconfig"
+    git config --global user.name 'wt test'
+    git config --global user.email 'wt-test@example.invalid'
+    export WT_DB="$priv/state/wt.db" WT_CONFIG_DIR="$priv/config"
+    export WT_LOG_FILE="$priv/state/wt.log" WT_DEFAULT_AGENT=pi
+    export WT_NVIM_SOCK_DIR="$priv/nvim" WT_SHELL_DIR="$priv/shells"
     export TMUX_TMPDIR="$priv"
     export WT_STATUS_DIR="$priv/state"; mkdir -p "$WT_STATUS_DIR"
     export WT_BASE_DIR="$priv/worktrees"; mkdir -p "$WT_BASE_DIR"
     # Detach from the caller's server and identity. Agents normally inherit a
     # stable WT_SESSION; carrying it into the private server would route inner
     # wt-hook calls to the caller's session name instead of the test worktree.
-    unset TMUX WT_SESSION
+    unset TMUX TMUX_PANE
 
     # Never launch a real agent (or touch its credentials) from the e2e suite.
     # Symlink the same inert stand-in used by staging under every known binary.
@@ -2192,7 +2223,7 @@ run_isolated() {
     # Run the suite detached on the private server; capture output + exit code,
     # then signal completion. The trailing echo/signal run even if the suite
     # fails, so the waiter below never hangs on a non-zero exit.
-    tmux -L "$sock" new-session -d -x 220 -y 50 -s runner \
+    tmux -f /dev/null -L "$sock" new-session -d -x 220 -y 50 -s runner \
         "bash '$self' --inner > '$log' 2>&1; echo \$? > '$rc_file'; tmux -L '$sock' wait-for -S wt-test-done"
     tmux -L "$sock" wait-for wt-test-done
 

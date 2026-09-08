@@ -32,9 +32,21 @@ if [[ -n "${TMUX:-}" ]]; then
     return 1
 fi
 
+# Save the full sandbox-related environment before clearing inherited identities.
+_WT_DEV_ENV_SAVED="$(export -p | grep -E 'declare -x (WT_|HOME=|TMUX_TMPDIR=|GOMODCACHE=|GOCACHE=|GIT_CONFIG_)' || true)"
+export GOMODCACHE="$(go env GOMODCACHE)" GOCACHE="$(go env GOCACHE)"
+for _wt_var in ${!WT_@}; do
+    [[ "$_wt_var" == WT_DEV_DIR ]] || unset "$_wt_var"
+done
 _wt_dev_repo="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-export WT_DEV_DIR="${WT_DEV_DIR:-${TMPDIR:-/tmp}/wt-dev}"
-export WT_DEV_SOCKET="wt-dev"
+export WT_DEV_DIR="${WT_DEV_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/wt-dev.XXXXXX")}"
+export WT_DEV_SOCKET="default"
+export HOME="$WT_DEV_DIR/home"
+mkdir -p "$HOME"
+export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL="$HOME/.gitconfig"
+git config --global user.name 'wt dev'
+git config --global user.email 'wt-dev@example.invalid'
+export WT_DB="$WT_DEV_DIR/state/wt.db"
 
 # Build the Go state binary into the checkout's bin/ (gitignored).
 if command -v go >/dev/null 2>&1; then
@@ -56,11 +68,11 @@ mkdir -p "$TMUX_TMPDIR"
 
 # Stub agent: shadow the real CLIs so sessions launch the no-op stub.
 mkdir -p "$WT_DEV_DIR/stub-bin"
-for _a in claude codex gemini opencode; do
+for _a in claude codex gemini opencode pi; do
     ln -sf "$_wt_dev_repo/staging/stub-agent" "$WT_DEV_DIR/stub-bin/$_a"
 done
 chmod +x "$_wt_dev_repo/staging/stub-agent"
-export WT_DEFAULT_AGENT="opencode"   # any name works; all resolve to the stub
+export WT_DEFAULT_AGENT="pi"   # any name works; all resolve to the stub
 
 # PATH: checkout bin first (so `wt`/`wt-state`/`wt-agent-launch` come from here),
 # then the stub agents. Recorded so wt-dev-off can undo it cleanly.
@@ -94,8 +106,11 @@ wt-dev-off() {
     tmux -L "$WT_DEV_SOCKET" kill-server 2>/dev/null || true
     [[ -n "${_WT_DEV_PATH_SAVED:-}" ]] && export PATH="$_WT_DEV_PATH_SAVED"
     [[ -n "${_WT_DEV_PS1_SAVED+x}" ]] && export PS1="$_WT_DEV_PS1_SAVED"
-    unset WT_BASE_DIR WT_STATUS_DIR WT_CONFIG_DIR WT_LOG_FILE WT_STATE \
-          WT_DEFAULT_AGENT TMUX_TMPDIR _WT_DEV_PATH_SAVED _WT_DEV_PS1_SAVED
+    local var
+    for var in ${!WT_@}; do unset "$var"; done
+    unset TMUX_TMPDIR GOMODCACHE GOCACHE GIT_CONFIG_NOSYSTEM GIT_CONFIG_GLOBAL
+    eval "${_WT_DEV_ENV_SAVED//declare -x/export}"
+    unset _WT_DEV_ENV_SAVED _WT_DEV_PATH_SAVED _WT_DEV_PS1_SAVED
     unset -f wt-dev-reset wt-dev-off 2>/dev/null || true
     echo "wt dev sandbox deactivated; shell restored."
 }
