@@ -231,52 +231,11 @@ stop_diff_view() {
 # -----------------------------------------------------------------------------
 #  Vim-style modal keybindings for fzf (opt-in via WT_FZF_VIM=1)
 # -----------------------------------------------------------------------------
-# fzf has no native modal mode, so we emulate one with unbind/rebind. Pickers
-# open in NORMAL mode: hjkl navigate and typing does not filter. Press i/a// to
-# enter INSERT mode (type to filter); Esc returns to NORMAL. The prompt shows
-# "[N] " in normal mode and "> " in insert mode.
-#
-# Every picker splices "${WT_FZF_VIM_ARGS[@]}" into its fzf call; the array is
-# empty (a no-op) unless WT_FZF_VIM is enabled.
+# The same contract is used by Go setup lists and text fields.
 WT_FZF_VIM_ARGS=()
-build_fzf_vim_binds() {
-    [[ "$WT_FZF_VIM" == 1 || "$WT_FZF_VIM" == true ]] || return 0
-
-    # Letters with a normal-mode action of their own — excluded from the blanket
-    # "ignore" suppression below so their bindings aren't clobbered.
-    local nav=" i a j k l h g G q "
-    local c
-
-    # Keys released in INSERT mode (so they type) and re-suppressed on Esc: every
-    # printable key that can appear in a query — alnum plus the punctuation found
-    # in branch/session names.
-    local toggle=''
-    for c in {a..z} {A..Z} {0..9}; do toggle+="$c,"; done
-    toggle+='/,-,_,.'
-
-    local nb=''
-    # Suppress every non-nav printable key in NORMAL mode.
-    for c in {a..z} {A..Z} {0..9}; do
-        [[ "$nav" == *" $c "* ]] && continue
-        nb+="$c:ignore,"
-    done
-    nb+='-:ignore,_:ignore,.:ignore,'
-    # Navigation. (Ctrl-d/Ctrl-u are intentionally left to fzf's defaults so they
-    # keep working in insert mode and don't collide with pick_worktree's Ctrl-d.)
-    nb+='j:down,k:up,g:first,G:last,h:abort,l:accept,q:abort,'
-    # Enter INSERT: release the toggle keys, arm Esc to return, flip the prompt.
-    nb+="i:unbind($toggle)+rebind(esc)+change-prompt(> ),"
-    nb+="a:unbind($toggle)+rebind(esc)+change-prompt(> ),"
-    nb+="/:unbind($toggle)+rebind(esc)+change-prompt(> ),"
-    # Esc (armed only in INSERT): re-suppress toggle keys, disarm itself so a
-    # second Esc aborts as usual, restore the prompt.
-    nb+="esc:rebind($toggle)+unbind(esc)+change-prompt([N] ),"
-    # Start in NORMAL: Esc disarmed (aborts), normal-mode prompt.
-    nb+='start:unbind(esc)+change-prompt([N] )'
-
-    WT_FZF_VIM_ARGS=(--bind "$nb")
-}
-build_fzf_vim_binds
+if [[ "$WT_FZF_VIM" == 1 || "$WT_FZF_VIM" == true ]]; then
+    WT_FZF_VIM_ARGS=("$(WT_FZF_VIM="$WT_FZF_VIM" "$WT_STATE" fzf-bindings)")
+fi
 
 # -----------------------------------------------------------------------------
 #  Agent Profiles
@@ -709,7 +668,7 @@ render_worktree_row() {
             # rows even though the colored glyph and space differ in byte width.
             pr_badge "$pr_state" badge
             [[ -n "$badge" ]] || badge=" "
-            printf -v "$__out" "%s %-20s %-25s %s %s" "$icon" "${repo:-?}" "${branch:-?}" "$badge" "${wt_path:-?}"
+            printf -v "$__out" "%s %-20s %-25s %s %s" "$icon" "${repo:-$session_name}" "${branch:--}" "$badge" "${wt_path:-?}"
             ;;
         simple)  printf -v "$__out" "%s:%s:%s" "$session_name" "${wt_path:-?}" "${status:-unknown}" ;;
         session) printf -v "$__out" "%s" "$session_name" ;;
@@ -764,12 +723,17 @@ list_worktrees() {
     local now=""
     [[ "$format" == full ]] && now=$(date +%s)
 
-    local -A seen
+    local -A seen forgotten
+    local forgotten_path
+    while IFS= read -r forgotten_path; do
+        [[ -n "$forgotten_path" ]] && forgotten["$forgotten_path"]=1
+    done < <("$WT_STATE" worktree forgotten 2>/dev/null | jq -r '.[]')
 
     # Phase A: worktrees on disk under WT_BASE_DIR (authoritative for existence).
     if [[ -d "$WT_BASE_DIR" ]]; then
         while IFS= read -r -d '' wt_path; do
             [[ -d "$wt_path/.git" || -f "$wt_path/.git" ]] || continue
+            [[ -z "${forgotten[$wt_path]:-}" ]] || continue
             local branch repo_name parent session_name status key pr_state pr_checked row_str
             # HEAD reads empty on a detached HEAD; guard emptiness explicitly or
             # the session name degenerates to "repo-" (a prefix of every real
@@ -805,17 +769,17 @@ list_worktrees() {
     fi
 
     # Phase B: store sessions not found on disk (adopted/primary worktrees),
-    # included only when a live tmux session exists. Iterated in store order
+    # including offline no-repository roots. Iterated in store order
     # (updated_at DESC, name ASC) so ties render deterministically.
     local name status repo branch wt_path updated_at pr_state pr_checked row_str
     while IFS="$SEP" read -r name status repo branch wt_path updated_at pr_state pr_checked; do
         [[ -n "$name" ]] || continue
         [[ -n "${seen[$name]:-}" ]] && continue
-        [[ -n "${live[$name]:-}" ]] || continue
+        [[ -n "${live[$name]:-}" ]] || status="offline"
         if [[ "$format" == full && -n "$wt_path" ]] && is_pr_stale "$pr_checked" "$now"; then
             stale_lines+="${name}${TAB}${branch}${TAB}${wt_path}"$'\n'
         fi
-        render_worktree_row row_str "$format" "$name" "${wt_path:-?}" "${status:-unknown}" "${repo:-?}" "${branch:-?}" "$pr_state"
+        render_worktree_row row_str "$format" "$name" "${wt_path:-?}" "${status:-unknown}" "$repo" "$branch" "$pr_state"
         rows+=("${updated_at:-0}${TAB}${row_str}")
     done <<<"$store_data"
 
@@ -1036,7 +1000,7 @@ delete_worktree() {
     wt_path=$(echo "$wt_info" | cut -d: -f2)
 
     if [[ "$force" != "true" ]]; then
-        read -p "Delete worktree at $wt_path and session $session_name? [y/N] " confirm
+        read -p "Forget session $session_name (preserve checkout at $wt_path)? [y/N] " confirm
         if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
             echo "Cancelled"
             return
@@ -1051,20 +1015,12 @@ delete_worktree() {
         tmux kill-session -t "=$session_name"
     fi
 
-    # Remove worktree
-    if [[ -d "$wt_path" ]]; then
-        local repo_git_dir
-        repo_git_dir=$(git -C "$wt_path" rev-parse --git-common-dir 2>/dev/null || true)
-
-        if [[ -n "$repo_git_dir" ]]; then
-            git -C "$(dirname "$repo_git_dir")" worktree remove "$wt_path" --force
-        else
-            rm -rf "$wt_path"
-        fi
-    fi
+    # Attached/imported checkouts are borrowed. Forgetting a root never grants
+    # filesystem deletion authority; explicit git cleanup is a separate action.
+    [[ -d "$wt_path" ]] && echo "Preserved borrowed checkout: $wt_path"
 
     # Remove session state
-    "$WT_STATE" delete "$session_name" >/dev/null 2>&1 || true
+    "$WT_STATE" worktree forget "$session_name" "$wt_path" || return
     rm -f "$WT_CONFIG_DIR/opencode-mcp/${session_name}.json"
     rm -rf "$(shell_session_dir "$session_name")"
 
@@ -1392,53 +1348,52 @@ interactive_new() {
 # -----------------------------------------------------------------------------
 #  Interactive Worktree Picker (fzf-based)
 # -----------------------------------------------------------------------------
-# Build rich pick list: session_name:display_string
+# Opaque identity stays internal. The light name list is filtered locally.
 pick_list() {
-    local SEP; SEP=$(printf '\037')
+    "$WT_STATE" worktree projection names "${1:-}" "${2:-all}"
+}
 
-    # Index every session's stored fields in ONE `wt-state list` call. The old
-    # per-row load_session was an extra `wt-state get` + jq fork each (~2s at a
-    # few hundred sessions); this is a single query + one jq. Mirrors
-    # load_session's fields exactly (agent/repo/branch/message and the stored
-    # wt_path, which load_session overwrites the passed value with).
-    local -A a_have a_agent a_repo a_branch a_message a_wtpath
-    local _n _ag _rp _br _msg _wp
-    while IFS="$SEP" read -r _n _ag _rp _br _msg _wp; do
-        [[ -n "$_n" ]] || continue
-        a_have["$_n"]=1
-        a_agent["$_n"]="$_ag"; a_repo["$_n"]="$_rp"; a_branch["$_n"]="$_br"
-        a_message["$_n"]="$_msg"; a_wtpath["$_n"]="$_wp"
-    done < <("$WT_STATE" list 2>/dev/null \
-        | jq -r '.[] | [.name,.agent,.repo,.branch,.message,.wt_path] | @tsv' \
-        | tr '\t' '\037' || true)
+# Preserve legacy PR-cache refresh for wt ls, but never infer extra roots from
+# the newly prepared paths. JSON -> NUL transport keeps arbitrary paths intact.
+refresh_projection_pr_states() {
+    command -v gh &>/dev/null || return 0
+    local records
+    records=$("$WT_STATE" list) || return
+    (
+        local name branch path checked state n=0 now
+        now=$(date +%s)
+        while IFS= read -r -d '' name && IFS= read -r -d '' branch \
+            && IFS= read -r -d '' path && IFS= read -r -d '' checked; do
+            is_pr_stale "$checked" "$now" || continue
+            (
+                state=$(pr_state_lookup "$branch" "$path")
+                [[ -z "$state" ]] || "$WT_STATE" set "$name" --pr-state "$state" >/dev/null
+            ) &
+            (( ++n % 4 == 0 )) && wait
+        done < <(jq -j '.[] | select(.wt_path != "") | .name,"\u0000",.branch,"\u0000",.wt_path,"\u0000",(.pr_state_checked_at|tostring),"\u0000"' <<<"$records")
+        wait
+    ) </dev/null >/dev/null 2>&1 &
+    disown 2>/dev/null || true
+}
 
-    local session_name wt_path sess_status icon label agent repo branch message
-    while IFS=: read -r session_name wt_path sess_status; do
-        if [[ -n "${a_have[$session_name]:-}" ]]; then
-            # Store row present: load_session would set these (incl. wt_path).
-            agent="${a_agent[$session_name]}"; repo="${a_repo[$session_name]}"
-            branch="${a_branch[$session_name]}"; message="${a_message[$session_name]}"
-            [[ -n "${a_wtpath[$session_name]}" ]] && wt_path="${a_wtpath[$session_name]}"
-        else
-            # No row: load_session returns 1, leaving fields empty and the
-            # list_worktrees-supplied wt_path untouched.
-            agent=""; repo=""; branch=""; message=""
-        fi
-        if [[ -z "$repo" && -n "$wt_path" ]]; then
-            local rel_path="${wt_path#$WT_BASE_DIR/}"
-            repo="${rel_path%%/*}"
-        fi
-        if [[ -z "$branch" ]]; then
-            branch=$(git -C "$wt_path" branch --show-current 2>/dev/null || true)
-            [[ -n "$branch" ]] || branch="${session_name#${repo}-}"
-        fi
-        get_status_icon "${sess_status:-unknown}" icon
-        label="${agent:-$WT_DEFAULT_AGENT}"
-        echo "${session_name}:${wt_path}:${icon} ${sess_status:-?}  ${label}  ${repo:-?}@${branch:-?}  ${message:-}"
-    done < <(list_worktrees simple)
+pick_root_json() {
+    "$WT_STATE" worktree projection show "$1"
+}
+
+pick_preview() {
+    "$WT_STATE" worktree projection preview "$1"
+    local root name path
+    root=$(pick_root_json "$1") || return
+    name=$(jq -r '.name' <<<"$root")
+    path=$(jq -r '.checkouts[0].path // empty' <<<"$root")
+    [[ -z "$path" ]] || preview_pane "$name" "$path"
 }
 
 revive_worktree_session() {
+    if "$WT_STATE" worktree is-agent-first "$1" 2>/dev/null; then
+        WT_SOURCE_CONFIG="$WT_BIN_DIR/../config" "$WT_STATE" worktree restore "$1" >/dev/null
+        return
+    fi
     local session_name="$1"
     local wt_path="$2"
 
@@ -1630,57 +1585,32 @@ picker_is_portrait() {
 }
 
 # The one session menu used by `wt pick`, `wt switch`, prefix+s, and mobile.
-# Only its data scope and responsive layout vary: narrow clients stack the raw
-# Git diff below the list, while wider clients retain the richer right preview.
+# Details are opt-in; navigating and filtering never runs status/Git scans.
 session_picker_rows() {
-    local scope="${1:-all}"
-
-    if [[ "$scope" == live ]]; then
-        while IFS=: read -r name path rest; do
-            if tmux has-session -t "=$name" 2>/dev/null; then
-                printf '%s:%s:%s\n' "$name" "$path" "$rest"
-            fi
-        done < <(pick_list)
-    else
-        pick_list
-    fi
+    pick_list "${2:-}" "${1:-all}"
 }
 
 session_picker() {
     local scope="${1:-all}" allow_delete="${2:-false}"
-    local selection rc=0 header preview preview_window delete_bind=""
-
+    local selection rc=0 header preview_window picker_cmd
+    printf -v picker_cmd '%q' "$WT_BIN_DIR/wt"
+    header="Select session · names / labels only · Enter open · Ctrl-P details"
     if picker_is_portrait; then
-        header="Select session · Enter open · ? diff"
-        preview="$WT_BIN_DIR/wt session diff {1}"
         preview_window='down,50%,border-top,wrap'
     else
-        header="Select worktree (Enter=switch"
-        [[ "$allow_delete" == true ]] && header+=", Ctrl-D=delete"
-        header+=")"
-        preview="$WT_BIN_DIR/wt preview-pane {1} {2}"
-        preview_window='right,60%,border-left'
+        preview_window='right,60%,border-left,wrap'
     fi
-
-    if [[ "$allow_delete" == true ]]; then
-        delete_bind="ctrl-d:execute($WT_BIN_DIR/wt delete {1} --force)+reload($WT_BIN_DIR/wt pick-list)"
-    fi
-
     local -a fzf_args=(
         "${WT_FZF_VIM_ARGS[@]}"
-        --ansi
-        --delimiter=:
-        --with-nth=3
-        --layout=reverse
+        --delimiter=$'\t' --with-nth=2 --no-sort --layout=reverse
         --header="$header"
-        --preview="$preview"
-        --preview-window="$preview_window"
-        --bind='?:toggle-preview'
+        --preview="$picker_cmd pick-preview {1}"
+        --preview-window="$preview_window,hidden"
+        --bind='ctrl-p:toggle-preview'
     )
-    [[ -n "$delete_bind" ]] && fzf_args+=(--bind="$delete_bind")
-
-    # Keep fzf concurrent with candidate generation so its UI appears while
-    # the recency-ranked worktree list is still being assembled.
+    if [[ "$allow_delete" == true && "$WT_FZF_VIM" != 1 && "$WT_FZF_VIM" != true ]]; then
+        fzf_args+=(--bind="ctrl-d:execute($picker_cmd pick-delete {1})+reload($picker_cmd pick-list '' $scope || true)")
+    fi
     selection=$(session_picker_rows "$scope" | fzf "${fzf_args[@]}") || rc=$?
     if (( rc == 130 )); then return 0; fi
     [[ -n "$selection" ]] && printf '%s\n' "$selection"
@@ -1688,13 +1618,12 @@ session_picker() {
 
 pick_worktree() {
     check_deps
-
-    # Rows arrive most-recently-active first (recency ranking in list_worktrees).
-    local selection session_name wt_path
+    local selection root session_name wt_path
     selection=$(session_picker all true) || return
     [[ -n "$selection" ]] || return 0
-    session_name=${selection%%:*}
-    wt_path=${selection#*:}; wt_path=${wt_path%%:*}
+    root=$(pick_root_json "${selection%%$'\t'*}") || return
+    session_name=$(jq -r '.name' <<<"$root")
+    wt_path=$(jq -r '.checkouts[0].path // empty' <<<"$root")
     if ! tmux has-session -t "=$session_name" 2>/dev/null; then
         printf "Session '%s' is not running. Reviving...\n" "$session_name" >/dev/tty
         revive_worktree_session "$session_name" "$wt_path" || return 1
@@ -1702,14 +1631,13 @@ pick_worktree() {
     switch_to "$session_name"
 }
 
-# Live-only wrapper around the shared picker, used by prefix+W / `wt switch`.
 switch_picker() {
     check_deps
-
-    local selection session_name
+    local selection root session_name
     selection=$(session_picker live false) || return
     [[ -n "$selection" ]] || return 0
-    session_name=${selection%%:*}
+    root=$(pick_root_json "${selection%%$'\t'*}") || return
+    session_name=$(jq -r '.name' <<<"$root")
     switch_to "$session_name"
 }
 
@@ -1926,18 +1854,14 @@ delete_pick() {
     check_deps
 
     local selection rc=0
-    selection=$(list_worktrees full | fzf \
+    selection=$(list_worktrees session | fzf \
         "${WT_FZF_VIM_ARGS[@]}" \
         --ansi \
         --header="Select worktree to delete") || rc=$?
     if (( rc == 130 )); then echo "Cancelled." >&2; return 0; fi
 
     if [[ -n "$selection" ]]; then
-        local repo_name branch_name
-        repo_name=$(echo "$selection" | awk '{print $2}')
-        branch_name=$(echo "$selection" | awk '{print $3}')
-        local session_name="${repo_name}-${branch_name//\//-}"
-        delete_worktree "$session_name"
+        delete_worktree "$selection"
     fi
 }
 
@@ -1962,6 +1886,7 @@ current_wt_session() {
         || { echo "Managed shells are only available in worktree sessions" >&2; return 1; }
     wt_path=$(tmux show-option -qv -t "=$session_name" @wt-wt-path 2>/dev/null || true)
     [[ -n "$wt_path" ]] || wt_path=$("$WT_STATE" get "$session_name" --field wt_path 2>/dev/null || true)
+    [[ -n "$wt_path" ]] || wt_path=$("$WT_STATE" get "$session_name" --field workspace_path 2>/dev/null || true)
     [[ -n "$wt_path" ]] \
         || { echo "Not a wt-managed worktree session: $session_name" >&2; return 1; }
     printf '%s\n' "$session_name"
@@ -2036,9 +1961,15 @@ shell_clean_output() {
 
 shell_window_record() {
     local session_name="$1" shell_name="$2"
-    tmux list-windows -t "=$session_name" \
-        -F $'#{window_id}\037#{window_name}\037#{@wt-managed-shell}\037#{@wt-shell-name}\037#{@wt-shell-kind}\037#{@wt-shell-command}\037#{pane_id}\037#{pane_dead}\037#{pane_dead_status}\037#{pane_current_command}\037#{window_active}' \
-        2>/dev/null | awk -F $'\037' -v name="$shell_name" '$3 == "1" && $4 == name { print; exit }'
+    local format=$'#{window_id}\037#{window_name}\037#{@wt-managed-shell}\037#{@wt-shell-name}\037#{@wt-shell-kind}\037#{@wt-shell-command}\037#{pane_id}\037#{pane_dead}\037#{pane_dead_status}\037#{pane_current_command}\037#{window_active}'
+    if [[ "${WT_SHELL_SCOPED:-}" == 1 && -n "${WT_SHELL_TARGET_PANE:-}" ]]; then
+        # The Go wrapper authorized this stable pane, not the active window pane.
+        tmux display-message -p -t "$WT_SHELL_TARGET_PANE" "$format" \
+            2>/dev/null | awk -F $'\037' -v name="$shell_name" '$3 == "1" && $4 == name { print; exit }'
+    else
+        tmux list-windows -t "=$session_name" -F "$format" \
+            2>/dev/null | awk -F $'\037' -v name="$shell_name" '$3 == "1" && $4 == name { print; exit }'
+    fi
 }
 
 shell_target() {
@@ -2068,6 +1999,7 @@ setup_shell_logging() {
     tmux pipe-pane -o -t "$pane_id" "$cmd"
     tmux set-option -pqt "$pane_id" @wt-pane-role shell
     tmux set-option -pqt "$pane_id" @wt-shell-name "$shell_name"
+    tmux set-option -pqt "$pane_id" @wt-shell-log "$log"
 }
 
 create_managed_shell() {
@@ -2080,6 +2012,7 @@ create_managed_shell() {
 
     wt_path=$(tmux show-option -qv -t "=$session_name" @wt-wt-path 2>/dev/null || true)
     [[ -n "$wt_path" ]] || wt_path=$("$WT_STATE" get "$session_name" --field wt_path 2>/dev/null || true)
+    [[ -n "$wt_path" ]] || wt_path=$("$WT_STATE" get "$session_name" --field workspace_path 2>/dev/null || true)
     [[ -d "$wt_path" ]] || { echo "Worktree path not found: $wt_path" >&2; return 1; }
     [[ "$switch_after" == "true" ]] || flags+=(-d)
     created=$(tmux new-window "${flags[@]}" -t "=$session_name" -n "$shell_name" -c "$wt_path")
@@ -2091,6 +2024,9 @@ create_managed_shell() {
     tmux set-option -wqt "$window_id" @wt-shell-command ""
     tmux set-option -wqt "$window_id" remain-on-exit on
     setup_shell_logging "$session_name" "$shell_name" "$pane_id"
+    if [[ "${WT_SHELL_SCOPED:-}" != 1 ]] && "$WT_STATE" worktree is-agent-first "$session_name" 2>/dev/null; then
+        "$WT_STATE" worktree shell-register "$session_name" "$pane_id" || return
+    fi
     printf '%s\037%s\n' "$window_id" "$pane_id"
 }
 
@@ -2130,6 +2066,9 @@ shell_run() {
     for arg in "$@"; do printf -v cmd '%s%q ' "$cmd" "$arg"; done
     cmd=${cmd% }
     tmux set-option -wqt "$window_id" @wt-shell-command "$cmd"
+    if [[ "${WT_SHELL_SCOPED:-}" != 1 ]] && "$WT_STATE" worktree is-agent-first "$session_name" 2>/dev/null; then
+        "$WT_STATE" worktree shell-register "$session_name" "$pane_id" || return
+    fi
     # The pane starts as a normal interactive shell so pipe-pane can be attached
     # before the command emits output. exec preserves the real exit status.
     shell_record_input "$session_name" "$name" "exec $cmd"
@@ -2243,7 +2182,22 @@ shell_remove() {
     session_name=$(current_wt_session) || return
     target=$(shell_target "$session_name" "$name") || return
     shell_unwatch "$name" >/dev/null 2>&1 || true
-    tmux kill-window -t "$target"
+    if [[ "${WT_SHELL_SCOPED:-}" != 1 ]] && "$WT_STATE" worktree is-agent-first "$session_name" 2>/dev/null; then
+        local pane_id
+        pane_id=$(shell_window_record "$session_name" "$name" | awk -F $'\037' '{print $7}')
+        "$WT_STATE" worktree shell-forget "$session_name" "$pane_id" || return
+    fi
+    if [[ "${WT_SHELL_SCOPED:-}" == 1 ]]; then
+        [[ -n "${WT_SHELL_TARGET_PANE:-}" ]] || return 1
+        # Even if a human splits after authorization, never kill sibling panes.
+        tmux kill-pane -t "$WT_SHELL_TARGET_PANE" || return
+        local option
+        for option in @wt-managed-shell @wt-shell-name @wt-shell-kind @wt-shell-command; do
+            tmux set-option -wu -t "$target" "$option" 2>/dev/null || true
+        done
+    else
+        tmux kill-window -t "$target"
+    fi
     root=$(shell_session_dir "$session_name")
     rm -f "$root/logs/$name.log" "$root/inputs/$name.txt" "$root/cursors/$name.agent"
 }
@@ -2462,6 +2416,10 @@ shell_command() {
         shift
         sub="$1"
         shift
+    fi
+    if [[ -n "${WT_AGENT_ID:-}" ]]; then
+        WT_SOURCE_CONFIG="$WT_BIN_DIR/../config" "$WT_STATE" worktree shell-control "${WT_SHELL_SESSION:-$WT_ROOT_ID}" "$sub" "$@"
+        return
     fi
     case "$sub" in
         new) shell_new "$@" ;;
@@ -2738,6 +2696,10 @@ mobile_mode() {
 start_agent() {
     local session_name="$1"
     local task="$2"
+    if "$WT_STATE" worktree is-agent-first "$session_name" 2>/dev/null; then
+        echo "Use wt agents open, or wt message send with explicit peer IDs; legacy typing is disabled for agent-first roots" >&2
+        return 1
+    fi
 
     if ! tmux has-session -t "=$session_name" 2>/dev/null; then
         echo "Session '$session_name' does not exist"
@@ -2764,12 +2726,13 @@ wt - Worktree Manager for Multi-Agent CLI Workflow
 Usage: wt <command> [options]
 
 Session Management:
-  new [repo] [branch]     Create new worktree in the background (interactive if no args)
+  new [name]             Create a named Pi root (generated name if omitted)
+  new <repo> <branch>     Create a legacy Git worktree in the background
   new ... --switch        Create and switch to it (default stays in current session)
-  pick, p                 Interactive session picker (fzf, diff + agent preview)
+  pick, p                 Interactive session picker (names; Ctrl-P details)
   switch, s <session>     Switch to a session
   list, ls                List all sessions with status
-  delete, rm <session>    Delete a session and its worktree
+  delete, rm <session>    Forget a session; preserve borrowed checkout files
   delete-pick             Interactive delete picker (fzf)
   sweep <session>         Stop a session's agent to free memory (keeps worktree)
 
@@ -2781,7 +2744,7 @@ Master Session:
 PR Integration:
   pr <number>             Find session by PR number and switch to it
   pr-pick                 Interactive PR picker (fzf + gh)
-  (list/pick show a PR badge per worktree: ⬤ merged, ◆ open, ◇ draft,
+  (wt ls / explicit details show a PR badge per worktree: ⬤ merged, ◆ open, ◇ draft,
    ⊘ closed. Resolved via gh by branch and cached; needs gh installed.)
 
 Agent Control:
@@ -2835,9 +2798,33 @@ Tool Permissions (Claude only):
   Applied to .claude/settings.local.json in each new worktree/master session
 
 Examples:
-  wt new                               Interactive: pick repo, branch, agent
+  wt setup                             Name task, multi-select repos, review then Create
+  wt repositories [NAME]              Add/list repos or resume recorded setup
+  wt label ROOT "Task label"           Display label only; never renames runtime
+  wt new                               Create scratch/scratch-2 Pi root
   wt new ~/code feature-x              Create feature-x worktree
   wt new ~/code feature-x --agent codex  Use Codex instead of Claude
+  wt new research                      Pi only; no required checkout/editor
+  wt agents create research peer --task 'Review'  Background interactive window
+  wt agents open research peer         Converse directly with the named peer
+  wt agents resume research peer       Resume exact conversation after stop/repair
+  wt view resume research VIEW_ID      Retry a repaired view placeholder
+  wt view unpin research VIEW_ID       Restore unpinned manager control
+  wt checkout detach research app      Detach an unused borrowed checkout
+  wt checkout attach research app /src/app       Borrow a checkout
+  wt view create research diff app     Lazy target-specific diff
+  wt view create research editor app --file README.md --placement split --direction right
+  wt view place research VIEW_ID --placement split --anchor focused --direction stack
+  wt view promote research VIEW_ID
+  wt view master-width research VIEW_ID 65
+  wt view place research VIEW_ID --placement window
+    Split anchors: caller (default), focused, view ID or root-local pane ID.
+    Directions: right (default), left, below, above. Size: integer percent 1..99.
+    Create defaults to a window; place defaults to a split. Both preserve focus.
+  wt roots [query]                      Search persistent roots (JSON)
+  wt snapshot research                 Checkpoint supported layout/views
+  wt restore research                  Strict idle recovery; no command replay
+  wt message wake research --budget 32 Enable bounded cooperative requests
   wt pick                              Switch sessions (preview shows diff + agent)
   wt master                            Create/attach master session
   wt master --force                    Replace master session
@@ -2866,14 +2853,21 @@ main() {
     shift || true
 
     log "cmd=$cmd args=$*"
+    if [[ -n "${WT_AGENT_ID:-}" ]]; then
+        case "$cmd" in
+            agents|checkout|view|message|shell|roots|list|ls|status|help|--help|-h) ;;
+            *) echo "Agent control requires scoped agents/checkout/view/message commands" >&2; return 1 ;;
+        esac
+    fi
 
     case "$cmd" in
         default)
             if [[ -n "${TMUX:-}" ]]; then
                 # Inside tmux: show the action menu
                 tmux display-menu -T " Worktrees " -x C -y C \
-                    "New worktree"       n "display-popup -E -w 80% -h 80% '$HOME/bin/wt new --switch'" \
-                    "New (background)"   N "display-popup -E -w 80% -h 80% '$HOME/bin/wt new'" \
+                    "New session…"       n "display-popup -E -w 90% -h 90% '$HOME/bin/wt setup --switch'" \
+                    "New (background)…"   N "display-popup -E -w 90% -h 90% '$HOME/bin/wt setup'" \
+                    "Repositories…"     R "display-popup -E -w 90% -h 90% '$HOME/bin/wt repositories'" \
                     "Switch (pick)"      s "display-popup -E -w 100% -h 100% '$HOME/bin/wt pick'" \
                     "Delete..."          d "display-popup -E -w 60% -h 40% '$HOME/bin/wt delete-pick'" \
                     "" \
@@ -2895,9 +2889,49 @@ main() {
             fi
             ;;
         list|ls)
-            list_worktrees "${1:-full}"
+            case "${1:-full}" in
+                full) "$WT_STATE" worktree projection list; refresh_projection_pr_states ;;
+                *) list_worktrees "$1" ;;
+            esac
+            ;;
+        setup)
+            WT_SOURCE_CONFIG="$WT_BIN_DIR/../config" "$WT_STATE" worktree setup-menu "$@"
+            ;;
+        setup-state)
+            "$WT_STATE" worktree setup "$@"
+            ;;
+        label)
+            "$WT_STATE" worktree projection label "$@"
+            ;;
+        repositories)
+            local target="${1:-}" selection root
+            if [[ -z "$target" ]]; then
+                target=$(current_wt_session 2>/dev/null || true)
+            fi
+            if [[ -z "$target" ]]; then
+                selection=$(session_picker all false) || return
+                [[ -n "$selection" ]] || return 0
+                target=${selection%%$'\t'*}
+            fi
+            local action
+            action=$(printf '%s\n' 'Add repositories' 'List repositories' 'Resume setup' | fzf "${WT_FZF_VIM_ARGS[@]}" --header='Repositories · Esc cancels') || return 0
+            case "$action" in
+                'Add repositories') WT_SOURCE_CONFIG="$WT_BIN_DIR/../config" "$WT_STATE" worktree setup-menu --root "$target" ;;
+                'List repositories') "$WT_STATE" worktree checkout list "$target" | jq .; read -r -p 'Enter to close' || true ;;
+                'Resume setup')
+                    root=$("$WT_STATE" worktree setup list "$target" | jq -r '.[] | [.id, .name, ([.repos[].state] | join(", "))] | @tsv' | fzf "${WT_FZF_VIM_ARGS[@]}" --delimiter=$'\t' --with-nth=2.. --header='Choose durable setup batch') || return 0
+                    [[ -n "$root" ]] && WT_SOURCE_CONFIG="$WT_BIN_DIR/../config" "$WT_STATE" worktree setup-menu --resume "${root%%$'\t'*}"
+                    ;;
+            esac
+            ;;
+        roots|workspace|agents|checkout|view|message|snapshot|restore)
+            WT_SOURCE_CONFIG="$WT_BIN_DIR/../config" "$WT_STATE" worktree "$cmd" "$@"
             ;;
         new)
+            if [[ $# -lt 2 || "${1:-}" == --* || "${2:-}" == --* ]]; then
+                WT_SOURCE_CONFIG="$WT_BIN_DIR/../config" "$WT_STATE" worktree new "$@"
+                return
+            fi
             local repo="${1:-}"
             local branch="${2:-}"
             local start_agent=false
@@ -2944,7 +2978,16 @@ main() {
             pick_worktree
             ;;
         pick-list)
-            pick_list
+            pick_list "$@"
+            ;;
+        pick-preview)
+            pick_preview "$1"
+            ;;
+        pick-delete)
+            local root name
+            root=$(pick_root_json "$1") || return
+            name=$(jq -r '.name' <<<"$root")
+            delete_worktree "$name" true
             ;;
         preview-pane)
             preview_pane "${1:-}" "${2:-}"

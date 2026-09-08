@@ -2,7 +2,7 @@
 
 # wt
 
-**tmux + git worktrees for running coding agents in parallel.**
+**Named tmux workspaces for interactive coding agents, with optional Git checkouts.**
 
 <img src="assets/wt-hero.png" alt="wt — run several coding agents side by side, each in its own git worktree and tmux session" width="720">
 
@@ -20,18 +20,25 @@
 
 </div>
 
-Each agent gets its own worktree and its own tmux session — agent and editor
-side by side, with managed shells on demand — plus a live status you can see at a glance, so you always know
-which one is working, which is waiting on you, and which is done.
+A worktree is one named, searchable tmux session. `wt new NAME` starts with one
+interactive Pi pane and no required checkout or editor. Named peer agents use
+ordinary background tmux windows in that same session, like managed shells;
+durable requests let them delegate and reply without terminal typing.
 
-It works with Claude, Codex, Gemini, opencode, and Pi: one session on Claude,
-the next on Pi. The switcher lists whichever session you touched last first,
-so the thing you're waiting on is never buried.
+See **[Agent-first usage and recovery](docs/agent-first.md)** for peer agents,
+multiple borrowed checkouts, lazy views, presentations, snapshot/restore and the
+precise persistence limitations. `wt new REPO BRANCH` and existing non-Pi launch
+profiles retain the legacy agent/editor workflow.
+
+**[Named session setup](docs/session-setup.md):** prefix+n (`wt setup`) names a
+task and optionally prepares multiple NEW isolated checkouts from fetched remote
+defaults. Prefix+R adds repositories without replacing conversations. Prefix+s
+searches the session name, every attached repository, peer names and task summaries.
 
 ## What you get
 
-- **A session per worktree.** `wt new` cuts the branch, adds the worktree, and
-  opens a tmux session with the agent and editor side by side.
+- **A session per worktree.** `wt new NAME` opens one Pi pane.
+  `wt new REPO BRANCH` retains the Git checkout + agent/editor layout.
 - **Persistent managed shells.** `prefix + c` creates named shells on demand;
   the CLI can run services, read output, send input, wait, and watch for failures.
 - **Status at a glance.** Each session reports whether its agent is working,
@@ -45,8 +52,8 @@ so the thing you're waiting on is never buried.
   master session another, driven by profiles you keep in `~/.config/wt`.
 - **Env files that follow the worktree.** A `.wt/sync` file copies or symlinks
   `.env` and friends into each new worktree, which git won't do for you.
-- **Live diff in the editor.** nvim boots into a diffview of your branch against
-  its base and refreshes as files change.
+- **Live diff in the editor.** Managed Neovim views use Unified for tracked and
+  untracked changes against the exact base; Diffview remains an explicit option.
 - **User-paced agent presentations.** Pi can walk through code and changes, ask
   code-grounded questions, or present trees and Markdown while nvim acts as a
   shared visual canvas.
@@ -59,8 +66,12 @@ Runs on macOS and Linux.
 
 ## Install
 
+**Pi users:** first prepare the [pinned pi-subagents fork](docs/native-delegation.md#paired-source-installation-pinned-fork)
+and set `WT_PI_SUBAGENTS_SOURCE` to its persistent checkout when running the
+installer. The current npm release is not a substitute for this dependency.
+
 ```bash
-git clone https://github.com/youruser/wt.git ~/src/wt
+git clone https://github.com/sochowski/wt.git ~/src/wt
 ~/src/wt/install.sh
 ```
 
@@ -75,7 +86,7 @@ The installer will:
   - Codex: `~/.codex/config.toml`
   - opencode: `~/.config/opencode/plugins/wt-status.js`
   - Pi: `~/.pi/agent/extensions/wt`
-- Install the shared `wt-shells` Agent Skill for Claude, Codex, Gemini,
+- Install the unified `wt` Agent Skill for Claude, Codex, Gemini,
   OpenCode, and Pi using user-level skill symlinks
 
 Requires: git, tmux, fzf, jq, go (to build `wt-state`), and at least one agent CLI ([Claude Code](https://github.com/anthropics/claude-code), [Codex](https://github.com/openai/codex), [Gemini CLI](https://github.com/google/gemini-cli), [opencode](https://opencode.ai/), or [Pi](https://pi.dev/))
@@ -86,7 +97,13 @@ Optional: [Neovim](https://neovim.io/) (editor and presentation canvas), [gh](ht
 
 ```bash
 # Session management
-wt new                                # Interactive: pick repo, branch, agent
+wt new                                # New named Pi workspace, no checkout
+wt new research                       # One interactive Pi pane, background
+wt agents create research reviewer --task "Review the design"
+wt agents open research reviewer      # Interactive peer window in research
+wt roots research                     # Persistent JSON search, including offline roots
+wt snapshot research                  # Checkpoint actual supported layout/view state
+wt restore research                   # Strict idle recovery, no unknown task replay
 wt new ~/code feature-x              # Direct: create worktree (background)
 wt new ~/code feature-x --switch      # Create and switch to it
 wt new ~/code feature-x --agent codex # Use specific agent
@@ -94,7 +111,7 @@ wt new ~/code feature-y --agent pi    # Use Pi
 wt pick                               # fzf picker (? to toggle preview)
 wt switch <session>                   # Switch to a session (alias: s)
 wt ls                                 # List sessions with status
-wt delete <session>                   # Delete session and worktree (alias: rm)
+wt delete <session>                   # Forget session; preserve borrowed checkouts (alias: rm)
 wt delete-pick                        # Interactive delete picker (fzf)
 
 # Agent control
@@ -185,8 +202,9 @@ wt session diff <session> --files
 
 ## Managed Shells
 
-Worktree sessions start with only the `main` window: Neovim on the left and the
-selected agent on the right. Press `prefix + c` to create the first managed
+Agent-first worktrees start with one Pi pane in `main`. Legacy
+`wt new REPO BRANCH` sessions start with Neovim on the left and the selected
+agent on the right. Press `prefix + c` to create the first managed
 shell when you need one. Further presses create `shell-2`, `shell-3`, and so on.
 Outside a wt worktree session, `prefix + c` keeps its normal tmux behavior.
 
@@ -222,20 +240,21 @@ session, such as the master orchestrator.
 
 ### Agent skill
 
-`install.sh` symlinks the repo-owned `wt-shells` skill into the supported global
+`install.sh` symlinks the unified `wt` skill into the supported global
 skill locations:
 
 ```text
-~/.agents/skills/wt-shells   # Codex + OpenCode + Pi
-~/.claude/skills/wt-shells   # Claude
-~/.gemini/skills/wt-shells   # Gemini
+~/.agents/skills/wt   # Codex + OpenCode + Pi
+~/.claude/skills/wt   # Claude
+~/.gemini/skills/wt   # Gemini
 ```
 
-Agents discover the skill automatically when starting a new session (some
-harnesses also detect it live). Invoke it explicitly as `$wt-shells`, or let an
-agent load it when a task calls for a persistent server, watcher, REPL, debugger,
-or log stream. The skill teaches agents to inspect existing shells before
-starting duplicates and to keep one-shot commands in their native shell tool.
+Agents discover it on startup. It covers peers, shells, presentations and
+managed layouts, with discovery/reuse and focus-preserving defaults. The installer
+removes obsolete wt-shells/wt-presentations links only when owned by this checkout.
+Pi exposes `wt_view` for managed editor/diff creation and placement beside the
+current conversation; no raw tmux workaround is needed. Named shells and agent
+conversations retain their own windows; explicit focus switching is human-only.
 
 ## Pi Integration
 

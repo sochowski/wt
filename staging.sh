@@ -19,6 +19,13 @@ set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STAGE="${WT_STAGING_HOME:-${TMPDIR:-/tmp}/wt-staging}"
 SOCKET="wt-staging"
+# Dependency source is not live state/identity; preserve it only for installation.
+native_package_source="${WT_PI_SUBAGENTS_SOURCE:-}"
+# Discard ambient state/identity overrides before installing or starting tmux.
+for inherited in ${!WT_@}; do unset "$inherited"; done
+unset TMUX TMUX_PANE
+export TMUX_TMPDIR="$STAGE/tmux"
+mkdir -p "$TMUX_TMPDIR"
 STUB_BIN="$STAGE/stub-agents"
 
 if [[ "${1:-}" == "--clean" ]]; then
@@ -64,8 +71,8 @@ GOCACHE="$(go env GOCACHE 2>/dev/null || true)"
 
 echo "Running install.sh into the sandbox..."
 env -u WT_BASE_DIR -u WT_STATUS_DIR -u WT_CONFIG_DIR -u WT_LOG_FILE \
-    -u WT_STATE -u WT_DB -u WT_DEFAULT_AGENT -u TMUX -u TMUX_TMPDIR \
-    HOME="$STAGE" PATH="$STUB_BIN:$PATH" \
+    -u WT_STATE -u WT_DB -u WT_DEFAULT_AGENT -u TMUX \
+    HOME="$STAGE" PATH="$STUB_BIN:$PATH" WT_PI_SUBAGENTS_SOURCE="$native_package_source" \
     GOMODCACHE="$GOMODCACHE" GOCACHE="$GOCACHE" \
     bash "$REPO/install.sh"
 
@@ -92,7 +99,9 @@ EOF
 # start with these vars (a stale one would silently point at the wrong paths).
 run() {
     env HOME="$STAGE" PATH="$STAGE/bin:$STUB_BIN:$PATH" \
-        WT_DEFAULT_AGENT=opencode \
+        WT_DEFAULT_AGENT=pi \
+        WT_DB="$STAGE/.local/state/wt/wt.db" \
+        WT_STATE="$STAGE/bin/wt-state" \
         WT_BASE_DIR="$STAGE/worktrees" \
         WT_STATUS_DIR="$STAGE/.local/state/wt" \
         WT_CONFIG_DIR="$STAGE/.config/wt" \
@@ -117,7 +126,7 @@ fi
 if [[ -t 1 ]]; then
     echo ""
     echo "Attaching to the staging tmux server (prefix + w for the wt menu)..."
-    exec run tmux -L "$SOCKET" attach -t main
+    run tmux -L "$SOCKET" attach -t main
 else
     echo ""
     echo "Not a TTY. Drive it non-interactively, e.g.:"

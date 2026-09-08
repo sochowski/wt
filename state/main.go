@@ -1,7 +1,8 @@
 // wt-state — authoritative SQLite store for wt session state.
 //
-// Pure state layer: it never touches tmux. bash callers read rows from it and
-// project tmux @wt-* options themselves. JSON field names match the legacy
+// Legacy commands are pure state. The isolated `worktree` command group also
+// projects typed agent-first records into tmux (worktree_runtime.go). Bash
+// legacy callers continue to project their own tmux @wt-* options. JSON field names match the legacy
 // .status keys so existing jq-based consumers keep working.
 package main
 
@@ -29,6 +30,11 @@ func main() {
 	// Agent-registry commands are pure metadata/filesystem work and never touch
 	// the session store, so dispatch them before opening (and creating) the DB.
 	switch cmd {
+	case "fzf-bindings":
+		if err := fzfBindingsCommand(args); err != nil {
+			fatalf("fzf bindings: %v", err)
+		}
+		return
 	case "agents":
 		cmdAgents(args)
 		return
@@ -44,6 +50,8 @@ func main() {
 	defer st.Close()
 
 	switch cmd {
+	case "worktree":
+		cmdWorktree(st, args)
 	case "set":
 		cmdSet(st, args)
 	case "get":

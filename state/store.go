@@ -135,7 +135,7 @@ SET workspace_path = wt_path
 WHERE workspace_path = '' AND wt_path <> '';`); err != nil {
 		return err
 	}
-	return nil
+	return s.migrateWorktrees()
 }
 
 const selectCols = `name, status, message, repo, branch, wt_path, pr, agent,

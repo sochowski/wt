@@ -6,6 +6,9 @@
 #  launches no real CLI — no creds, no API calls, no contact with your prod env.
 #  Drops into an interactive shell so the pane stays alive and usable.
 # =============================================================================
+if [[ "${WT_STUB_NATIVE:-}" == 1 && -n "${WT_AGENT_ID:-}" ]]; then
+    exec node "$(dirname "$(readlink -f "$0")")/agent-first-stub.js" "$@"
+fi
 echo "┌─ wt stub agent ─────────────────────────────────────"
 echo "│ invoked as : $(basename "$0")"
 echo "│ cwd        : $PWD"
