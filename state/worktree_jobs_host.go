@@ -181,6 +181,9 @@ func (s *Store) runDelegationHost(root, child, token, payload string) error {
 	if request.Runtime != token || request.Cwd != a.Cwd || payload != filepath.Join(runtimeDir(), request.Job+".native-launch.json") {
 		return errors.New("native host launch payload mismatch")
 	}
+	// Delegated Pi conversations use the package-owned runner instead of
+	// runAgent, but their cwd needs the same non-destructive MCP profile setup.
+	ensureMCPProfile(a.Cwd, wtConfigDir(), "default")
 	cmd := exec.Command(request.Command, request.Args...)
 	cmd.Dir = a.Cwd
 	for key, value := range request.Env {

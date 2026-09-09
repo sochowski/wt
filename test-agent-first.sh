@@ -12,7 +12,14 @@ export WT_BASE_DIR="$priv/worktrees" WT_CONFIG_DIR="$priv/config" WT_LOG_FILE="$
 export WT_STATE="$priv/bin/wt-state" WT_SOURCE_CONFIG="$repo/config" WT_STUB_NATIVE=1 WT_DEFAULT_AGENT=pi
 export WT_NVIM_SOCK_DIR="$priv/nvim" WT_SHELL_DIR="$priv/shells"
 export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL="$HOME/.gitconfig"
-mkdir -p "$HOME" "$TMUX_TMPDIR" "$WT_STATUS_DIR" "$priv/bin"
+mkdir -p "$HOME" "$TMUX_TMPDIR" "$WT_STATUS_DIR" "$priv/bin" "$WT_CONFIG_DIR/mcp-profiles"
+cat > "$WT_CONFIG_DIR/mcp-profiles/default.json" <<'JSON'
+{"mcpServers":{"profile-server":{"command":"profile-command"}}}
+JSON
+# Project-owned config must win over WT's profile and never be replaced.
+cat > "$HOME/.mcp.json" <<'JSON'
+{"mcpServers":{"project-server":{"command":"project-command"}}}
+JSON
 trap 'tmux -L default kill-server 2>/dev/null || true; rm -rf "$priv"' EXIT
 (cd "$repo/state" && go build -o "$WT_STATE" .)
 for agent in claude codex gemini opencode pi; do ln -s "$repo/staging/stub-agent" "$priv/bin/$agent"; done
@@ -36,6 +43,7 @@ wait_agents() {
 tmux -L default -f /dev/null new-session -d -s sentinel 'sleep 300'
 wt new demo --cwd "$HOME" > "$priv/new.json"
 root=$(jq -r .id "$priv/new.json"); first=$(jq -r '.agents[0].id' "$priv/new.json")
+jq -e '.mcpServers["project-server"].command == "project-command" and (.mcpServers["profile-server"] == null)' "$HOME/.mcp.json" >/dev/null
 [[ $(tmux list-panes -s -t demo | wc -l) == 1 ]]
 [[ $(wt checkout list demo | jq length) == 0 ]]
 wait_agents 1
@@ -45,6 +53,7 @@ focus=$(tmux display-message -p -t demo '#{window_id}')
 wt agents create demo reviewer --parent main --cwd beta --task "review the two repositories" > "$priv/peer.json"
 peer=$(jq -r .id "$priv/peer.json")
 wait_agents 2
+cmp "$WT_CONFIG_DIR/mcp-profiles/default.json" "$priv/b/.mcp.json"
 [[ $(tmux display-message -p -t demo '#{window_id}') == "$focus" ]]
 [[ $(tmux list-windows -t demo -F '#{window_name}' | grep -cx reviewer) == 1 ]]
 [[ $(tmux list-panes -t demo:reviewer | wc -l) == 1 ]]
