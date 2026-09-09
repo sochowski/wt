@@ -569,7 +569,15 @@ func TestOrdinaryPiLaunchRequiresNativeProviderBeforeExtensionStartup(t *testing
 	w := testRoot(t, s, "native-bootstrap-launch")
 	dir := t.TempDir()
 	t.Setenv("WT_STATUS_DIR", filepath.Join(dir, "state"))
+	t.Setenv("WT_CONFIG_DIR", filepath.Join(dir, "config"))
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	profile := filepath.Join(wtConfigDir(), "mcp-profiles", "default.json")
+	if err := os.MkdirAll(filepath.Dir(profile), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(profile, []byte(`{"mcpServers":{"profile":{}}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
 	capture := filepath.Join(dir, "launch-env")
 	t.Setenv("WT_NATIVE_TEST_CAPTURE", capture)
 	stub := "#!/bin/sh\nprintf '%s\\n' \"$PI_SUBAGENT_REQUIRED_NATIVE_PROVIDER\" \"$WT_ROOT_ID\" \"$WT_AGENT_ID\" \"$WT_RUNTIME_ID\" > \"$WT_NATIVE_TEST_CAPTURE\"\n"
@@ -585,6 +593,9 @@ func TestOrdinaryPiLaunchRequiresNativeProviderBeforeExtensionStartup(t *testing
 	}
 	if err := s.runAgent(w, w.Agents[0].ID, "launch-runtime"); err != nil {
 		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(filepath.Join(w.Agents[0].Cwd, ".mcp.json")); err != nil || string(got) != `{"mcpServers":{"profile":{}}}` {
+		t.Fatalf("agent-first MCP profile not seeded: %q %v", got, err)
 	}
 	body, err := os.ReadFile(capture)
 	if err != nil {

@@ -77,6 +77,14 @@ func stateDir() string {
 	return filepath.Join(home, ".local", "state", "wt")
 }
 
+func wtConfigDir() string {
+	if d := os.Getenv("WT_CONFIG_DIR"); d != "" {
+		return d
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".config", "wt")
+}
+
 func dbPath() string {
 	if p := os.Getenv("WT_DB"); p != "" {
 		return p

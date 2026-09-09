@@ -296,6 +296,38 @@ func TestConvertMCPEmpty(t *testing.T) {
 	}
 }
 
+func TestEnsureMCPProfileSeedsAndPreservesProjectConfig(t *testing.T) {
+	dir := t.TempDir()
+	configDir := t.TempDir()
+	profile := filepath.Join(configDir, "mcp-profiles", "default.json")
+	if err := os.MkdirAll(filepath.Dir(profile), 0700); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, profile, `{"mcpServers":{"profile":{}}}`)
+	if got := ensureMCPProfile(dir, configDir, "default"); got != filepath.Join(dir, ".mcp.json") {
+		t.Fatalf("seeded path = %q", got)
+	}
+	writeFile(t, filepath.Join(dir, ".mcp.json"), `{"mcpServers":{"project":{}}}`)
+	ensureMCPProfile(dir, configDir, "default")
+	if got, err := os.ReadFile(filepath.Join(dir, ".mcp.json")); err != nil || string(got) != `{"mcpServers":{"project":{}}}` {
+		t.Fatalf("project config replaced: %q %v", got, err)
+	}
+}
+
+func TestWTConfigDirDefaultsToUserConfig(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("WT_CONFIG_DIR", "")
+	if got, want := wtConfigDir(), filepath.Join(home, ".config", "wt"); got != want {
+		t.Fatalf("wtConfigDir() = %q, want %q", got, want)
+	}
+	override := filepath.Join(home, "custom-wt-config")
+	t.Setenv("WT_CONFIG_DIR", override)
+	if got := wtConfigDir(); got != override {
+		t.Fatalf("wtConfigDir() override = %q, want %q", got, override)
+	}
+}
+
 func TestApplyAllowedToolsMergePreservesKeys(t *testing.T) {
 	dir := t.TempDir()
 	configDir := filepath.Join(dir, "config")

@@ -623,6 +623,10 @@ func (s *Store) runAgent(w Worktree, id, token string) error {
 	if err != nil {
 		return err
 	}
+	// Agent-first launches bypass the legacy session-setup path. Seed the
+	// selected cwd just before launch so Pi and other MCP-aware extensions see
+	// WT's default profile, while preserving any project-owned .mcp.json.
+	ensureMCPProfile(a.Cwd, wtConfigDir(), "default")
 	var transcriptLock *os.File
 	if a.Adapter.File != "" { // A lock beside the canonical transcript also fences other wt databases.
 		file, e := filepath.EvalSymlinks(a.Adapter.File)
