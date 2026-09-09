@@ -193,15 +193,28 @@ func discoverSetupRepos() []string {
 
 // Only repository rows enter fzf's one live selection set. The explicit actions
 // serialize its count as well: fzf otherwise returns the cursor when zero marked.
+func setupRepoPickerActionBinds(vim bool) []string {
+	actions := []struct{ key, name string }{{"enter", "review"}, {"ctrl-o", "manual"}, {"ctrl-x", "none"}}
+	if vim {
+		// NORMAL l must preserve the same explicit selection-count record as Enter.
+		actions = append(actions, struct{ key, name string }{"l", "review"})
+	}
+	binds := make([]string, 0, len(actions))
+	for _, action := range actions {
+		binds = append(binds, "--bind="+action.key+":transform:printf 'print("+action.name+":%s)+accept' \"$FZF_SELECT_COUNT\"")
+	}
+	return binds
+}
+
 func setupRepoPicker(sources []string, selected map[string]bool) ([]int, string, error) {
 	args := []string{"--layout=reverse", "--sync", "--multi", "--delimiter=\t", "--with-nth=2..", "--bind=esc:abort,tab:toggle,shift-tab:toggle", "--header=Repositories · Tab marks (no move) · Enter reviews marks, including zero\nCtrl-O: Add manual path · Ctrl-X: Start without repositories"}
-	args = append(args, fzfVimArgs(false, true)...)
-	if len(fzfVimArgs(false, true)) > 0 {
-		args = append(args, "--header=Repositories · NORMAL Space/Tab marks (no move) · / or i filters · Enter reviews marks, including zero\nCtrl-O: Add manual path · Ctrl-X: Start without repositories")
+	vimArgs := fzfVimArgs(false, true)
+	args = append(args, vimArgs...)
+	if len(vimArgs) > 0 {
+		args = append(args, "--header=Repositories · NORMAL Space/Tab marks (no move) · / or i filters · Enter/l reviews marks, including zero\nCtrl-O: Add manual path · Ctrl-X: Start without repositories")
 	}
-	for _, action := range []struct{ key, name string }{{"enter", "review"}, {"ctrl-o", "manual"}, {"ctrl-x", "none"}} {
-		args = append(args, "--bind="+action.key+":transform:printf 'print("+action.name+":%s)+accept' \"$FZF_SELECT_COUNT\"")
-	}
+	args = append(args, setupRepoPickerActionBinds(len(vimArgs) > 0)...)
+
 	var input strings.Builder
 	initial := []string{}
 	for i, source := range sources {

@@ -122,6 +122,29 @@ func TestAmbiguousRootReferencesFailClosedAtActionBoundary(t *testing.T) {
 	}
 }
 
+func TestSessionNameRowsPreserveRecencyThenNameInputOrder(t *testing.T) {
+	s := worktreeTestStore(t)
+	newer := testRoot(t, s, "newer")
+	alpha := testRoot(t, s, "alpha")
+	zeta := testRoot(t, s, "zeta")
+	for _, update := range []struct {
+		name string
+		at   int64
+	}{{newer.Name, 200}, {alpha.Name, 100}, {zeta.Name, 100}} {
+		if _, err := s.db.Exec(`UPDATE sessions SET updated_at=? WHERE name=?`, update.at, update.name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows, err := s.sessionNameRows("", "all")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{newer.ID + "\tnewer", alpha.ID + "\talpha", zeta.ID + "\tzeta"}
+	if strings.Join(rows, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("rows = %q, want %q", rows, want)
+	}
+}
+
 func TestSessionNameRowsExcludeRichMetadataAndOpaqueIdentity(t *testing.T) {
 	s := worktreeTestStore(t)
 	w := testRoot(t, s, "billing-migration")

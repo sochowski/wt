@@ -15,8 +15,10 @@ header text. Use one coherent reusable keymap contract across both paths.
   the query; q/Esc in NORMAL cancels/backs out. Enter confirms the stated action.
 - Name/path text fields open ready to type in INSERT. Clearly distinguish their
   text-entry behavior; do not claim full Vim text-editor operators are supported.
-- Do not map h/l to surprise cancel/accept. Keep destructive operations out of
-  normal navigation controls; Ctrl-D must not delete a session in Vim mode.
+- Historical note: the h/l policy below was superseded; NORMAL h now aborts and
+  NORMAL l accepts, restoring the established WT_FZF_VIM contract. Destructive
+  operations remain out of normal navigation controls; Ctrl-D must not delete a
+  session in Vim mode.
   Deletion remains an explicit confirmed action, not an accidental paging key.
 - Preserve non-Vim use. Test actual PTYs with both WT_FZF_VIM=1 and off.
 
@@ -26,6 +28,9 @@ Prefix+s should show and search only session names/human display labels. Remove
 repo lists, agent counts, idle/active badges and status summaries from this
 surface. No large details preview by default; details can be explicitly opened.
 Stable IDs remain internal selection tokens, not searchable user vocabulary.
+
+This hidden-preview decision was later superseded: rich details are visible by
+default in both responsive layouts and `?` toggles them (`Ctrl-P` is an alias).
 
 Load a light name list once and filter locally in fzf. Do not spawn WT/Git status
 scans on every keypress. Keep results stable while navigating. Rich repository,

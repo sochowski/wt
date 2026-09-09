@@ -36,6 +36,12 @@ export WT_STATE="$priv/bin/state-trace"
 for helper in "$repo"/bin/*; do [[ $(basename "$helper") == wt-state ]] || ln -s "$helper" "$HOME/bin/$(basename "$helper")"; done
 ln -s "$WT_STATE" "$HOME/bin/wt-state"
 for agent in claude codex gemini opencode pi; do ln -s "$repo/staging/stub-agent" "$priv/bin/$agent"; done
+cat > "$priv/bin/gh" <<'SH'
+#!/usr/bin/env bash
+# Preview tests must never inherit a developer's authenticated GitHub client.
+printf '[]\n'
+SH
+chmod +x "$priv/bin/gh"
 ln -s "$repo/staging/nvim-view-stub.js" "$priv/bin/nvim"
 export PATH="$priv/bin:$HOME/bin:$PATH"
 git config --global user.name 'wt setup acceptance'; git config --global user.email test@example.invalid

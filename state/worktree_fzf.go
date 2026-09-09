@@ -28,18 +28,25 @@ func fzfVimArgs(input, multi bool) []string {
 	for _, k := range keys {
 		binds = append(binds, k+":ignore")
 	}
-	binds = append(binds, "~:ignore", "j:down", "k:up", "g:first", "G:last", "q:abort", "ctrl-d:half-page-down")
-	enter := "unbind~" + toggle + "~+unbind(~)+rebind(esc)+change-prompt(INSERT > )"
+	binds = append(binds, "~:ignore", "h:abort", "j:down", "k:up", "l:accept", "g:first", "G:last", "q:abort", "ctrl-d:half-page-down")
+	normal := "rebind~" + toggle + "~+rebind(~)+change-prompt(NORMAL > )"
+	enter := "unbind~" + toggle + "~+unbind(~)+change-prompt(INSERT > )"
 	binds = append(binds, "i:"+enter, "/:"+enter)
 	if multi {
 		binds = append(binds, "space:toggle")
 	}
-	binds = append(binds, "esc:rebind~"+toggle+"~+rebind(~)+unbind(esc)+change-prompt(NORMAL > )")
-	start := "unbind(esc)+change-prompt(NORMAL > )"
+	// fzf does not restore its default Esc action after unbind(esc). Dispatch
+	// explicitly by mode: INSERT triggers the internal NORMAL transition, while
+	// NORMAL aborts. The indirection keeps the transform free of key-list quoting.
+	binds = append(binds, "f12:"+normal)
+	start := "change-prompt(NORMAL > )"
 	if input {
 		start = enter
 	}
 	binds = append(binds, "start:"+start)
+	// The colon-delimited transform command must remain last: unlike ordinary
+	// actions, it consumes the rest of the binding argument as shell source.
+	binds = append(binds, `esc:transform:test "$FZF_PROMPT" = "INSERT > " && printf '%s\n' 'trigger(f12)' || printf '%s\n' abort`)
 	return []string{"--bind=" + strings.Join(binds, ",")}
 }
 func fzfBindingsCommand(args []string) error {

@@ -359,10 +359,43 @@ test_mobile_session_control() {
     if grep -Fq 'selection=$(session_picker all true)' "$WT_BIN_DIR/wt" \
         && grep -Fq 'pick_worktree' <<<"$picker_source" \
         && grep -Fq "preview_window='down,50%,border-top,wrap'" <<<"$picker_source" \
+        && grep -Fq "preview_window='right,60%,border-left,wrap'" <<<"$picker_source" \
         && [[ ! -e "$WT_BIN_DIR/wt-mobile" ]]; then
         pass "mobile and prefix+s share the responsive session picker"
     else
         fail "mobile still has a separate session-menu implementation" "$picker_source"
+    fi
+
+    if grep -Fq -- '--preview-window="$preview_window"' <<<"$picker_source" \
+        && ! grep -Fq -- '--preview-window="$preview_window,hidden"' <<<"$picker_source" \
+        && grep -Fq -- "--bind='?:toggle-preview,ctrl-p:toggle-preview'" <<<"$picker_source" \
+        && grep -Fq '? / Ctrl-P toggle details' <<<"$picker_source"; then
+        pass "responsive preview is visible by default with discoverable ? and Ctrl-P toggles"
+    else
+        fail "shared picker preview defaults or key hints regressed" "$picker_source"
+    fi
+
+    if grep -Fq -- "--delimiter=\$'\\t' --with-nth=2 --tiebreak=index --layout=reverse" <<<"$picker_source" \
+        && ! grep -Fq -- '--no-sort' <<<"$picker_source" \
+        && ! grep -Fq -- '--nth=' <<<"$picker_source"; then
+        pass "shared picker enables native fzf relevance with input-order tie-breaking"
+    else
+        fail "shared picker ranking arguments regressed" "$picker_source"
+    fi
+
+    local ranking_output tie_output opaque_output
+    ranking_output=$(printf 'recent-id\txfoo\nolder-id\tfoo\n' \
+        | fzf --filter=foo --delimiter=$'\t' --with-nth=2 --tiebreak=index)
+    tie_output=$(printf 'recent-id\tsame\nolder-id\tsame\n' \
+        | fzf --filter=same --delimiter=$'\t' --with-nth=2 --tiebreak=index)
+    opaque_output=$(printf 'opaque-id\tvisible-name\n' \
+        | fzf --filter=opaque-id --delimiter=$'\t' --with-nth=2 --tiebreak=index || true)
+    if [[ ${ranking_output%%$'\n'*} == $'older-id\tfoo' ]] \
+        && [[ "$tie_output" == $'recent-id\tsame\nolder-id\tsame' ]] \
+        && [[ -z "$opaque_output" ]]; then
+        pass "fzf ranks visible relevance first, preserves equivalent-score input order, and hides opaque IDs"
+    else
+        fail "fzf ranking/search contract regressed" "rank=$ranking_output ties=$tie_output opaque=$opaque_output"
     fi
 
     if grep -Fq 'session_picker_rows "$scope" | fzf' <<<"$picker_source" \

@@ -221,7 +221,7 @@ func projectionRow(p RootProjection) string {
 // Session switching intentionally avoids the rich projection: no checkout,
 // agent, inbox, Git or per-key runtime inspection. IDs are transport only.
 func (s *Store) sessionNameRows(query, scope string) ([]string, error) {
-	rows, err := s.db.Query(`SELECT r.id,r.name,coalesce(l.label,r.name) FROM roots r JOIN sessions s ON s.name=r.name LEFT JOIN root_labels l ON l.root_id=r.id ORDER BY s.updated_at DESC,r.name`)
+	rows, err := s.db.Query(`SELECT r.id,r.name,coalesce(l.label,r.name) FROM roots r JOIN sessions s ON s.name=r.name LEFT JOIN root_labels l ON l.root_id=r.id ORDER BY s.updated_at DESC,r.name ASC`)
 	if err != nil {
 		return nil, err
 	}
