@@ -74,31 +74,63 @@ def cancel():
 try:
     pump(0.5)
     # Actual generated prefix+n binding, not direct invocation or an fzf stub.
+    if vim:
+        # Prove mode-sensitive Esc with real fzf: initial NORMAL aborts, while
+        # INSERT Esc returns to NORMAL and the following Esc aborts.
+        prefix("n")
+        wait_text("Name this task")
+        keys(b"\x15esc-one\r")
+        wait_text("Repositories")
+        wait_text("NORMAL")
+        keys(b"\x1b")
+        pump(0.5)
+        assert wt("roots", "esc-one") == []
+
+        prefix("n")
+        wait_text("Name this task")
+        keys(b"\x15esc-two\r")
+        wait_text("Repositories")
+        wait_text("NORMAL")
+        keys("/")
+        wait_text("INSERT")
+        keys(b"\x1b")
+        wait_text("NORMAL")
+        keys(b"\x1b")
+        pump(0.5)
+        assert wt("roots", "esc-two") == []
+
+        prefix("n")
+        wait_text("Name this task")
+        keys(b"\x15h-abort-task\r")
+        wait_text("Repositories")
+        wait_text("NORMAL")
+        keys("h")
+        pump(0.5)
+        assert wt("roots", "h-abort-task") == []
     prefix("n")
     wait_text("Name this task")
     keys(b"\x15keyboard-task\r")
     wait_text("Repositories")
     if vim:
         wait_text("NORMAL")
-        # h/l are neither cancel nor accept, Ctrl-D cannot delete.
-        keys("hl")
+        # Ctrl-D remains paging, never deletion.
         keys(b"\x04")
     search("'alpha")
-    keys(" " if vim else b"\t")
+    keys(b"\t")
     search("'beta")
     keys(b"\t")
     # Manual entry returns with exactly the same two live marks.
     keys(b"\x0f")
     wait_text("Full working repository path")
-    keys(str(artifacts / "sandbox/repos/beta") + "\r")
+    keys(str(artifacts / "sandbox/repos/alpha") + "\r")
     wait_text("Repositories")
-    keys(b"\r")
+    keys("l" if vim else b"\r")
     wait_text("Review")
     # Review can return to the picker without losing either live mark.
     keys("jj" if vim else b"\x1b[B\x1b[B")
     keys(b"\r")
     wait_text("Repositories")
-    keys(b"\r")
+    keys("l" if vim else b"\r")
     wait_text("Review")
     if vim:
         keys("jk")
@@ -181,12 +213,35 @@ try:
     prefix("s")
     wait_text("Select session")
     for _ in range(40):
-        calls_before = call_log.read_text()
-        if "worktree projection names" in calls_before[len(calls_initial):]:
+        picker_calls = call_log.read_text()[len(calls_initial):]
+        if "worktree projection names" in picker_calls:
             break
         pump()
     else:
         raise AssertionError("picker initial name-list call bypassed tracing")
+    # Rich details are visible before any opt-in key in both responsive modes.
+    wait_text("Identity:")
+    pump(0.5)
+    keys("?")
+    pump(0.5)
+    hidden_calls = call_log.read_text()
+    keys("j" if vim else b"\x1b[B")
+    pump(0.7)
+    hidden_delta = call_log.read_text()[len(hidden_calls):]
+    assert "worktree projection preview" not in hidden_delta
+    assert "worktree projection show" not in hidden_delta
+    keys(b"\x10")
+    wait_text("Identity:")
+    if vim:
+        # INSERT restores literal printable input, including the picker-specific ?.
+        keys("/")
+        wait_text("INSERT")
+        keys("?")
+        wait_text("0/")
+        keys(b"\x1b")
+        wait_text("NORMAL")
+    # Back in NORMAL (or ordinary non-Vim mode), ? toggles details off again.
+    keys("?")
     search("gamma")
     keys(b"\x0c")
     wait_text("0/")
@@ -201,16 +256,56 @@ try:
     if vim:
         # Query remains intact across Esc and Ctrl-D is safe, not deletion.
         keys(b"\x04")
-    assert Path(os.environ["WT_TEST_STATE_CALLS"]).read_text() == calls_before, "filter/navigation spawned WT inspection"
+    picker_calls = call_log.read_text()[len(calls_initial):]
+    assert picker_calls.count("worktree projection names") == 1, picker_calls
+    assert "worktree projection rows" not in picker_calls
+    assert "worktree projection list" not in picker_calls
+    valid_ids = {candidate["id"] for candidate in wt("roots")}
+    callbacks = []
+    for line in picker_calls.splitlines():
+        parts = line.split()
+        if len(parts) == 4 and parts[:3] == ["worktree", "projection", "preview"]:
+            callbacks.append(("preview", parts[3]))
+        elif len(parts) == 4 and parts[:3] == ["worktree", "projection", "show"]:
+            callbacks.append(("show", parts[3]))
+    assert callbacks and {kind for kind, _ in callbacks} == {"preview", "show"}, callbacks
+    assert all(len(identity) == 32 and all(c in "0123456789abcdef" for c in identity) and identity in valid_ids for _, identity in callbacks), callbacks
     keys(b"\r")
     pump(0.7)
     current = subprocess.check_output(["tmux", "list-clients", "-F", "#{session_name}"], text=True).strip()
     assert current == "keyboard-task", current
+
+    # Force the same picker through its portrait branch without rerunning the
+    # setup suite. Default rendering and both toggles remain live at 150 columns.
+    subprocess.check_call(["tmux", "set-environment", "-t", "=keyboard-task", "WT_STATE", os.environ["WT_STATE"]])
+    subprocess.check_call(["tmux", "set-environment", "-t", "=keyboard-task", "WT_MOBILE", "1"])
+    portrait_before = call_log.read_text()
+    prefix("s")
+    wait_text("Select session")
+    wait_text("Identity:")
+    assert "worktree projection preview" in call_log.read_text()[len(portrait_before):]
+    keys("?")
+    pump(0.5)
+    portrait_hidden = call_log.read_text()
+    keys("j" if vim else b"\x1b[B")
+    pump(0.7)
+    portrait_hidden_delta = call_log.read_text()[len(portrait_hidden):]
+    assert "worktree projection preview" not in portrait_hidden_delta
+    assert "worktree projection show" not in portrait_hidden_delta
+    portrait_resume = call_log.read_text()
+    keys(b"\x10")
+    wait_text("Identity:")
+    assert "worktree projection preview" in call_log.read_text()[len(portrait_resume):]
+    cancel()
+    pump(0.5)
+    subprocess.check_call(["tmux", "set-environment", "-u", "-t", "=keyboard-task", "WT_MOBILE"])
+
     if not vim:
         # Delete under a filter, then clear it: other local candidates survive.
         subprocess.check_call(["wt", "new", "filter-delete-victim", "--offline"], stdout=subprocess.DEVNULL)
         prefix("s")
         wait_text("Select session")
+        keys("?")
         search("filter-delete-victim")
         wait_text("filter-delete-victim")
         keys(b"\x04")

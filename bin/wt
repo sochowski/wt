@@ -675,11 +675,11 @@ render_worktree_row() {
     esac
 }
 
-# List worktree sessions, most-recently-active first. Recency is the single
-# ranking shared by every surface (wt ls, wt pick, the switcher): the store's
-# updated_at is the source of truth, with directory mtime as a fallback for
-# on-disk worktrees that were never tracked. Sorting requires buffering all
-# rows, so the list appears once fully assembled rather than streaming in.
+# List worktree sessions, most-recently-active first. The store's updated_at is
+# the source of truth, with directory mtime as a fallback for on-disk worktrees
+# that were never tracked. Interactive pickers use their recency-ordered input
+# as native fzf's equivalent-score tie-break. Sorting this full list requires
+# buffering, so it appears once fully assembled rather than streaming in.
 list_worktrees() {
     local format="${1:-full}"
     local -a rows=()
@@ -1585,7 +1585,8 @@ picker_is_portrait() {
 }
 
 # The one session menu used by `wt pick`, `wt switch`, prefix+s, and mobile.
-# Details are opt-in; navigating and filtering never runs status/Git scans.
+# Candidate generation stays lightweight; rich details render only in fzf's
+# cancellable preview process for the currently selected row.
 session_picker_rows() {
     pick_list "${2:-}" "${1:-all}"
 }
@@ -1594,7 +1595,7 @@ session_picker() {
     local scope="${1:-all}" allow_delete="${2:-false}"
     local selection rc=0 header preview_window picker_cmd
     printf -v picker_cmd '%q' "$WT_BIN_DIR/wt"
-    header="Select session · names / labels only · Enter open · Ctrl-P details"
+    header="Select session · names / labels only · Enter open · ? / Ctrl-P toggle details"
     if picker_is_portrait; then
         preview_window='down,50%,border-top,wrap'
     else
@@ -1602,11 +1603,11 @@ session_picker() {
     fi
     local -a fzf_args=(
         "${WT_FZF_VIM_ARGS[@]}"
-        --delimiter=$'\t' --with-nth=2 --no-sort --layout=reverse
+        --delimiter=$'\t' --with-nth=2 --tiebreak=index --layout=reverse
         --header="$header"
         --preview="$picker_cmd pick-preview {1}"
-        --preview-window="$preview_window,hidden"
-        --bind='ctrl-p:toggle-preview'
+        --preview-window="$preview_window"
+        --bind='?:toggle-preview,ctrl-p:toggle-preview'
     )
     if [[ "$allow_delete" == true && "$WT_FZF_VIM" != 1 && "$WT_FZF_VIM" != true ]]; then
         fzf_args+=(--bind="ctrl-d:execute($picker_cmd pick-delete {1})+reload($picker_cmd pick-list '' $scope || true)")
@@ -2729,7 +2730,7 @@ Session Management:
   new [name]             Create a named Pi root (generated name if omitted)
   new <repo> <branch>     Create a legacy Git worktree in the background
   new ... --switch        Create and switch to it (default stays in current session)
-  pick, p                 Interactive session picker (names; Ctrl-P details)
+  pick, p                 Session picker (visible details; ?/Ctrl-P toggles)
   switch, s <session>     Switch to a session
   list, ls                List all sessions with status
   delete, rm <session>    Forget a session; preserve borrowed checkout files
@@ -2783,7 +2784,7 @@ Options for 'new':
 Tmux Keybindings:
   prefix + c    Create and open a managed shell (in wt worktree sessions)
   prefix + w    Action menu (new, switch, delete, PR, master)
-  prefix + W    Session switcher (fzf popup, most-recently-active first)
+  prefix + W    Session switcher (fzf relevance; recency breaks ties)
   prefix + M    Jump to master session
 
 MCP Profiles:
@@ -2825,7 +2826,7 @@ Examples:
   wt snapshot research                 Checkpoint supported layout/views
   wt restore research                  Strict idle recovery; no command replay
   wt message wake research --budget 32 Enable bounded cooperative requests
-  wt pick                              Switch sessions (preview shows diff + agent)
+  wt pick                              Switch sessions (?/Ctrl-P toggles visible preview)
   wt master                            Create/attach master session
   wt master --force                    Replace master session
   wt pr 42                             Find session for PR #42

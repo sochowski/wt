@@ -289,9 +289,9 @@ ON CONFLICT(name) DO UPDATE SET
 // List returns all sessions. master controls inclusion of the master row:
 // "all" (default), "only", or "exclude". sort controls ordering: "recency"
 // (default) puts the most-recently-active session first (updated_at DESC), with
-// name as a stable tie-break; "name" sorts alphabetically. This is the single
-// ranking used by every wt surface (wt ls, wt pick, the switcher), so they all
-// agree on order.
+// name as a stable tie-break; "name" sorts alphabetically. List consumers such
+// as wt ls retain this order. The interactive switcher uses it as native fzf's
+// input-order tie-break while relevance ranks unequal query matches.
 func (s *Store) List(master, sort string) ([]Session, error) {
 	q := `SELECT ` + selectCols + ` FROM sessions`
 	switch master {

@@ -33,7 +33,7 @@ profiles retain the legacy agent/editor workflow.
 **[Named session setup](docs/session-setup.md):** prefix+n (`wt setup`) names a
 task and optionally prepares multiple NEW isolated checkouts from fetched remote
 defaults. Prefix+R adds repositories without replacing conversations. Prefix+s
-searches the session name, every attached repository, peer names and task summaries.
+searches session names and human display labels.
 
 ## What you get
 
@@ -108,7 +108,7 @@ wt new ~/code feature-x              # Direct: create worktree (background)
 wt new ~/code feature-x --switch      # Create and switch to it
 wt new ~/code feature-x --agent codex # Use specific agent
 wt new ~/code feature-y --agent pi    # Use Pi
-wt pick                               # fzf picker (? to toggle preview)
+wt pick                               # fzf picker (? or Ctrl-P toggles preview)
 wt switch <session>                   # Switch to a session (alias: s)
 wt ls                                 # List sessions with status
 wt delete <session>                   # Forget session; preserve borrowed checkouts (alias: rm)
@@ -152,9 +152,9 @@ to that tmux session exactly as it is. Typing, terminal shortcuts, and mouse
 events go directly to tmux without a capture-and-reply layer.
 
 The portrait picker uses a 50/50 stack: the session menu is on top and the
-selected session's Git diff is always visible below. Arrow keys navigate,
-typing filters, Enter attaches, and `?` hides or shows the diff. This maps
-directly to Termius on iOS gestures that emit arrow keys.
+selected session's Git diff is visible below by default. Arrow keys navigate,
+typing filters, Enter attaches, and `?` hides or shows the diff (`Ctrl-P` is an
+alias). This maps directly to Termius on iOS gestures that emit arrow keys.
 
 Mobile tmux clients get a directional fullscreen pane map. After the prefix,
 `h`, `j`, `k`, or `l` selects the pane in that direction and zooms it to fill
@@ -296,7 +296,7 @@ status needs Pi 0.84.4 or newer.
 | Key | Action |
 |-----|--------|
 | `prefix + c` | Create and open a managed shell inside a worktree session |
-| `prefix + W` | Session switcher (fzf popup, most-recently-active first) |
+| `prefix + W` | Session switcher (fzf relevance; recency then name breaks equivalent-score ties) |
 | `prefix + w` | Action menu (new, switch, delete, PR, master) |
 | `prefix + M` | Jump to master orchestrator session |
 
@@ -496,7 +496,7 @@ Agent hook/extension event
 wt-state → Go binary, authoritative SQLite session store (status, agent, PR
            state, timestamps); tmux options are a fast-read mirror for the UI
 
-prefix+W → fzf popup (wt switch) lists live sessions, most-recently-active first
+prefix+W → fzf popup (wt switch): relevance while filtering; recency then name for empty/equivalent scores
 prefix+w → display-menu launches wt subcommands in popups
 Status bar → wt-tmux-status aggregates status counts from wt-state
 Pi present tool → wt-present → fixed nvim RPC API → shared presentation canvas
