@@ -606,3 +606,27 @@ func TestOrdinaryPiLaunchRequiresNativeProviderBeforeExtensionStartup(t *testing
 		t.Fatalf("ordinary launch bypasses native requirement: %v", got)
 	}
 }
+
+func TestStoppedDelegatedChildRestoresAsQuietPlaceholder(t *testing.T) {
+	f := newDelegationFixture(t)
+	f.reserve(t)
+	f.bind(t)
+	f.complete(t)
+	if _, err := f.s.db.Exec(`UPDATE agent_sessions SET stopped=1,runtime='',status='idle' WHERE root_id=? AND id=?`, f.root.ID, f.job.ChildID); err != nil {
+		t.Fatal(err)
+	}
+	w, err := f.s.Worktree(f.root.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var view View
+	for _, candidate := range w.Views {
+		if candidate.Target == f.job.ChildID {
+			view = candidate
+		}
+	}
+	cmd, cwd, err := f.s.viewCommand(w, view)
+	if err != nil || cmd != stoppedCommand("agent stopped") || cwd != w.Cwd {
+		t.Fatalf("finished delegated child did not restore as a stopped placeholder: %q %q %v", cmd, cwd, err)
+	}
+}
