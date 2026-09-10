@@ -210,18 +210,21 @@ func (s *Store) viewCommand(w Worktree, v View) (string, string, error) {
 		if e != nil {
 			return "", "", e
 		}
+		// A stopped agent is never relaunched, delegated or not. Finished
+		// delegated children (e.g. completed workers/reviewers) therefore restore
+		// as quiet placeholders instead of tripping the host fence on every revive.
+		if a.Stopped {
+			return stoppedCommand("agent stopped"), w.Cwd, nil
+		}
 		delegated, e := s.isDelegatedChild(w.ID, a.ID)
 		if e != nil {
 			return "", "", e
 		}
 		if delegated {
-			return "", "", errors.New("delegated conversation requires its admitted interactive host; ordinary Pi launch is forbidden")
+			return "", "", errors.New("delegated conversation requires its admitted interactive host; ordinary Pi launch is forbidden (the owning pi-subagents run must relaunch it, or stop the child)")
 		}
 		if a.Runtime != "" && a.NativeID == "" {
 			return "", "", errors.New("previous launch has no captured native identity; refusing a fresh replacement")
-		}
-		if a.Stopped {
-			return stoppedCommand("agent stopped"), w.Cwd, nil
 		}
 		if _, e = strictPiArgs(a); e != nil {
 			return "", "", e
