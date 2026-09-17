@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -152,6 +153,67 @@ func TestWorkspacePublicationConflictsFailClosed(t *testing.T) {
 		})
 	}
 }
+
+func TestWorkspaceDeviceRenumberingPreservesVerifiedObjects(t *testing.T) {
+	s, w := workspaceFixture(t)
+	second, err := s.createNamedRoot("workspace-task-2", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstRecord, _, err := s.workspaceRecord(w.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actualDev := firstRecord.Objects["."].Dev
+	staleDev := actualDev + 1
+	for _, root := range []Worktree{w, second} {
+		r, owned, e := s.workspaceRecord(root.ID)
+		if e != nil || !owned {
+			t.Fatal(r, owned, e)
+		}
+		for key, object := range r.Objects {
+			object.Dev = staleDev
+			r.Objects[key] = object
+		}
+		for alias, link := range r.Links {
+			link.Dev = staleDev
+			r.Links[alias] = link
+		}
+		if e = s.saveWorkspace(root.ID, r); e != nil {
+			t.Fatal(e)
+		}
+	}
+	container := filepath.Dir(w.Cwd)
+	var text string
+	if err = s.db.QueryRow(`SELECT identity FROM workspace_containers WHERE path=?`, container).Scan(&text); err != nil {
+		t.Fatal(err)
+	}
+	var identity workspaceObject
+	if err = json.Unmarshal([]byte(text), &identity); err != nil {
+		t.Fatal(err)
+	}
+	identity.Dev = staleDev
+	if _, err = s.db.Exec(`UPDATE workspace_containers SET identity=? WHERE path=?`, jsonText(identity), container); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, root := range []Worktree{w, second} {
+		if err = s.refreshWorkspace(root); err != nil {
+			t.Fatal(err)
+		}
+		after, _, e := s.workspaceRecord(root.ID)
+		if e != nil || after.Objects["."].Dev != actualDev {
+			t.Fatalf("device identity was not reconciled: %+v %v", after.Objects["."], e)
+		}
+	}
+	if err = s.db.QueryRow(`SELECT identity FROM workspace_containers WHERE path=?`, container).Scan(&text); err != nil {
+		t.Fatal(err)
+	}
+	if err = json.Unmarshal([]byte(text), &identity); err != nil || identity.Dev != actualDev {
+		t.Fatalf("container device identity was not reconciled: %+v %v", identity, err)
+	}
+}
+
 func TestWorkspacePreexistingHomesAndContainersNotAdopted(t *testing.T) {
 	for _, kind := range []string{"container-dir", "container-link", "home-dir", "home-link", "home-file"} {
 		t.Run(kind, func(t *testing.T) {

@@ -192,6 +192,22 @@ func workspaceCheck(fd int, expected workspaceObject) error {
 	}
 	return nil
 }
+
+// APFS may assign a different device number to the same mounted volume after a
+// reboot or remount. Keep the inode check as the object identity, and accept a
+// device renumbering only when every owned workspace object and shortcut still
+// has its recorded inode/content/target. The caller persists the new device
+// number only after the complete workspace has passed validation.
+func workspaceCheckDevice(fd int, expected workspaceObject, oldDev, newDev uint64) error {
+	actual, err := workspaceStat(fd)
+	if err != nil {
+		return err
+	}
+	if expected.Dev != oldDev || actual.Dev != newDev || expected.Ino != actual.Ino {
+		return errors.New("workspace object identity changed; resources preserved")
+	}
+	return nil
+}
 func workspaceReadLink(fd int, name string) (workspaceLink, error) {
 	var st unix.Stat_t
 	if err := unix.Fstatat(fd, name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
@@ -254,15 +270,54 @@ func (s *Store) refreshWorkspace(w Worktree) error {
 		return err
 	}
 	defer unix.Close(home)
-	if err = workspaceCheck(home, r.Objects["."]); err != nil {
+	actualHome, err := workspaceStat(home)
+	if err != nil {
 		return err
+	}
+	oldDev, newDev := r.Objects["."].Dev, actualHome.Dev
+	rebindDevice := oldDev != newDev
+	check := func(fd int, expected workspaceObject) error {
+		if rebindDevice {
+			return workspaceCheckDevice(fd, expected, oldDev, newDev)
+		}
+		return workspaceCheck(fd, expected)
+	}
+	if err = check(home, r.Objects["."]); err != nil {
+		return err
+	}
+	var container string
+	var containerExpected workspaceObject
+	if rebindDevice {
+		container = filepath.Dir(r.Home)
+		var text string
+		if err = s.db.QueryRow(`SELECT identity FROM workspace_containers WHERE path=?`, container).Scan(&text); err != nil {
+			return err
+		}
+		if err = json.Unmarshal([]byte(text), &containerExpected); err != nil {
+			return err
+		}
+		parent, e := workspaceOpenDir(container, false)
+		if e != nil {
+			return e
+		}
+		containerActual, statErr := workspaceStat(parent)
+		unix.Close(parent)
+		if statErr != nil {
+			return statErr
+		}
+		// Another workspace in the same container may already have verified
+		// and persisted this device transition.
+		if containerActual.Ino != containerExpected.Ino || containerActual.Dev != newDev ||
+			(containerExpected.Dev != oldDev && containerExpected.Dev != newDev) {
+			return errors.New("workspace container identity changed")
+		}
 	}
 	repos, err := workspaceDirAt(home, "repos")
 	if err != nil {
 		return err
 	}
 	defer unix.Close(repos)
-	if err = workspaceCheck(repos, r.Objects["repos"]); err != nil {
+	if err = check(repos, r.Objects["repos"]); err != nil {
 		return err
 	}
 	scratch, err := workspaceDirAt(home, "scratch")
@@ -270,7 +325,7 @@ func (s *Store) refreshWorkspace(w Worktree) error {
 		return err
 	}
 	defer unix.Close(scratch)
-	if err = workspaceCheck(scratch, r.Objects["scratch"]); err != nil {
+	if err = check(scratch, r.Objects["scratch"]); err != nil {
 		return err
 	}
 	// Open without truncation; verify before writing. A substituted symlink,
@@ -281,7 +336,7 @@ func (s *Store) refreshWorkspace(w Worktree) error {
 	}
 	file := os.NewFile(uintptr(fd), "WORKSPACE.md")
 	defer file.Close()
-	if err = workspaceCheck(fd, r.Objects["WORKSPACE.md"]); err != nil {
+	if err = check(fd, r.Objects["WORKSPACE.md"]); err != nil {
 		return err
 	}
 	var st unix.Stat_t
@@ -303,8 +358,35 @@ func (s *Store) refreshWorkspace(w Worktree) error {
 		if e != nil {
 			return e
 		}
-		if actual != expected {
+		if actual.Target != expected.Target || actual.Ino != expected.Ino ||
+			(!rebindDevice && actual.Dev != expected.Dev) ||
+			(rebindDevice && (expected.Dev != oldDev || actual.Dev != newDev)) {
 			return errors.New("workspace shortcut identity changed")
+		}
+	}
+	if rebindDevice {
+		for key, object := range r.Objects {
+			object.Dev = newDev
+			r.Objects[key] = object
+		}
+		for alias, link := range r.Links {
+			link.Dev = newDev
+			r.Links[alias] = link
+		}
+		containerExpected.Dev = newDev
+		tx, e := s.db.Begin()
+		if e != nil {
+			return e
+		}
+		defer tx.Rollback()
+		if _, e = tx.Exec(`UPDATE workspace_homes SET record=? WHERE root_id=?`, jsonText(r), w.ID); e != nil {
+			return e
+		}
+		if _, e = tx.Exec(`UPDATE workspace_containers SET identity=? WHERE path=?`, jsonText(containerExpected), container); e != nil {
+			return e
+		}
+		if e = tx.Commit(); e != nil {
+			return e
 		}
 	}
 	currentAliases := map[string]bool{}

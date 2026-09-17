@@ -315,7 +315,7 @@ func containedPath(root, path string) (string, error) {
 	return p, nil
 }
 
-func (s *Store) restore(w Worktree) error {
+func (s *Store) restore(w Worktree) (err error) {
 	if err := s.refreshWorkspace(w); err != nil {
 		return err
 	}
@@ -324,6 +324,24 @@ func (s *Store) restore(w Worktree) error {
 		return err
 	}
 	fresh := !live
+	created := false
+	defer func() {
+		if err == nil || !created {
+			return
+		}
+		// A failed projection must not look like a live, switchable root. Keep
+		// every durable record, but remove the partial tmux projection and its
+		// stale pane bindings so the next open can retry from a clean slate.
+		tmux("kill-session", "-t", "="+w.Name)
+		s.db.Exec(`UPDATE views SET pane='' WHERE root_id=?`, w.ID)
+	}()
+	if live {
+		// Opening code trusts only a completed projection. Clear the marker
+		// before reconciliation so any later error remains visibly retryable.
+		if _, err = tmux("set-option", "-t", "="+w.Name, "@wt-restore-complete", "0"); err != nil {
+			return err
+		}
+	}
 	if fresh {
 		if w.Socket != "" {
 			if _, err = s.db.Exec(`UPDATE roots SET wake_enabled=0 WHERE id=?`, w.ID); err != nil {
@@ -343,6 +361,7 @@ func (s *Store) restore(w Worktree) error {
 		if _, err = tmux("new-session", "-d", "-s", w.Name, "-n", "main", "-c", cwd, "bash --noprofile --norc -i"); err != nil {
 			return err
 		}
+		created = true
 		if _, err = tmux("set-option", "-t", "="+w.Name, "@wt-root", w.ID); err != nil {
 			return err
 		}
@@ -467,7 +486,11 @@ func (s *Store) restore(w Worktree) error {
 	if err = s.installStackHook(w); err != nil {
 		return err
 	}
-	return s.snapshot(w)
+	if err = s.snapshot(w); err != nil {
+		return err
+	}
+	_, err = tmux("set-option", "-t", "="+w.Name, "@wt-restore-complete", "1")
+	return err
 }
 func (s *Store) launchView(w Worktree, v View, pane string) error {
 	cmd, cwd, err := s.viewCommand(w, v)
