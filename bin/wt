@@ -965,7 +965,15 @@ create_worktree() {
 switch_to() {
     local session_name="$1"
 
-    if ! tmux has-session -t "=$session_name" 2>/dev/null; then
+    # Agent-first roots are checkpointed projections, not just tmux sessions.
+    # A failed restore can briefly create a tmux session before every durable
+    # view is rebuilt, so only the completion marker makes it switchable.
+    if "$WT_STATE" worktree is-agent-first "$session_name" 2>/dev/null; then
+        if ! tmux has-session -t "=$session_name" 2>/dev/null \
+            || [[ "$(tmux show-option -qv -t "$session_name" @wt-restore-complete 2>/dev/null)" != 1 ]]; then
+            WT_SOURCE_CONFIG="$WT_BIN_DIR/../config" "$WT_STATE" worktree restore "$session_name" >/dev/null || return 1
+        fi
+    elif ! tmux has-session -t "=$session_name" 2>/dev/null; then
         echo "Session '$session_name' does not exist"
         return 1
     fi
@@ -1625,7 +1633,8 @@ pick_worktree() {
     root=$(pick_root_json "${selection%%$'\t'*}") || return
     session_name=$(jq -r '.name' <<<"$root")
     wt_path=$(jq -r '.checkouts[0].path // empty' <<<"$root")
-    if ! tmux has-session -t "=$session_name" 2>/dev/null; then
+    if ! "$WT_STATE" worktree is-agent-first "$session_name" 2>/dev/null \
+        && ! tmux has-session -t "=$session_name" 2>/dev/null; then
         printf "Session '%s' is not running. Reviving...\n" "$session_name" >/dev/tty
         revive_worktree_session "$session_name" "$wt_path" || return 1
     fi

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const defaultMasterPercent = 60
@@ -153,15 +154,35 @@ func (s *Store) reflowWindow(w Worktree, window string) error {
 	if percent < 20 || percent > 80 {
 		percent = defaultMasterPercent
 	}
-	dims, err := tmux("display-message", "-p", "-t", window, "#{window_width} #{window_height}")
-	if err != nil {
-		return err
-	}
 	var width, height int
-	fmt.Sscan(dims, &width, &height)
 	desired := []string{}
 	for _, id := range order {
 		desired = append(desired, byID[id])
+	}
+	// A newly created detached tmux window can briefly report 1x1 before the
+	// server applies its default/client dimensions. Avoid turning that transient
+	// state into a failed restore and a manual second attempt.
+	for attempt := 0; attempt < 20; attempt++ {
+		dims, e := tmux("display-message", "-p", "-t", window, "#{window_width} #{window_height}")
+		if e != nil {
+			return e
+		}
+		width, height = 0, 0
+		if _, e = fmt.Sscan(dims, &width, &height); e != nil {
+			return e
+		}
+		minHeight := 1
+		if len(desired) > 1 {
+			minHeight = (len(desired)-1)*2 - 1
+		}
+		if width >= 3 || len(desired) == 1 {
+			if height >= minHeight {
+				break
+			}
+		}
+		if attempt < 19 {
+			time.Sleep(10 * time.Millisecond)
+		}
 	}
 	layout, err := stackLayout(width, height, percent, desired)
 	if err != nil {

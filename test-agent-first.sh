@@ -110,6 +110,7 @@ wt ls simple | grep -q demo
 wt restore demo > "$priv/restored.json"
 sleep .4
 wt restore demo > "$priv/repeated.json"
+[[ $(tmux show-option -qv -t demo @wt-restore-complete) == 1 ]]
 [[ ! -e "$priv/unsafe-replay" ]]
 restored_diff=$(wt view show demo "$(jq -r .id "$priv/diff.json")" | jq -r .pane)
 restored_main=$(wt view list demo | jq -r --arg id "$first" '.[] | select(.kind=="agent" and .target==$id) | .pane')
