@@ -81,6 +81,13 @@ if [[ -n "${WT_PI_SUBAGENTS_SOURCE:-}" && -f "$HOME/.pi/agent/settings.json" ]];
     fi
 fi
 
+# Modern new Pi sessions use durable; require its locked local runtime before
+# any install side effects. Non-Pi installations need not install Node packages.
+# WT_INSTALL_DURABLE=1 also bootstraps explicitly when Pi is not detected.
+if command -v pi &>/dev/null || [[ "${WT_INSTALL_DURABLE:-0}" == 1 ]]; then
+    bash "$SCRIPT_DIR/bin/wt-durable-bootstrap"
+fi
+
 # Build before agent detection so the registry really is the only roster wt
 # maintains. Adding an agent should not require another hard-coded shell list.
 echo "Building wt-state..."

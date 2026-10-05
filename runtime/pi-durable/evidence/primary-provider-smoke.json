@@ -1,0 +1,9 @@
+{
+  "status": "failed",
+  "provider": "openai-codex",
+  "model": "gpt-6.1-sol",
+  "phase": "interactive close",
+  "authUnchanged": true,
+  "limits": { "requests": 3, "maxOutputTokensPerRequest": 256, "requestSeconds": 20, "overallSeconds": 60 },
+  "notes": "Initial proof used an answer/idle pane predicate, not committed settlement, so answer/provider completion was not authoritative. A single supervisor-approved diagnostic repeat replaced that predicate and separated phase deadlines; see primary-provider-diagnostic.json. No post-fix paid run was performed."
+}

@@ -28,12 +28,31 @@ func worktreeCommand(s *Store, args []string) error {
 	if len(args) == 0 {
 		return errors.New("commands: new roots agents checkout view message snapshot restore")
 	}
+	if err := s.authorizeDurableTaskCommand(args); err != nil {
+		return err
+	}
 	cmd, args := args[0], args[1:]
+	if cmd == "_durable-human-stop" {
+		if len(args) != 0 {
+			return errors.New("human self-stop accepts only JSON")
+		}
+		return s.durableHumanStop(os.Stdin)
+	}
 	if cmd == "_run-native-host" {
 		if len(args) != 4 {
 			return errors.New("native host requires root, child, runtime and private launch path")
 		}
 		return s.runDelegationHost(args[0], args[1], args[2], args[3])
+	}
+	if cmd == "_durable-jobs" {
+		if len(args) != 1 {
+			return errors.New("durable jobs require one v1 operation and JSON on stdin")
+		}
+		result, err := durableJobsCommand(s, args[0], os.Stdin)
+		if err == nil {
+			printJSON(result)
+		}
+		return err
 	}
 	if cmd == "_delegation" {
 		if len(args) != 1 {
@@ -214,6 +233,8 @@ func worktreeCommand(s *Store, args []string) error {
 		cwd := fs.String("cwd", "", "working directory (no checkout attachment)")
 		open := fs.Bool("switch", false, "focus new agent")
 		offline := fs.Bool("offline", false, "persist without launching tmux")
+		backend := fs.String("backend", "durable", "Pi backend for modern new sessions: durable or explicit native")
+		readOnly := fs.Bool("read-only", false, "durable host read-only coding ceiling")
 		if err := fs.Parse(args); err != nil {
 			return err
 		}
@@ -229,9 +250,21 @@ func worktreeCommand(s *Store, args []string) error {
 		if explicitCwd && *cwd == "" {
 			return errors.New("explicit --cwd must be an existing directory")
 		}
+		if (*backend != "native" && *backend != "durable") || (*readOnly && *backend != "durable") {
+			return errors.New("unsupported Pi backend/permission selection")
+		}
 		w, err := s.createNamedRoot(name, *cwd)
 		if err != nil {
 			return err
+		}
+		if *backend == "durable" {
+			if err = s.initializeDurable(w, w.Agents[0].ID, *readOnly); err != nil {
+				return err
+			}
+			w, err = s.Worktree(w.ID)
+			if err != nil {
+				return err
+			}
 		}
 		if !*offline {
 			l, err := s.rootLock(w)
@@ -391,6 +424,11 @@ func worktreeCommand(s *Store, args []string) error {
 	switch group {
 	case "agents":
 		switch cmd {
+		case "durable-init":
+			if actor != "" || len(args) != 1 {
+				return errors.New("durable-init requires human and fresh agent ID")
+			}
+			return s.initializeDurable(w, args[0])
 		case "create":
 			if len(args) == 0 {
 				return errors.New("usage: wt agents create ROOT NAME [--parent ID] [--cwd root|CHECKOUT] [--open]")
@@ -401,8 +439,13 @@ func worktreeCommand(s *Store, args []string) error {
 			target := fs.String("cwd", "root", "root or attached checkout")
 			open := fs.Bool("open", false, "human focus")
 			task := fs.String("task", "", "initial durable delegated request")
+			backend := fs.String("backend", defaultPiBackend(w), "Pi backend: durable for modern roots, explicit native for legacy")
+			readOnly := fs.Bool("read-only", false, "durable host read-only coding ceiling")
 			if err = fs.Parse(args[1:]); err != nil {
 				return err
+			}
+			if (*backend != "native" && *backend != "durable") || (*readOnly && *backend != "durable") {
+				return errors.New("unsupported Pi backend/permission selection")
 			}
 			if actor != "" && *open {
 				return errors.New("agent creation cannot steal focus")
@@ -421,6 +464,15 @@ func worktreeCommand(s *Store, args []string) error {
 			w, err = s.Worktree(w.ID)
 			if err != nil {
 				return err
+			}
+			if *backend == "durable" {
+				if err = s.initializeDurable(w, id, *readOnly); err != nil {
+					return err
+				}
+				w, err = s.Worktree(w.ID)
+				if err != nil {
+					return err
+				}
 			}
 			if *task != "" {
 				sender := actor
@@ -763,6 +815,11 @@ func messageCommand(s *Store, w Worktree, cmd string, args []string, actor strin
 			printJSON(m)
 		}
 		return err
+	case "durable-claim":
+		if len(args) != 1 || actor == "" {
+			return errors.New("durable receipt requires live recipient and message ID")
+		}
+		return s.claimDurableInbox(w.ID, actor, os.Getenv("WT_RUNTIME_ID"), args[0])
 	case "claim", "ack":
 		if len(args) != 1 || actor == "" {
 			return errors.New("receipt requires live recipient identity and message ID")

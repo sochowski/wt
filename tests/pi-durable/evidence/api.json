@@ -1,0 +1,31 @@
+{
+  "sdk": "0.87.1",
+  "tui": "0.87.1",
+  "durable": "1.0.3",
+  "publicSdkExports": [
+    "AssistantMessageComponent",
+    "UserMessageComponent",
+    "ToolExecutionComponent",
+    "CustomEditor",
+    "DynamicBorder",
+    "initTheme",
+    "getMarkdownTheme",
+    "ModelRuntime",
+    "SettingsManager",
+    "loadProjectContextFiles",
+    "loadSkills",
+    "formatSkillsForPrompt",
+    "readStoredCredential"
+  ],
+  "notPublicSdkExports": [
+    "KeybindingsManager",
+    "WorkingStatusIndicator",
+    "InteractiveThemeController",
+    "createAllToolRenderers",
+    "buildSystemPromptSections",
+    "runDurableTui"
+  ],
+  "headlessRender": "passed",
+  "terminalStarted": false,
+  "durableFrontendExported": false
+}

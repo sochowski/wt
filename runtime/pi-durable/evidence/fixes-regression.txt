@@ -1,0 +1,19 @@
+Fix-stage focused compatibility checks (isolated source copies; no production state):
+
+PASS: canonical-TMPDIR test-session-setup.sh with explicit --backend native in this fixture's generated fresh-root menu bindings. Actual WT_FZF_VIM=1 keyboard popups, repo-free/multi-repo/cancellation, stable conversations and dirty originals. Latest artifacts: /private/tmp/wt-durable-fixes-keyboard-acceptance.oRyBar (temporary).
+PASS: same canonical keyboard test on unchanged base HEAD 823410f2069dce43e040b75bcfe3940360e5e4d8.
+Initial keyboard run with its default /tmp artifact path failed no-follow canonical-path protection; canonical artifacts resolve that existing fixture-path issue. First canonical changed-source run exposed another fresh-menu path after startup replaces WT_STATE; moving explicit native selection into the fixture's generated bindings fixed it. Final keyboard pass is after final Go admission/default sources.
+
+FAIL (base AND changed source): test-agent-first.sh; changed-source diagnostic stops at unchanged [[ $(tmux list-panes -s -t demo | wc -l) == 1 ]] assertion (native agents launched explicitly). No unrelated assertion repair.
+FAIL (base AND changed source): test-master-stack.sh; repeat-j navigation assertion, with matching failure kind and differing ephemeral IDs. No navigation changes.
+FAIL (base AND changed source): test-native-install.sh; changed-source diagnostic stops at unchanged jq .packages shape assertion. Install itself completed in the disposable source/fake HOME. No settings-shape repair. Separately, positive final fake-HOME staging install passes, automatically installs locked durable packages when Pi detected, and preserves the native paired package.
+
+Known full ./test.sh nine canonical baseline failures were already independently reproduced in stage one/parent recovery. The full suite was not repeated or repaired during this fix stage. Stage-one tests/pi-durable and its 17/17 recovery evidence were preserved, not modified/re-exercised.
+
+Commands:
+TMPDIR=/private/tmp bash test-agent-first.sh (disposable final source and git archive HEAD copies)
+TMPDIR=/private/tmp bash test-master-stack.sh (disposable final source and git archive HEAD copies)
+TMPDIR=/private/tmp WT_NATIVE_INSTALL_TEST_ISOLATED=1 bash test-native-install.sh (disposable final source and git archive HEAD copies)
+TMPDIR=/private/tmp WT_SETUP_TEST_ARTIFACTS=<canonical private directory> bash test-session-setup.sh (disposable final source and git archive HEAD copies)
+
+No actual provider calls in compatibility fixtures. Private servers cleaned by harnesses. Temporary diagnostics/copies are supplemental; essential production runtime/Go/private proofs are retained in fixes-*.tap/json/log/txt.

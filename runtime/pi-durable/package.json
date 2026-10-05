@@ -1,0 +1,13 @@
+{
+  "name": "wt-pi-durable-runtime",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22.22.0 <23" },
+  "scripts": { "test": "node run-tests.mjs", "test:integration": "node --test private-jobs.test.mjs" },
+  "dependencies": {
+    "@earendil-works/pi-durable": "1.0.3",
+    "@earendil-works/pi-ai": "1.0.3",
+    "@earendil-works/chord": "1.0.3",
+    "@earendil-works/pi-tui": "0.87.1"
+  }
+}

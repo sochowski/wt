@@ -61,7 +61,9 @@ git -C "$priv/repos/alpha" status --porcelain=v1 > "$artifacts/original-before.t
 git -C "$priv/repos/alpha" write-tree > "$artifacts/index-before.txt"
 # Include a manual-only source path containing shell/transport punctuation.
 mv "$priv/repos/gamma" "$priv/manual : ' gamma"
-cp "$repo/config/wt-menu.conf" "$HOME/.config/wt/wt-menu.conf"
+# Explicit native flags live in this fixture's generated bindings, including
+# later popups after managed startup replaces WT_STATE with its executable.
+sed 's/wt setup/wt setup --backend native/g' "$repo/config/wt-menu.conf" > "$HOME/.config/wt/wt-menu.conf"
 tmux -L default -f /dev/null new-session -d -s sentinel -x 150 -y 45 'sleep 600'
 "$repo/bin/wt-bind-menu"
 python3 "$repo/staging/session-setup-keyboard.py" "$artifacts"

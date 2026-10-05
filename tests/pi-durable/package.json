@@ -1,0 +1,12 @@
+{
+  "name": "wt-pi-durable-contract-probes",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22.19.0" },
+  "scripts": { "test": "node run-tests.mjs", "smoke": "node smoke.mjs" },
+  "dependencies": {
+    "@earendil-works/pi-durable": "1.0.3",
+    "@earendil-works/pi-ai": "1.0.3",
+    "@earendil-works/chord": "1.0.3"
+  }
+}

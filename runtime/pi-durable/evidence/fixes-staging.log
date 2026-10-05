@@ -1,0 +1,102 @@
+Setting up wt staging under a fake HOME: /private/tmp/wt-durable-fixes-stage-final.DZ51Vq/home
+Running install.sh into the sandbox...
+Installing wt - Worktree Manager for Multi-Agent CLI
+=====================================================
+
+Checking dependencies...
+  git: ok
+  tmux: ok
+  fzf: ok
+  jq: ok
+  go: ok
+  gh: ok (optional)
+npm warn deprecated node-domexception@1.0.0: Use your platform's native DOMException instead
+
+added 93 packages, and audited 94 packages in 3s
+
+6 packages are looking for funding
+  run `npm fund` for details
+
+found 0 vulnerabilities
+npm notice
+npm notice New major version of npm available! 10.9.4 -> 12.2.0
+npm notice Changelog: https://github.com/npm/cli/releases/tag/v12.2.0
+npm notice To update run: npm install -g npm@12.2.0
+npm notice
+Building wt-state...
+  wt-state -> /Users/aidan/worktrees/wt-10cf5bfbd50f/wt-durable/bin/wt-state
+  agents: claude codex gemini opencode pi
+
+Creating directories...
+Symlinking scripts to /private/tmp/wt-durable-fixes-stage-final.DZ51Vq/home/bin...
+  claude-ide -> /private/tmp/wt-durable-fixes-stage-final.DZ51Vq/home/bin/claude-ide
+  wt -> /private/tmp/wt-durable-fixes-stage-final.DZ51Vq/home/bin/wt
+  wt-agent-launch -> /private/tmp/wt-durable-fixes-stage-final.DZ51Vq/home/bin/wt-agent-launch
+  wt-bind-menu -> /private/tmp/wt-durable-fixes-stage-final.DZ51Vq/home/bin/wt-bind-menu
+  wt-diff-watch -> /private/tmp/wt-durable-fixes-stage-final.DZ51Vq/home/bin/wt-diff-watch
+  wt-durable-bootstrap -> /private/tmp/wt-durable-fixes-stage-final.DZ51Vq/home/bin/wt-durable-bootstrap
+  wt-hook -> /private/tmp/wt-durable-fixes-stage-final.DZ51Vq/home/bin/wt-hook
+  wt-present -> /private/tmp/wt-durable-fixes-stage-final.DZ51Vq/home/bin/wt-present
+  wt-shell-log -> /private/tmp/wt-durable-fixes-stage-final.DZ51Vq/home/bin/wt-shell-log
+  wt-state -> /private/tmp/wt-durable-fixes-stage-final.DZ51Vq/home/bin/wt-state
+  wt-tmux-status -> /private/tmp/wt-durable-fixes-stage-final.DZ51Vq/home/bin/wt-tmux-status
+Migrating existing session state into SQLite...
+migrated 0 session(s) from /private/tmp/wt-durable-fixes-stage-final.DZ51Vq/home/.local/state/wt
+Symlinking tmux config...
+  tmux-wt.conf -> /private/tmp/wt-durable-fixes-stage-final.DZ51Vq/home/.config/wt/tmux-wt.conf
+  tmux-panes.conf -> /private/tmp/wt-durable-fixes-stage-final.DZ51Vq/home/.config/wt/tmux-panes.conf
+Symlinking menu config...
+  wt-menu.conf -> /private/tmp/wt-durable-fixes-stage-final.DZ51Vq/home/.config/wt/wt-menu.conf
+Configuring agent hooks...
+  claude: installed hooks (v1) → /private/tmp/wt-durable-fixes-stage-final.DZ51Vq/home/.claude/settings.json
+  codex: installed hooks (v2) → /private/tmp/wt-durable-fixes-stage-final.DZ51Vq/home/.codex/config.toml
+  gemini: installed hooks (v1) → /private/tmp/wt-durable-fixes-stage-final.DZ51Vq/home/.gemini/settings.json
+  opencode: installed hooks (v1) → /private/tmp/wt-durable-fixes-stage-final.DZ51Vq/home/.config/opencode/plugins/wt-status.js
+  pi: installed hooks (v1) → /private/tmp/wt-durable-fixes-stage-final.DZ51Vq/home/.pi/agent/extensions/wt
+  pi-subagents native-provider v1 -> /private/tmp/wt-durable-fixes-stage-final.DZ51Vq/native
+Installing wt agent skill...
+  wt -> /private/tmp/wt-durable-fixes-stage-final.DZ51Vq/home/.agents/skills/wt
+  wt -> /private/tmp/wt-durable-fixes-stage-final.DZ51Vq/home/.claude/skills/wt
+  wt -> /private/tmp/wt-durable-fixes-stage-final.DZ51Vq/home/.gemini/skills/wt
+
+Note: /private/tmp/wt-durable-fixes-stage-final.DZ51Vq/home/bin is not in your PATH.
+Add this to your ~/.bashrc or ~/.zshrc:
+
+  export PATH="$HOME/bin:$PATH"
+
+Configuring tmux integration...
+  Created /private/tmp/wt-durable-fixes-stage-final.DZ51Vq/home/.tmux.conf with wt config
+
+  Reload tmux config with: tmux source-file ~/.tmux.conf
+
+=====================================================
+Installation complete!
+
+Quick start:
+  wt ls           # List worktrees
+  wt new          # Create new worktree (interactive)
+  wt pick         # Switch between worktrees
+  wt master       # Create master orchestrator session
+  $wt-shells      # Teach an agent to manage persistent shells
+
+Tmux keybindings:
+  prefix + c      # Create a managed shell (inside worktree sessions)
+  prefix + w      # Action menu (new, delete, PR, master)
+  prefix + W      # Session switcher (choose-tree with status)
+  prefix + M      # Jump to master session
+
+Staging ready.  Everything below lives under /private/tmp/wt-durable-fixes-stage-final.DZ51Vq/home — nothing touched your real setup.
+  fake HOME     = /private/tmp/wt-durable-fixes-stage-final.DZ51Vq/home
+  wt binary     = /private/tmp/wt-durable-fixes-stage-final.DZ51Vq/home/bin/wt  ->  /Users/aidan/worktrees/wt-10cf5bfbd50f/wt-durable/bin/wt   (edits here apply live)
+  state / db    = /private/tmp/wt-durable-fixes-stage-final.DZ51Vq/home/.local/state/wt
+  hooks         = /private/tmp/wt-durable-fixes-stage-final.DZ51Vq/home/.claude/settings.json  (isolated copy)
+                  /private/tmp/wt-durable-fixes-stage-final.DZ51Vq/home/.pi/agent/extensions/wt
+  tmux config   = /private/tmp/wt-durable-fixes-stage-final.DZ51Vq/home/.tmux.conf             (isolated copy)
+  demo repo     = /private/tmp/wt-durable-fixes-stage-final.DZ51Vq/home/src/demo-repo
+  agent         = stub (no real CLI launched)
+
+Reset just the data:  ./staging.sh --clean && ./staging.sh
+
+Not a TTY. Drive it non-interactively, e.g.:
+  ./staging.sh   # from a real terminal to attach
+Staging sandbox removed: /private/tmp/wt-durable-fixes-stage-final.DZ51Vq/home

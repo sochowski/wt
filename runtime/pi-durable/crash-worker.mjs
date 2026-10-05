@@ -1,0 +1,11 @@
+import { readFileSync } from 'node:fs';
+import { createModels } from '@earendil-works/pi-ai/models';
+import { fauxProvider, fauxAssistantMessage } from '@earendil-works/pi-ai/providers/faux';
+import { openRuntime, context } from './runtime.mjs';
+import { LiveDoc } from '@earendil-works/pi-durable';
+const faux=fauxProvider({tokensPerSecond:20}); faux.setResponses([fauxAssistantMessage('partial '.repeat(1000))]); const models=createModels();models.setProvider(faux.provider);
+const runtime=await openRuntime(JSON.parse(readFileSync(process.argv[2],'utf8')),{models,fence:async()=>{}});
+const s=await runtime.input('recover after real process kill','followUp','runtime-kill');
+while(!(await runtime.harness.snapshot(LiveDoc,runtime.root.id,context))?.generation?.message)await new Promise(r=>setTimeout(r,10));
+process.send({submission:s.id});
+setInterval(()=>{},1000);

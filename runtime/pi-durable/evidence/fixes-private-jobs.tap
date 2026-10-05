@@ -1,0 +1,17 @@
+TAP version 13
+# Subtest: compiled WT/private tmux: independent writer/reviewer stores, SIGKILL publication recovery, parallel admission, budgets, peers and focus protections
+ok 1 - compiled WT/private tmux: independent writer/reviewer stores, SIGKILL publication recovery, parallel admission, budgets, peers and focus protections
+  ---
+  duration_ms: 34491.881458
+  type: 'test'
+  ...
+# Last private-fixture phase: completed
+1..1
+# tests 1
+# suites 0
+# pass 1
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 34536.52175

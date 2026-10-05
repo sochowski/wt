@@ -101,7 +101,7 @@ const presentParameters = {
   },
 }
 
-const deckParameters = {
+export const deckParameters = {
   type: "object",
   additionalProperties: false,
   required: ["title", "scenes"],
@@ -133,7 +133,7 @@ const deckParameters = {
   },
 }
 
-function runPresentationCommand(command, session, cwd, action, payload, signal) {
+export function runPresentationCommand(command, session, cwd, action, payload, signal) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, [action, "--session", session], {
       cwd,

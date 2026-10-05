@@ -1,0 +1,162 @@
+
+> test
+> node run-tests.mjs
+
+TAP version 13
+# Subtest: Pi install requires locked durable bootstrap by default and fails before HOME install mutations when Node/npm fail
+ok 1 - Pi install requires locked durable bootstrap by default and fails before HOME install mutations when Node/npm fail
+  ---
+  duration_ms: 523.516042
+  type: 'test'
+  ...
+# (node:12492) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: real pinned writer tools + host receipts + immutable publication recovery do not rerun submission
+ok 2 - real pinned writer tools + host receipts + immutable publication recovery do not rerun submission
+  ---
+  duration_ms: 543.498625
+  type: 'test'
+  ...
+# Subtest: independent reviewer fixed ceiling requires real read and exact writer baseline; uncertainty rejects
+ok 3 - independent reviewer fixed ceiling requires real read and exact writer baseline; uncertainty rejects
+  ---
+  duration_ms: 462.494375
+  type: 'test'
+  ...
+# Subtest: review host evidence disables fsmonitor and rejects executable Git filters before any project program can run
+ok 4 - review host evidence disables fsmonitor and rejects executable Git filters before any project program can run
+  ---
+  duration_ms: 257.940084
+  type: 'test'
+  ...
+# Subtest: actual SIGKILL after unsafe writer effect does not reexecute and cannot become accepted success
+ok 5 - actual SIGKILL after unsafe writer effect does not reexecute and cannot become accepted success
+  ---
+  duration_ms: 542.569125
+  type: 'test'
+  ...
+# Subtest: model JSON alone, incomplete effects, false commands, false paths and acceptance/review omissions are non-success
+ok 6 - model JSON alone, incomplete effects, false commands, false paths and acceptance/review omissions are non-success
+  ---
+  duration_ms: 313.604417
+  type: 'test'
+  ...
+# Subtest: real pinned read/write/edit cannot escape using @, HOME, file URLs, Unicode spaces or fallback symlinks
+ok 7 - real pinned read/write/edit cannot escape using @, HOME, file URLs, Unicode spaces or fallback symlinks
+  ---
+  duration_ms: 252.775208
+  type: 'test'
+  ...
+# Subtest: mandatory reviewer requires every changed artifact and criterion-bound host read receipts; ignored output is in exact snapshot
+ok 8 - mandatory reviewer requires every changed artifact and criterion-bound host read receipts; ignored output is in exact snapshot
+  ---
+  duration_ms: 471.723542
+  type: 'test'
+  ...
+# Subtest: actual error/no-content/truncated reads never count as independent review evidence; deleted files require retained host diff read
+ok 9 - actual error/no-content/truncated reads never count as independent review evidence; deleted files require retained host diff read
+  ---
+  duration_ms: 722.534916
+  type: 'test'
+  ...
+# Subtest: real writer git-add/index hiding flags deny success; preserved preexisting staged baseline passes; no transient-stage guarantee
+ok 10 - real writer git-add/index hiding flags deny success; preserved preexisting staged baseline passes; no transient-stage guarantee
+  ---
+  duration_ms: 2006.152541
+  type: 'test'
+  ...
+# Subtest: retained success revalidates current contract/snapshot without another unsafe execution or publication
+ok 11 - retained success revalidates current contract/snapshot without another unsafe execution or publication
+  ---
+  duration_ms: 497.340666
+  type: 'test'
+  ...
+# Subtest: context precedence, scalar skill discovery, trust and no executable/project settings load
+ok 12 - context precedence, scalar skill discovery, trust and no executable/project settings load
+  ---
+  duration_ms: 15.173917
+  type: 'test'
+  ...
+# Subtest: read-only credential store accepts standard keys and fresh OAuth; rejects commands, malformed and expired without writes/secrets
+ok 13 - read-only credential store accepts standard keys and fresh OAuth; rejects commands, malformed and expired without writes/secrets
+  ---
+  duration_ms: 3.29875
+  type: 'test'
+  ...
+# (node:12494) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: exact envelope rejects store confusion, missing stores, cwd, definition and stale runtime BEFORE open/reconciliation
+ok 14 - exact envelope rejects store confusion, missing stores, cwd, definition and stale runtime BEFORE open/reconciliation
+  ---
+  duration_ms: 22.4065
+  type: 'test'
+  ...
+# Subtest: immutable inbox admission reconciles submission ID without second provider call; notifications never wake
+ok 15 - immutable inbox admission reconciles submission ID without second provider call; notifications never wake
+  ---
+  duration_ms: 122.996875
+  type: 'test'
+  ...
+# Subtest: validated relaunch resumes unfinished work; explicit abort stays cancelled and model/thinking persist
+ok 16 - validated relaunch resumes unfinished work; explicit abort stays cancelled and model/thinking persist
+  ---
+  duration_ms: 532.292
+  type: 'test'
+  ...
+# Subtest: actual SIGKILL/reopen through production runtime retains and retries unfinished submission
+ok 17 - actual SIGKILL/reopen through production runtime retains and retries unfinished submission
+  ---
+  duration_ms: 312.690958
+  type: 'test'
+  ...
+# Subtest: public TUI real editor input, committed render, model/thinking and terminal close lifecycle
+ok 18 - public TUI real editor input, committed render, model/thinking and terminal close lifecycle
+  ---
+  duration_ms: 112.175
+  type: 'test'
+  ...
+# Subtest: settled close releases exact public provider-session resources and owner exits without forced process.exit
+ok 19 - settled close releases exact public provider-session resources and owner exits without forced process.exit
+  ---
+  duration_ms: 209.819583
+  type: 'test'
+  ...
+# Subtest: configured primary provider/model is exact; missing or unsupported model fails before root creation without a Haiku fallback
+ok 20 - configured primary provider/model is exact; missing or unsupported model fails before root creation without a Haiku fallback
+  ---
+  duration_ms: 7.371208
+  type: 'test'
+  ...
+# Subtest: read-only host has fixed tools, no generic bash/WT mutations and an environment mutation/spawn veto
+ok 21 - read-only host has fixed tools, no generic bash/WT mutations and an environment mutation/spawn veto
+  ---
+  duration_ms: 14.51425
+  type: 'test'
+  ...
+# Subtest: explicit TUI human /stop calls only private self control and closes; model tools do not expose human control
+ok 22 - explicit TUI human /stop calls only private self control and closes; model tools do not expose human control
+  ---
+  duration_ms: 18.681167
+  type: 'test'
+  ...
+# Subtest: production TUI busy steering and followUp inputs reach real pinned durable scheduler and committed transcript
+ok 23 - production TUI busy steering and followUp inputs reach real pinned durable scheduler and committed transcript
+  ---
+  duration_ms: 584.323083
+  type: 'test'
+  ...
+# Subtest: durable presentation resolves assigned target and versioned managed transport; never legacy wt-present
+ok 24 - durable presentation resolves assigned target and versioned managed transport; never legacy wt-present
+  ---
+  duration_ms: 1.564583
+  type: 'test'
+  ...
+1..24
+# tests 24
+# suites 0
+# pass 24
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 6438.807125

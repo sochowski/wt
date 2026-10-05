@@ -1,0 +1,325 @@
+{
+  "status": "failed",
+  "provider": "openai-codex",
+  "model": "gpt-6.1-sol",
+  "phase": "interactive close",
+  "authUnchanged": true,
+  "checkpoints": [
+    {
+      "phase": "interactive startup",
+      "elapsedMs": 2409,
+      "host": "interactive-started"
+    },
+    {
+      "phase": "bounded provider input/committed settlement",
+      "elapsedMs": 2432,
+      "owner": {
+        "stage": "view",
+        "at": 1791221180889,
+        "submission": null,
+        "live": {
+          "run": false,
+          "generation": false,
+          "tools": 0
+        },
+        "tasks": []
+      }
+    },
+    {
+      "phase": "bounded provider input/committed settlement",
+      "elapsedMs": 2484,
+      "owner": {
+        "stage": "view",
+        "at": 1791221181389,
+        "submission": {
+          "id": 8,
+          "status": "placed"
+        },
+        "live": {
+          "run": true,
+          "generation": true,
+          "tools": 0
+        },
+        "tasks": [
+          {
+            "id": 9,
+            "state": "running"
+          }
+        ]
+      }
+    },
+    {
+      "phase": "bounded provider input/committed settlement",
+      "elapsedMs": 3057,
+      "owner": {
+        "stage": "view",
+        "at": 1791221181957,
+        "submission": {
+          "id": 8,
+          "status": "placed"
+        },
+        "live": {
+          "run": true,
+          "generation": true,
+          "tools": 0
+        },
+        "tasks": [
+          {
+            "id": 9,
+            "state": "running"
+          }
+        ]
+      }
+    },
+    {
+      "phase": "bounded provider input/committed settlement",
+      "elapsedMs": 4043,
+      "owner": {
+        "stage": "view",
+        "at": 1791221182968,
+        "submission": {
+          "id": 8,
+          "status": "placed"
+        },
+        "live": {
+          "run": true,
+          "generation": true,
+          "tools": 0
+        },
+        "tasks": [
+          {
+            "id": 9,
+            "state": "running"
+          }
+        ]
+      }
+    },
+    {
+      "phase": "bounded provider input/committed settlement",
+      "elapsedMs": 4821,
+      "owner": {
+        "stage": "view",
+        "at": 1791221183704,
+        "submission": {
+          "id": 8,
+          "status": "placed"
+        },
+        "live": {
+          "run": true,
+          "generation": true,
+          "tools": 0
+        },
+        "tasks": [
+          {
+            "id": 9,
+            "state": "running"
+          }
+        ]
+      }
+    },
+    {
+      "phase": "bounded provider input/committed settlement",
+      "elapsedMs": 4925,
+      "owner": {
+        "stage": "view",
+        "at": 1791221183849,
+        "submission": {
+          "id": 8,
+          "status": "placed"
+        },
+        "live": {
+          "run": true,
+          "generation": true,
+          "tools": 0
+        },
+        "tasks": [
+          {
+            "id": 9,
+            "state": "running"
+          }
+        ]
+      }
+    },
+    {
+      "phase": "bounded provider input/committed settlement",
+      "elapsedMs": 5080,
+      "owner": {
+        "stage": "view",
+        "at": 1791221183997,
+        "submission": {
+          "id": 8,
+          "status": "placed"
+        },
+        "live": {
+          "run": true,
+          "generation": false,
+          "tools": 0
+        },
+        "tasks": [
+          {
+            "id": 14,
+            "state": "running"
+          }
+        ]
+      }
+    },
+    {
+      "phase": "bounded provider input/committed settlement",
+      "elapsedMs": 5133,
+      "owner": {
+        "stage": "view",
+        "at": 1791221184009,
+        "submission": {
+          "id": 8,
+          "status": "placed"
+        },
+        "live": {
+          "run": true,
+          "generation": true,
+          "tools": 0
+        },
+        "tasks": [
+          {
+            "id": 14,
+            "state": "running"
+          }
+        ]
+      }
+    },
+    {
+      "phase": "bounded provider input/committed settlement",
+      "elapsedMs": 6069,
+      "owner": {
+        "stage": "view",
+        "at": 1791221184969,
+        "submission": {
+          "id": 8,
+          "status": "placed"
+        },
+        "live": {
+          "run": true,
+          "generation": true,
+          "tools": 0
+        },
+        "tasks": [
+          {
+            "id": 14,
+            "state": "running"
+          }
+        ]
+      }
+    },
+    {
+      "phase": "bounded provider input/committed settlement",
+      "elapsedMs": 7001,
+      "owner": {
+        "stage": "view",
+        "at": 1791221185926,
+        "submission": {
+          "id": 8,
+          "status": "placed"
+        },
+        "live": {
+          "run": true,
+          "generation": true,
+          "tools": 0
+        },
+        "tasks": [
+          {
+            "id": 14,
+            "state": "running"
+          }
+        ]
+      }
+    },
+    {
+      "phase": "bounded provider input/committed settlement",
+      "elapsedMs": 7053,
+      "owner": {
+        "stage": "view",
+        "at": 1791221185970,
+        "submission": {
+          "id": 8,
+          "status": "placed"
+        },
+        "live": {
+          "run": true,
+          "generation": true,
+          "tools": 0
+        },
+        "tasks": [
+          {
+            "id": 14,
+            "state": "running"
+          }
+        ]
+      }
+    },
+    {
+      "phase": "bounded provider input/committed settlement",
+      "elapsedMs": 7157,
+      "owner": {
+        "stage": "view",
+        "at": 1791221186051,
+        "submission": {
+          "id": 8,
+          "status": "placed"
+        },
+        "live": {
+          "run": true,
+          "generation": true,
+          "tools": 0
+        },
+        "tasks": [
+          {
+            "id": 14,
+            "state": "running"
+          }
+        ]
+      }
+    },
+    {
+      "phase": "bounded provider input/committed settlement",
+      "elapsedMs": 7313,
+      "owner": {
+        "stage": "view",
+        "at": 1791221186224,
+        "submission": {
+          "id": 8,
+          "status": "done"
+        },
+        "live": {
+          "run": false,
+          "generation": false,
+          "tools": 0
+        },
+        "tasks": []
+      }
+    },
+    {
+      "phase": "bounded provider input/committed settlement",
+      "elapsedMs": 7313,
+      "host": "committed-submission-done/no-live-work"
+    },
+    {
+      "phase": "interactive close",
+      "elapsedMs": 7425,
+      "owner": {
+        "stage": "closed",
+        "at": 1791221186284
+      }
+    }
+  ],
+  "ownerStatus": {
+    "stage": "closed",
+    "at": 1791221186284
+  },
+  "limits": {
+    "requests": 3,
+    "maxOutputTokensPerRequest": 256,
+    "requestSeconds": 20,
+    "generationSeconds": 60,
+    "closeSeconds": 15,
+    "overallSeconds": 90
+  }
+}

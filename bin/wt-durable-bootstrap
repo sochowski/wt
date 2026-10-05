@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Install only the private checkout's pinned durable dependency closure. No agent
+# login/settings/hooks and no production activation. install.sh calls this only
+# when Pi is present (modern new-session default), or WT_INSTALL_DURABLE=1.
+set -euo pipefail
+SOURCE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+node -e 'const [major, minor] = process.versions.node.split(".").map(Number); if (major !== 22 || minor < 22) { console.error("wt durable requires Node 22.22+ (22.x)"); process.exit(1); }'
+npm --prefix "$SOURCE/runtime/pi-durable" ci --ignore-scripts

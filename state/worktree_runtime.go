@@ -142,6 +142,12 @@ func stoppedCommand(problem string) string {
 
 // strictPiArgs never invokes the legacy exact -> cwd-latest -> fresh ladder.
 func strictPiArgs(a AgentSession) ([]string, error) {
+	if a.Adapter.Backend == "durable" {
+		return durableLaunchArgs(a)
+	}
+	if a.Adapter.Backend != "" && a.Adapter.Backend != "native" {
+		return nil, errors.New("unsupported agent backend")
+	}
 	if a.Profile != "pi" {
 		return nil, fmt.Errorf("exact restore unsupported for profile %s; use its legacy launcher manually", a.Profile)
 	}
@@ -214,6 +220,9 @@ func (s *Store) viewCommand(w Worktree, v View) (string, string, error) {
 		// delegated children (e.g. completed workers/reviewers) therefore restore
 		// as quiet placeholders instead of tripping the host fence on every revive.
 		if a.Stopped {
+			if d := a.Adapter.Durable; d != nil && d.Job != "" && !d.Initialized {
+				return "", "", errors.New("durable task awaiting exact bootstrap")
+			}
 			return stoppedCommand("agent stopped"), w.Cwd, nil
 		}
 		delegated, e := s.isDelegatedChild(w.ID, a.ID)
@@ -223,8 +232,11 @@ func (s *Store) viewCommand(w Worktree, v View) (string, string, error) {
 		if delegated {
 			return "", "", errors.New("delegated conversation requires its admitted interactive host; ordinary Pi launch is forbidden (the owning pi-subagents run must relaunch it, or stop the child)")
 		}
-		if a.Runtime != "" && a.NativeID == "" {
+		if a.Runtime != "" && a.NativeID == "" && a.Adapter.Backend != "durable" {
 			return "", "", errors.New("previous launch has no captured native identity; refusing a fresh replacement")
+		}
+		if e = s.durableJobRunnable(a); e != nil {
+			return "", "", e
 		}
 		if _, e = strictPiArgs(a); e != nil {
 			return "", "", e
@@ -444,8 +456,12 @@ func (s *Store) restore(w Worktree) (err error) {
 			}
 			dead, _ := tmux("display-message", "-p", "-t", p, "#{pane_dead}")
 			if dead == "1" && v.Kind == "agent" {
-				if _, err = s.db.Exec(`UPDATE roots SET wake_enabled=0 WHERE id=?`, w.ID); err != nil {
-					return err
+				a, _ := w.agent(v.Target)
+				finishedTask := a.Stopped && a.Adapter.Durable != nil && a.Adapter.Durable.Job != ""
+				if !finishedTask {
+					if _, err = s.db.Exec(`UPDATE roots SET wake_enabled=0 WHERE id=?`, w.ID); err != nil {
+						return err
+					}
 				}
 				if err = s.launchView(w, v, p); err != nil {
 					return err
@@ -493,6 +509,15 @@ func (s *Store) restore(w Worktree) (err error) {
 	return err
 }
 func (s *Store) launchView(w Worktree, v View, pane string) error {
+	// Durable owners can finish/crash during reflow. Retain their managed
+	// panes so recovery/publication cannot race tmux window removal.
+	if v.Kind == "agent" {
+		if a, e := w.agent(v.Target); e == nil && a.Adapter.Backend == "durable" {
+			if _, e = tmux("set-option", "-p", "-t", pane, "remain-on-exit", "on"); e != nil {
+				return e
+			}
+		}
+	}
 	cmd, cwd, err := s.viewCommand(w, v)
 	problem := ""
 	if err != nil {
@@ -640,6 +665,9 @@ func (s *Store) runAgent(w Worktree, id, token string) error {
 	if delegated {
 		return errors.New("delegated conversation requires its admitted interactive host; ordinary Pi launch is forbidden")
 	}
+	if err = s.durableJobRunnable(a); err != nil {
+		return err
+	}
 	lock, err := lockFile(nodeLockPath(id))
 	if err != nil {
 		return err
@@ -652,7 +680,9 @@ func (s *Store) runAgent(w Worktree, id, token string) error {
 	// Agent-first launches bypass the legacy session-setup path. Seed the
 	// selected cwd just before launch so Pi and other MCP-aware extensions see
 	// WT's default profile, while preserving any project-owned .mcp.json.
-	ensureMCPProfile(a.Cwd, wtConfigDir(), "default")
+	if a.Adapter.Backend != "durable" {
+		ensureMCPProfile(a.Cwd, wtConfigDir(), "default")
+	}
 	var transcriptLock *os.File
 	if a.Adapter.File != "" { // A lock beside the canonical transcript also fences other wt databases.
 		file, e := filepath.EvalSymlinks(a.Adapter.File)
@@ -665,10 +695,64 @@ func (s *Store) runAgent(w Worktree, id, token string) error {
 		}
 		defer transcriptLock.Close()
 	}
-	args = append(args, "--session-dir", filepath.Join(stateDir(), "conversations", a.ID))
+	var durableLock, writerLock *os.File
+	if a.Adapter.Backend == "durable" {
+		durableLock, err = lockFile(a.Adapter.Durable.Store + ".wt-lock")
+		if err != nil {
+			return err
+		}
+		defer durableLock.Close()
+		// All durable coding writers to an assigned checkout share a canonical
+		// lock, including across WT databases. No per-file queue substitutes it.
+		if !a.Adapter.Durable.ReadOnly {
+			writerLock, err = lockFile(a.Adapter.Durable.WriterLock)
+			if err != nil {
+				return err
+			}
+			defer writerLock.Close()
+		}
+	} else {
+		args = append(args, "--session-dir", filepath.Join(stateDir(), "conversations", a.ID))
+	}
 	cmd := exec.Command(args[0], args[1:]...)
 	cmd.Dir = a.Cwd
-	cmd.Env = append(os.Environ(), "WT_ROOT_ID="+w.ID, "WT_AGENT_ID="+a.ID, "WT_RUNTIME_ID="+token, "WT_SESSION="+w.Name, "WT_STATE="+runtimeBinary(), "PI_SUBAGENT_REQUIRED_NATIVE_PROVIDER=wt-interactive-v1")
+	cmd.Env = append(os.Environ(), "WT_ROOT_ID="+w.ID, "WT_AGENT_ID="+a.ID, "WT_RUNTIME_ID="+token, "WT_SESSION="+w.Name, "WT_STATE="+runtimeBinary(), "WT_DB="+dbPath(), "WT_STATUS_DIR="+stateDir())
+	if a.Adapter.Backend == "durable" {
+		// Pass the locked file descriptions to the actual owner. SIGKILL of this
+		// wrapper cannot release fencing while its Node child is still alive.
+		cmd.ExtraFiles = []*os.File{lock, durableLock, writerLock}
+		{
+			d := a.Adapter.Durable
+			// A model's bash subprocess inherits runtime identity, but must not
+			// forge host evidence. Capability is private memory/FD, never env.
+			capability := newID() + newID()
+			column := "writer_key"
+			if d.Role == "reviewer" {
+				column = "reviewer_key"
+			}
+			if d.Job != "" {
+				_, err = s.db.Exec(`UPDATE durable_jobs SET `+column+`=? WHERE id=?`, delegationDigest([]byte(capability)), d.Job)
+			} else {
+				_, err = s.db.Exec(`INSERT OR REPLACE INTO durable_controls(agent_id,runtime,key) VALUES(?,?,?)`, a.ID, token, delegationDigest([]byte(capability)))
+			}
+			if err != nil {
+				return err
+			}
+			reader, writer, e := os.Pipe()
+			if e != nil {
+				return e
+			}
+			defer reader.Close()
+			if _, e = writer.WriteString(capability); e != nil {
+				writer.Close()
+				return e
+			}
+			writer.Close()
+			cmd.ExtraFiles = append(cmd.ExtraFiles, reader) // fd 6; tools inherit only stdio.
+		}
+	} else {
+		cmd.Env = append(cmd.Env, "PI_SUBAGENT_REQUIRED_NATIVE_PROVIDER=wt-interactive-v1")
+	}
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

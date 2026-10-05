@@ -1,0 +1,34 @@
+WT base: 823410f2069dce43e040b75bcfe3940360e5e4d8
+No production source edits; only docs/pi-durable-plan.md and tests/pi-durable added.
+
+./test.sh
+Result: failed; 189 passed / 10 failed.
+Default macOS TMPDIR /var alias caused Go canonical-path fixture failures.
+Full log: /tmp/wt-durable-research/wt-test.log
+
+TMPDIR=$(cd "$TMPDIR" && pwd -P) ./test.sh
+Result: failed; 190 passed / 9 failed. Go unit tests passed.
+Full log: /tmp/wt-durable-research/wt-test-canonical.log
+
+Base comparison:
+git archive HEAD | tar -x -C /tmp/wt-durable-research/baseline
+cd /tmp/wt-durable-research/baseline
+TMPDIR=$(cd "$TMPDIR" && pwd -P) ./test.sh
+Result: failed; 190 passed / 9 failed. Go unit tests passed.
+Full log: /tmp/wt-durable-research/baseline-test.log
+
+Same nine failure categories on base and edited checkout:
+- Pi lifecycle event mapping failed
+- Pi present tool did not send expected Mermaid deck
+- isolated staging install failed
+- managed shell metadata/cwd wrong (/private/var versus /var)
+- wait matched command echo before process output
+- wt-present file scene failed
+- wt-present deck-next failed
+- no-diff presentation socket unavailable
+- adopted main window cwd differs by /private/var versus /var
+
+All harness runs used their private tmux servers / fixture HOME / WT paths.
+The harness cleanup also reported a remaining nonempty temporary HOME in the
+canonical and base runs; no production state was involved. No baseline repairs
+were made as part of this stage.
