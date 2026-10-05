@@ -2736,7 +2736,7 @@ wt - Worktree Manager for Multi-Agent CLI Workflow
 Usage: wt <command> [options]
 
 Session Management:
-  new [name]             Create a named Pi root (generated name if omitted)
+  new [name]             Create a durable Pi root (explicit --backend native for legacy)
   new <repo> <branch>     Create a legacy Git worktree in the background
   new ... --switch        Create and switch to it (default stays in current session)
   pick, p                 Session picker (visible details; ?/Ctrl-P toggles)

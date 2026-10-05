@@ -1,0 +1,37 @@
+{
+  "status": "passed",
+  "provider": "anthropic",
+  "model": "claude-haiku-4-5-20251001",
+  "actualProductionWT": true,
+  "privateTmux": true,
+  "interactiveInputRenderClose": true,
+  "readOnlyHost": true,
+  "actualRead": true,
+  "answer": "WT_DURABLE_INTERACTIVE_OK",
+  "authUnchanged": true,
+  "limits": {
+    "requests": 3,
+    "maxOutputTokensPerRequest": 256,
+    "deadlineSeconds": 60
+  },
+  "usage": {
+    "models": {
+      "anthropic/claude-haiku-4-5-20251001": {
+        "input": 2641,
+        "output": 68,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "totalTokens": 2709,
+        "cost": {
+          "input": 0.002641,
+          "output": 0.00034,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "total": 0.002981
+        },
+        "cacheWrite1h": 0
+      }
+    },
+    "tools": {}
+  }
+}

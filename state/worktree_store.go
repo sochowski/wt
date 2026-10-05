@@ -29,15 +29,18 @@ type AgentSession struct {
 	Adapter  PiSnapshot `json:"adapter"`
 }
 
-// PiSnapshot records only supported native state. No transcript writes by wt.
+// PiSnapshot discriminates exact durable stores from the legacy native adapter.
+// Empty Backend remains native for existing records; no migration is performed.
 type PiSnapshot struct {
-	Version   int    `json:"version"`
-	File      string `json:"file"`
-	Persisted bool   `json:"persisted"`
-	Leaf      string `json:"leaf"`
-	Provider  string `json:"provider"`
-	Model     string `json:"model"`
-	Thinking  string `json:"thinking"`
+	Backend   string           `json:"backend,omitempty"`
+	Durable   *DurableSnapshot `json:"durable,omitempty"`
+	Version   int              `json:"version"`
+	File      string           `json:"file"`
+	Persisted bool             `json:"persisted"`
+	Leaf      string           `json:"leaf"`
+	Provider  string           `json:"provider"`
+	Model     string           `json:"model"`
+	Thinking  string           `json:"thinking"`
 }
 type Checkout struct {
 	ID        string `json:"id"`
@@ -159,10 +162,10 @@ func (s *Store) migrateWorktrees() error {
 	if err = tx.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
 		return err
 	}
-	if version > 5 {
+	if version > 6 {
 		return fmt.Errorf("unsupported database schema %d", version)
 	}
-	if version == 5 {
+	if version == 6 {
 		return tx.Commit()
 	}
 	if version == 0 {
@@ -227,7 +230,12 @@ func (s *Store) migrateWorktrees() error {
 			return err
 		}
 	}
-	if err = migrateDelegationJobs(tx); err != nil {
+	if version < 5 {
+		if err = migrateDelegationJobs(tx); err != nil {
+			return err
+		}
+	}
+	if err = migrateDurableJobs(tx); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -336,6 +344,15 @@ func (w Worktree) targetPath(target string) (string, error) {
 	return "", errors.New("target must be root or an attached checkout ID/alias")
 }
 func (s *Store) addAgent(w Worktree, name, parent, creator, cwd string) (string, error) {
+	if creator != "" {
+		a, err := w.agent(creator)
+		if err != nil {
+			return "", err
+		}
+		if a.Adapter.Durable != nil && a.Adapter.Durable.Job != "" {
+			return "", errors.New("durable task actor cannot create peers or children")
+		}
+	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return "", err
@@ -424,7 +441,17 @@ func (s *Store) updateAgent(root, id, runtime, status, native string, adapter *P
 	if err = checkDelegationNativeUpdate(tx, root, id, native, adapter); err != nil {
 		return err
 	}
+	var previous PiSnapshot
+	if err = json.Unmarshal([]byte(oldAdapter), &previous); err != nil {
+		return err
+	}
+	if previous.Backend == "durable" && (adapter != nil || native != oldNative) {
+		return errors.New("durable identity cannot be changed through the native checkpoint adapter")
+	}
 	if adapter != nil {
+		if adapter.Backend != "" && adapter.Backend != "native" {
+			return errors.New("native checkpoint cannot select another backend")
+		}
 		if adapter.Version != 1 {
 			return errors.New("unsupported Pi adapter version")
 		}

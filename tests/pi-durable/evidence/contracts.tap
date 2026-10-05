@@ -1,0 +1,118 @@
+
+> test
+> node run-tests.mjs
+
+TAP version 13
+# (node:47776) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: requestId is conversation-scoped, deduplicates concurrent retries, but does not validate input body/mode
+ok 1 - requestId is conversation-scoped, deduplicates concurrent retries, but does not validate input body/mode
+  ---
+  duration_ms: 20.605291
+  type: 'test'
+  ...
+# Subtest: close is recoverable; late structural/event snapshots and persisted choices do not schedule; wait resumes
+ok 2 - close is recoverable; late structural/event snapshots and persisted choices do not schedule; wait resumes
+  ---
+  duration_ms: 389.877875
+  type: 'test'
+  ...
+# Subtest: busy queues persist steers/followUps/writes; tool boundary places steer before followUp
+ok 3 - busy queues persist steers/followUps/writes; tool boundary places steer before followUp
+  ---
+  duration_ms: 26.266625
+  type: 'test'
+  ...
+# Subtest: notifications via commit(doc) do not wake; even passive submit(write) starts recovered scheduler
+ok 4 - notifications via commit(doc) do not wake; even passive submit(write) starts recovered scheduler
+  ---
+  duration_ms: 516.660083
+  type: 'test'
+  ...
+# Subtest: explicit abort persists cancellation and does not restart on reopen
+ok 5 - explicit abort persists cancellation and does not restart on reopen
+  ---
+  duration_ms: 257.875375
+  type: 'test'
+  ...
+# Subtest: foreground task ownership bounds parent abort; ownerless peer survives
+ok 6 - foreground task ownership bounds parent abort; ownerless peer survives
+  ---
+  duration_ms: 159.459417
+  type: 'test'
+  ...
+# Subtest: background task ownership bounds parent abort; ownerless peer survives
+ok 7 - background task ownership bounds parent abort; ownerless peer survives
+  ---
+  duration_ms: 159.3425
+  type: 'test'
+  ...
+# Subtest: SIGKILL/reopen real SQLite during generation
+ok 8 - SIGKILL/reopen real SQLite during generation
+  ---
+  duration_ms: 276.765875
+  type: 'test'
+  ...
+# Subtest: SIGKILL/reopen real SQLite during queued
+ok 9 - SIGKILL/reopen real SQLite during queued
+  ---
+  duration_ms: 222.548458
+  type: 'test'
+  ...
+# Subtest: SIGKILL/reopen real SQLite during safe-read
+ok 10 - SIGKILL/reopen real SQLite during safe-read
+  ---
+  duration_ms: 476.770083
+  type: 'test'
+  ...
+# Subtest: SIGKILL/reopen real SQLite during safe-read with current policy veto
+ok 11 - SIGKILL/reopen real SQLite during safe-read with current policy veto
+  ---
+  duration_ms: 473.952959
+  type: 'test'
+  ...
+# Subtest: SIGKILL/reopen real SQLite during unsafe-read with attempted policy upgrade
+ok 12 - SIGKILL/reopen real SQLite during unsafe-read with attempted policy upgrade
+  ---
+  duration_ms: 485.22575
+  type: 'test'
+  ...
+# Subtest: SIGKILL/reopen real SQLite during unsafe-bash
+ok 13 - SIGKILL/reopen real SQLite during unsafe-bash
+  ---
+  duration_ms: 848.198083
+  type: 'test'
+  ...
+# Subtest: SIGKILL/reopen real SQLite during write
+ok 14 - SIGKILL/reopen real SQLite during write
+  ---
+  duration_ms: 780.739542
+  type: 'test'
+  ...
+# Subtest: SIGKILL/reopen real SQLite during edit
+ok 15 - SIGKILL/reopen real SQLite during edit
+  ---
+  duration_ms: 990.966125
+  type: 'test'
+  ...
+# Subtest: store has no process-exclusive lock: second process can open already owned SQLite
+ok 16 - store has no process-exclusive lock: second process can open already owned SQLite
+  ---
+  duration_ms: 148.81025
+  type: 'test'
+  ...
+# Subtest: late watchers receive current tool output then serialized committed updates; cancelled wait does not abort work
+ok 17 - late watchers receive current tool output then serialized committed updates; cancelled wait does not abort work
+  ---
+  duration_ms: 131.813792
+  type: 'test'
+  ...
+1..17
+# tests 17
+# suites 0
+# pass 17
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 6518.378584

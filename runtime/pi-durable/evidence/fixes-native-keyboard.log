@@ -1,0 +1,6 @@
+warning: You appear to have cloned an empty repository.
+warning: You appear to have cloned an empty repository.
+warning: You appear to have cloned an empty repository.
+PASS actual keyboard popup acceptance WT_FZF_VIM=1
+PASS session setup: real prefix+n/prefix+R/prefix+s keyboard, cancellation, multi-repo, manual path, stable conversations, dirty originals
+Artifacts: /private/tmp/wt-durable-fixes-keyboard-acceptance.oRyBar

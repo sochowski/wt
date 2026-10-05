@@ -358,6 +358,7 @@ func setupMenu(s *Store, args []string) error {
 	focus := fs.Bool("switch", false, "focus initial agent after setup")
 	offline := fs.Bool("offline", false, "explicit cached-only preparation (no network)")
 	resume := fs.String("resume", "", "resume durable setup ID")
+	backend := fs.String("backend", "durable", "Pi backend for fresh roots only: durable or explicit native")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -368,6 +369,18 @@ func setupMenu(s *Store, args []string) error {
 	var w Worktree
 	var err error
 	adding := *root != "" || *resume != ""
+	if *backend != "native" && *backend != "durable" {
+		return errors.New("unsupported Pi backend")
+	}
+	explicitBackend := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "backend" {
+			explicitBackend = true
+		}
+	})
+	if adding && explicitBackend {
+		return errors.New("backend selection is fresh-root-only; existing sessions retain their exact backend")
+	}
 	if *resume != "" {
 		p, err = s.loadSetup(*resume)
 		if err != nil {
@@ -487,6 +500,17 @@ func setupMenu(s *Store, args []string) error {
 			lock.Close()
 			if err != nil {
 				return fmt.Errorf("root %s preserved, no checkout created: %w", w.Name, err)
+			}
+		}
+		if !adding && *backend == "durable" {
+			// Persist repository setup intent first; bootstrap failure preserves
+			// the stopped root and journal without creating native replacement.
+			if err = s.initializeDurable(w, w.Agents[0].ID); err != nil {
+				return fmt.Errorf("root %s preserved with incomplete durable bootstrap: %w", w.Name, err)
+			}
+			w, err = s.Worktree(w.ID)
+			if err != nil {
+				return err
 			}
 		}
 	}

@@ -1,0 +1,34 @@
+{
+  "status": "passed",
+  "durable": "1.0.3",
+  "piAI": "1.0.3",
+  "sdk": "0.87.1",
+  "node": "v22.22.0",
+  "provider": "anthropic",
+  "modelId": "claude-haiku-4-5-20251001",
+  "requests": 2,
+  "answer": "WT_DURABLE_OK",
+  "tool": "read",
+  "closeReopen": "done",
+  "authFileUnchanged": true,
+  "usage": {
+    "models": {
+      "anthropic/claude-haiku-4-5-20251001": {
+        "input": 1454,
+        "output": 65,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "totalTokens": 1519,
+        "cost": {
+          "input": 0.001454,
+          "output": 0.000325,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "total": 0.0017789999999999998
+        },
+        "cacheWrite1h": 0
+      }
+    },
+    "tools": {}
+  }
+}

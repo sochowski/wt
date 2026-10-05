@@ -25,7 +25,7 @@ for name in a b; do
 done
 wt() { "$repo/bin/wt" "$@"; }
 tmux -L default -f /dev/null new-session -d -s sentinel -x 160 -y 50 'sleep 300'
-wt new demo --cwd "$HOME" > "$priv/new.json"
+wt new demo --cwd "$HOME" --backend native > "$priv/new.json"
 root=$(jq -r .id "$priv/new.json")
 master=$(jq -r '.views[0].id' "$priv/new.json")
 master_pane=$(jq -r '.views[0].pane' "$priv/new.json")

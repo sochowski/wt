@@ -74,7 +74,7 @@ func (s *Store) resumeView(w Worktree, v View) error {
 		if !stopped && v.Problem == "" && p != "" && dead != "1" {
 			return nil
 		}
-		if a.Stopped && a.NativeID == "" {
+		if a.Stopped && a.NativeID == "" && a.Adapter.Backend != "durable" {
 			return errors.New("stopped conversation has no captured native identity; cannot resume exactly")
 		}
 		if _, err = strictPiArgs(a); err != nil {
