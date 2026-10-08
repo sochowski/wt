@@ -288,6 +288,10 @@ func (s *Store) reserveDelegation(a DelegationAdmission, runtime string, r Deleg
 }
 
 func (s *Store) queueDelegationTurn(owner DelegationOwner, runtime, job string, r DelegationTurnRequest) (DelegationTurn, error) {
+	return s.queueDelegationTurnWithColdRecovery(owner, runtime, job, r, nil)
+}
+
+func (s *Store) queueDelegationTurnWithColdRecovery(owner DelegationOwner, runtime, job string, r DelegationTurnRequest, cold *NativeRecoveryRequest) (DelegationTurn, error) {
 	var empty DelegationTurn
 	if err := validateDelegationTurn(r); err != nil {
 		return empty, err
@@ -303,6 +307,27 @@ func (s *Store) queueDelegationTurn(owner DelegationOwner, runtime, job string, 
 	}
 	if r.ContractDigest != j.ContractDigest || j.NativeID == "" || r.PreviousTurnID == "" {
 		return empty, errors.New("continuation requires the admitted contract and exact bound native conversation")
+	}
+	var recovering int
+	if err = tx.QueryRow(`SELECT count(*) FROM native_recovery_leases WHERE job_id=? AND state IN ('prepared','claimed','uncertain')`, job).Scan(&recovering); err != nil {
+		return empty, err
+	}
+	var coldID string
+	var coldLease NativeRecoveryLease
+	if cold != nil {
+		if cold.Owner != owner || cold.Runtime != runtime || cold.Job != job || cold.PreviousTurn != r.PreviousTurnID || cold.Operation != r.RunID || cold.Operation != r.RequestID {
+			return empty, errors.New("cold native turn does not match the explicit recovery operation")
+		}
+		coldID = delegationDigest([]byte(jsonText([]string{job, cold.Operation})))
+		var saved, raw, leaseState string
+		if err = tx.QueryRow(`SELECT request,lease,state FROM native_recovery_leases WHERE id=?`, coldID).Scan(&saved, &raw, &leaseState); err != nil {
+			return empty, err
+		}
+		if saved != jsonText(*cold) || leaseState != "claimed" || recovering != 1 || json.Unmarshal([]byte(raw), &coldLease) != nil || coldLease.NewTurnID != "" {
+			return empty, errors.New("cold native turn requires its exact unused claimed recovery lease")
+		}
+	} else if recovering != 0 {
+		return empty, errors.New("native conversation has an exclusive cold recovery lease; warm dispatch is blocked")
 	}
 	id := delegationTurnID(job, r)
 	t, prior, _, err := readDelegationTurnTx(tx, job, id)
@@ -328,6 +353,9 @@ func (s *Store) queueDelegationTurn(owner DelegationOwner, runtime, job string, 
 	if json.Unmarshal([]byte(rawResult), &previousResult) != nil || previousResult.Unpublished || previous.State != "completed" && previous.State != "failed" {
 		return empty, errors.New("previous turn is not a terminal published host turn")
 	}
+	if cold != nil && previous.State != "completed" {
+		return empty, errors.New("cold native turn requires a successful settled predecessor")
+	}
 	if lastID != r.PreviousTurnID {
 		var skipped int
 		err = tx.QueryRow(`SELECT count(*) FROM delegation_turns WHERE job_id=? AND ordinal>? AND ordinal<=?
@@ -349,6 +377,12 @@ func (s *Store) queueDelegationTurn(owner DelegationOwner, runtime, job string, 
 	t = DelegationTurn{ID: id, JobID: job, Ordinal: ordinal + 1, State: "queued"}
 	if _, err = tx.Exec(`INSERT INTO delegation_turns(id,job_id,ordinal,request,state) VALUES(?,?,?,?,?)`, id, job, t.Ordinal, jsonText(r), t.State); err != nil {
 		return empty, err
+	}
+	if cold != nil {
+		coldLease.NewTurnID = t.ID
+		if _, err = tx.Exec(`UPDATE native_recovery_leases SET lease=? WHERE id=? AND state='claimed'`, jsonText(coldLease), coldID); err != nil {
+			return empty, err
+		}
 	}
 	return t, tx.Commit()
 }

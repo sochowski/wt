@@ -498,7 +498,7 @@ func TestDelegationResultJSONFitsSubprocessEnvelope(t *testing.T) {
 
 func TestDelegationMigrationFromV4AndReopenPreservesResult(t *testing.T) {
 	f := newDelegationFixture(t)
-	if _, err := f.s.db.Exec(`DROP TABLE delegation_turns; DROP TABLE delegation_jobs; PRAGMA user_version=4;`); err != nil {
+	if _, err := f.s.db.Exec(`DROP TABLE native_recovery_leases; DROP TABLE delegation_turns; DROP TABLE delegation_jobs; PRAGMA user_version=4;`); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.s.migrateWorktrees(); err != nil {

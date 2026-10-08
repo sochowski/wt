@@ -31,6 +31,20 @@ export function createWtNativeProvider(env = process.env, io = { command, probe:
         const previous = input.previous;
         const status = io.command("status", { owner, runtime: env.WT_RUNTIME_ID, job: previous.jobId, turn: previous.turnId }, env);
         if (status.job.native_id !== previous.nativeId || status.job.session_file !== previous.sessionFile || status.job.contract_digest !== (previous.conversationDigest ?? previous.configDigest)) throw new Error("WT continuation native/contract identity mismatch");
+        if (input.config.nativeColdRecovery === true) {
+          const request = { version: 1, owner, runtime: env.WT_RUNTIME_ID, job: previous.jobId, previous_turn: previous.turnId, operation: input.runId };
+          const prepared = io.command("prepare-cold", request, env);
+          if (prepared.observed || prepared.state !== "prepared") throw new Error("Cold operation already exists; observing a receipt cannot restart SDK creation.");
+          const lease = io.command("claim-cold", request, env);
+          const turn = io.command("queue-cold", { recovery: request, request: { run_id: input.runId, step_index: 0, request_id: input.runId, previous_turn_id: previous.turnId, contract_digest: status.job.contract_digest, prompt_digest: digest(prompt), prompt } }, env);
+          const binding = { ...previous, runId: input.runId, previousTurnId: previous.turnId, turnId: turn.id, configDigest: input.configDigest, conversationDigest: status.job.contract_digest,
+            controlPath: `${input.config.asyncDir}/native-control.json`,
+            coldRecovery: { version: 1, leaseId: lease.id, operation: input.runId, leaf: lease.leaf, cwd: step.cwd ?? input.config.cwd, sourceDigest: lease.source_digest, sidecarDigest: lease.sidecar_digest, modelId: lease.model_id, thinking: lease.thinking, request } };
+          delete binding.hostPid; // Actual new PID comes only from launch/publication.
+          pending.set(binding.jobId, { binding, owner, recovery: request });
+          return binding;
+        }
+        if (input.config.nativeColdRecovery !== undefined && input.config.nativeColdRecovery !== false) throw new Error("Cold recovery must be an explicit boolean operation.");
         const turn = io.command("queue", { owner, runtime: env.WT_RUNTIME_ID, job: previous.jobId, request: { run_id: input.runId, step_index: 0, request_id: input.runId, previous_turn_id: previous.turnId, contract_digest: status.job.contract_digest, prompt_digest: digest(prompt), prompt } }, env);
         if (turn.state !== "queued") throw new Error("Prepared turn is not queued; refusing re-publication of an existing turn.");
         const binding = { ...previous, runId: input.runId, previousTurnId: previous.turnId, turnId: turn.id, configDigest: input.configDigest, conversationDigest: status.job.contract_digest };
@@ -84,7 +98,7 @@ export function createWtNativeProvider(env = process.env, io = { command, probe:
       const prepared = pending.get(input.binding.jobId);
       if (!prepared || JSON.stringify(prepared.binding) !== JSON.stringify(input.binding)) throw new Error("WT native launch does not match its reservation");
       pending.delete(input.binding.jobId);
-      return io.command("launch", { owner: prepared.owner, runtime: env.WT_RUNTIME_ID, job: input.binding.jobId, turn: input.binding.turnId, command: input.command, args: input.args, cwd: input.cwd, env: input.env }, env);
+      return io.command("launch", { owner: prepared.owner, runtime: env.WT_RUNTIME_ID, job: input.binding.jobId, turn: input.binding.turnId, command: input.command, args: input.args, cwd: input.cwd, env: input.env, ...(prepared.recovery ? { recovery: prepared.recovery } : {}) }, env);
     },
   };
 }
@@ -96,6 +110,14 @@ export function createNativeHostDriver(binding) {
   const checkpoint = (child, operation) => { const [provider, ...model] = (child.modelId ?? "").split("/"); return command(operation, { ...identity(), native: child.sessionId, snapshot: { version: 1, file: child.sessionFile, leaf: child.nativeLeaf ?? "", persisted: existsSync(child.sessionFile), provider, model: model.join("/"), thinking: child.thinkingLevel } }); };
   return {
     version: 1,
+    ...(binding.coldRecovery ? { recovery: {
+      ...binding.coldRecovery,
+      expected: { nativeId: binding.nativeId, sessionFile: binding.sessionFile, leaf: binding.coldRecovery.leaf, cwd: binding.coldRecovery.cwd },
+      async authorizeOpen() {
+        const lease = command("open-cold", { recovery: binding.coldRecovery.request, child: process.env.WT_AGENT_ID, runtime: process.env.WT_RUNTIME_ID });
+        if (!lease.sdk_opened || lease.host_runtime !== process.env.WT_RUNTIME_ID || lease.id !== binding.coldRecovery.leaseId || lease.new_turn_id !== binding.turnId || lease.native_id !== binding.nativeId || lease.session_file !== binding.sessionFile || lease.leaf !== binding.coldRecovery.leaf || lease.source_digest !== binding.coldRecovery.sourceDigest || lease.sidecar_digest !== binding.coldRecovery.sidecarDigest) throw new Error("Authoritative cold SDK open permit drift.");
+      },
+    } } : {}),
     protocol: (pi, control) => protocol.install(pi, control),
     settle: () => protocol.settle(),
     context(input) {
@@ -104,7 +126,11 @@ export function createNativeHostDriver(binding) {
       })));
     },
     async failStartup(error) { command("fail-host-startup", { ...identity(), error: String(error) }); },
-    async bind(child) { checkpoint(child, "bind"); },
+    async bind(child) {
+      if (!binding.coldRecovery) return checkpoint(child, "bind");
+      const [provider,...model]=(child.modelId ?? "").split("/");
+      command("bind-cold", { recovery: binding.coldRecovery.request, child: process.env.WT_AGENT_ID, runtime: process.env.WT_RUNTIME_ID, native: child.sessionId, snapshot: { version: 1, file: child.sessionFile, leaf: child.nativeLeaf ?? "", persisted: existsSync(child.sessionFile), provider, model: model.join("/"), thinking: child.thinkingLevel } });
+    },
     async checkpoint(child) { checkpoint(child, "checkpoint"); },
     async claim(child, prompt) {
       if (child.sessionFile === undefined) throw new Error("WT native host has no transcript");

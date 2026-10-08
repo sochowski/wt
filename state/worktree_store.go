@@ -162,10 +162,10 @@ func (s *Store) migrateWorktrees() error {
 	if err = tx.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
 		return err
 	}
-	if version > 6 {
+	if version > 7 {
 		return fmt.Errorf("unsupported database schema %d", version)
 	}
-	if version == 6 {
+	if version == 7 {
 		return tx.Commit()
 	}
 	if version == 0 {
@@ -235,7 +235,12 @@ func (s *Store) migrateWorktrees() error {
 			return err
 		}
 	}
-	if err = migrateDurableJobs(tx); err != nil {
+	if version < 6 {
+		if err = migrateDurableJobs(tx); err != nil {
+			return err
+		}
+	}
+	if err = migrateNativeRecovery(tx); err != nil {
 		return err
 	}
 	return tx.Commit()

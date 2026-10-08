@@ -18,6 +18,9 @@ func delegationCommand(s *Store, operation string, input io.Reader) (any, error)
 	if len(body) > 1024*1024 || !utf8.Valid(body) {
 		return nil, errors.New("delegation command requires bounded UTF-8 JSON")
 	}
+	if operation == "prepare-cold" || operation == "claim-cold" || operation == "cancel-cold" || operation == "queue-cold" || operation == "open-cold" || operation == "bind-cold" {
+		return nativeRecoveryCommand(s, operation, bytes.NewReader(body))
+	}
 	var request struct {
 		Owner     DelegationOwner       `json:"owner"`
 		Admission DelegationAdmission   `json:"admission"`
