@@ -11,6 +11,12 @@ import { createModels } from '@earendil-works/pi-ai/models';
 import { fauxProvider, fauxAssistantMessage } from '@earendil-works/pi-ai/providers/faux';
 import { context, openRuntime, definition, dependencies, admitMessage, BridgeDoc, validateStore, readOnlyEnvironment, configuredModel } from './runtime.mjs';
 import { interactive } from './tui.mjs';
+import { getKeybindings, setKeybindings, KeybindingsManager, TUI_KEYBINDINGS } from '@earendil-works/pi-tui';
+import { appActions, loadPresentation } from './presentation.mjs';
+
+function presentationWith(bindings) {
+  return { ...loadPresentation(process.env.PI_CODING_AGENT_DIR), keybindings: new KeybindingsManager({ ...TUI_KEYBINDINGS, ...appActions }, bindings) };
+}
 
 async function fixture(t, responses=[fauxAssistantMessage('OK')], options={}) {
   const directory = await realpath(await mkdtemp(join(tmpdir(),'wt-runtime-'))); t.after(()=>rm(directory,{recursive:true,force:true}));
@@ -127,4 +133,97 @@ test('production TUI busy steering and followUp inputs reach real pinned durable
  await until(()=>terminal.output.includes('STEERING_INPUT_PROOF') && terminal.output.includes('FOLLOWUP_INPUT_PROOF'));
  await r.root.waitForIdle(context);assert.ok(f.faux.state.callCount>=2);
  terminal.type('/quit');terminal.input('\r');await ui;assert.equal(terminal.stopped,true);
+});
+
+test('native action clear does not abort or send a draft; double clear closes recoverably and restores keybinding lifetime',async t=>{
+  const f=await fixture(t),r=await f.open(),terminal=new Terminal();let aborted=0,inputs=0;
+  const originalAbort=r.abort,originalInput=r.input;r.abort=async()=>{aborted++;return originalAbort();};r.input=async(...args)=>{inputs++;return originalInput(...args);};
+  const {getKeybindings}=await import('@earendil-works/pi-tui'),previous=getKeybindings();const ui=interactive(r,{terminal,poll:false});
+  await until(()=>terminal.started);terminal.type('unsent draft');terminal.input('\x04');await delay(30);assert.equal(terminal.stopped,false);
+  terminal.input('\x03');terminal.input('\x03');await ui;assert.equal(terminal.stopped,true);assert.equal(aborted,0);assert.equal(inputs,0);assert.equal(f.faux.state.callCount,0);assert.equal(getKeybindings(),previous);
+});
+
+test('native model/search and thinking selector/action keys persist only exact durable conversation and restore editor focus',async t=>{
+  const f=await fixture(t,[fauxAssistantMessage('focus restored')],{models:[{id:'faux-1'},{id:'faux-2',reasoning:true}]});const r=await f.open(),terminal=new Terminal(),ui=interactive(r,{terminal,poll:false});
+  await until(()=>terminal.started);terminal.input('\x0c');await until(()=>terminal.output.includes('Model (pinned catalog'));
+  terminal.type('faux-2');terminal.input('\r');await until(async()=>(await r.root.agent(context)).model.modelId==='faux-2');
+  terminal.input('\x1b[Z');await until(async()=>(await r.root.agent(context)).thinkingLevel==='minimal');
+  terminal.type('/thinking');terminal.input('\r');await until(()=>terminal.output.includes('Thinking level (durable conversation only)'));
+  terminal.type('high');terminal.input('\r');await until(async()=>(await r.root.agent(context)).thinkingLevel==='high');
+  terminal.input('\x0c');await delay(30);terminal.input('\x1b');await delay(30);terminal.type('hello after selector');terminal.input('\r');await until(()=>terminal.output.includes('focus restored'));
+  terminal.type('/quit');terminal.input('\r');await ui;const reopened=await f.open(),agent=await reopened.root.agent(context);assert.equal(agent.model.modelId,'faux-2');assert.equal(agent.thinkingLevel,'high');assert.equal(reopened.launch.identity.uuid,f.launch.identity.uuid);assert.equal(reopened.root.id,1);
+});
+
+test('native busy Enter steers, Alt-Enter explicitly follows up through pinned scheduler without changing identity',async t=>{
+  const f=await fixture(t,[fauxAssistantMessage('initial '.repeat(30)),fauxAssistantMessage('steered answer'),fauxAssistantMessage('followup answer'),fauxAssistantMessage('final answer')],{tokensPerSecond:80});
+  const r=await f.open(),terminal=new Terminal(),calls=[],original=r.input;r.input=async(...args)=>{calls.push(args);return original(...args);};
+  const ui=interactive(r,{terminal,poll:false});await until(()=>terminal.started);terminal.type('initial');terminal.input('\r');await until(()=>f.faux.state.callCount>0);
+  terminal.type('NATIVE_ENTER_STEER');terminal.input('\r');terminal.type('NATIVE_ALT_FOLLOWUP');terminal.input('\x1b[13;3u');
+  await until(()=>calls.length===3);assert.equal(calls[1][1],'steer');assert.equal(calls[2][1],'followUp');
+  await r.root.waitForIdle(context);const view=await r.root.watch(context);assert.ok(JSON.stringify(view.value.entries).includes('NATIVE_ENTER_STEER'));assert.ok(JSON.stringify(view.value.entries).includes('NATIVE_ALT_FOLLOWUP'));await view.stop();
+  terminal.type('/quit');terminal.input('\r');await ui;
+});
+
+test('native Escape beats conflicting history and durably aborts while Ctrl-C only clears; reopen never resumes cancelled work',async t=>{
+  const f=await fixture(t,[fauxAssistantMessage('long '.repeat(100))],{tokensPerSecond:20});const r=await f.open(),terminal=new Terminal();let submission;
+  const original=r.input;r.input=async(...args)=>{submission=await original(...args);return submission;};const ui=interactive(r,{terminal,poll:false,presentation:presentationWith({'tui.editor.historyPrevious':'escape'})});
+  await until(()=>terminal.started);terminal.type('work');terminal.input('\r');await until(()=>f.faux.state.callCount>0);
+  terminal.type('draft');terminal.input('\x03');await delay(30);assert.notEqual((await submission.status(context)).reason,'aborted');terminal.input('\x1b');
+  await until(async()=>(await submission.status(context)).reason==='aborted');terminal.input('\x04');await ui;
+  const before=f.faux.state.callCount,reopened=await f.open();await reopened.resume();await delay(50);assert.equal(f.faux.state.callCount,before);assert.equal((await (await reopened.harness.submission(submission.id,context)).status(context)).reason,'aborted');
+});
+
+test('empty exit beats history/clear collisions and live close remains recoverable rather than cancellation', async t => {
+  const f=await fixture(t,[fauxAssistantMessage('long '.repeat(100))],{tokensPerSecond:20});
+  for (const bindings of [{'tui.editor.historyPrevious':'ctrl+d'}, {'app.clear':'ctrl+d'}]) {
+    const r=await f.open(),terminal=new Terminal(),ui=interactive(r,{terminal,poll:false,presentation:presentationWith(bindings)});
+    await until(()=>terminal.started);terminal.input('\x04');await ui;assert.equal(terminal.stopped,true);assert.equal(f.faux.state.callCount,0);
+  }
+  const r=await f.open(),terminal=new Terminal();let submission;
+  const original=r.input;r.input=async(...args)=>{submission=await original(...args);return submission;};
+  const ui=interactive(r,{terminal,poll:false,presentation:presentationWith({'app.clear':'ctrl+d'})});await until(()=>terminal.started);
+  terminal.type('recoverable work');terminal.input('\r');await until(()=>f.faux.state.callCount>0);
+  terminal.type('unsent draft');terminal.input('\x04');await delay(30);assert.equal(terminal.stopped,false);assert.notEqual((await submission.status(context)).reason,'aborted');
+  terminal.input('\x04');await ui;
+  f.faux.setResponses([fauxAssistantMessage('recovered')]);const reopened=await f.open(),before=f.faux.state.callCount;await reopened.resume();
+  assert.equal((await (await reopened.harness.submission(submission.id,context)).wait(context)).status,'done');assert.ok(f.faux.state.callCount>before);
+  assert.equal(reopened.launch.identity.uuid,f.launch.identity.uuid);assert.equal(reopened.root.id,1);
+});
+
+for (const failure of ['watch', 'setup', 'watch-start', 'terminal-start', 'resume-fence', 'watch-stop', 'terminal-stop', 'runtime-close', 'closing-observer', 'poll-watch-stop']) {
+  test(`UI lifecycle restores keybindings and all owned cleanup after ${failure} rejection`, async t => {
+    const f=await fixture(t),r=await f.open(),terminal=new Terminal(),previous=getKeybindings();t.after(()=>setKeybindings(previous));
+    const error=new Error(`injected ${failure}`);let runtimeClosed=0,watchStopped=0;
+    const originalClose=r.close;r.close=async()=>{runtimeClosed++;await originalClose();if(failure==='runtime-close'&&runtimeClosed===1)throw error;};
+    const originalWatch=r.root.watch.bind(r.root);r.root.watch=async(...args)=>{
+      if(failure==='watch')throw error;
+      const watch=await originalWatch(...args);
+      return { get value(){return watch.value;}, start: async(...startArgs)=>{if(failure==='watch-start')throw error;return watch.start(...startArgs);}, stop:async()=>{watchStopped++;await watch.stop();if(failure==='watch-stop'||failure==='poll-watch-stop')throw error;} };
+    };
+    if(failure==='setup')r.resources.skills=[{get name(){throw error;}}];
+    if(failure==='terminal-start'){const start=terminal.start.bind(terminal);terminal.start=(...args)=>{start(...args);throw error;};}
+    const stop=terminal.stop.bind(terminal);terminal.stop=()=>{stop();if(failure==='terminal-stop'||failure==='watch-stop')throw error;};
+    if(failure==='resume-fence')r.resume=async()=>{await r.fence();throw error;};
+    const ui=interactive(r,{terminal,poll:failure==='poll-watch-stop',stateObserver:async state=>{if(failure==='closing-observer'&&state.stage==='closing')throw error;}});
+    const rejected=assert.rejects(ui,new RegExp(`injected ${failure}`));
+    if(['watch-stop','terminal-stop','runtime-close','closing-observer'].includes(failure)){await until(()=>terminal.started);terminal.input('\x04');}
+    if(failure==='poll-watch-stop'){await until(()=>terminal.started);r.fence=async()=>{throw error;};}
+    await rejected;assert.equal(getKeybindings(),previous);assert.equal(terminal.stopped,true);assert.equal(runtimeClosed,1);
+    assert.equal(watchStopped,['watch','setup'].includes(failure)?0:1);assert.equal(f.faux.state.callCount,0);
+    const reopened=await f.open();assert.equal(reopened.launch.identity.uuid,f.launch.identity.uuid);assert.equal(reopened.root.id,1);
+  });
+}
+
+test('native prompt history restores from real durable user entries after close without JSONL/native identity synthesis',async t=>{
+  const f=await fixture(t);let r=await f.open();const turn=await r.input('RETAINED_EDITOR_HISTORY');await turn.wait(context);await r.close();
+  r=await f.open();const terminal=new Terminal(),before=f.faux.state.callCount,calls=[],original=r.input;
+  r.input=async(...args)=>{calls.push(args);return original(...args);};
+  const ui=interactive(r,{terminal,poll:false});await until(()=>terminal.started);
+  terminal.input('\x1b[A');await delay(50);assert.equal(f.faux.state.callCount,before);assert.equal(calls.length,0,'history navigation must not submit');
+  terminal.input('\x05');terminal.type('_RESUBMITTED');terminal.input('\r');await until(()=>calls.length===1);await r.root.waitForIdle(context);
+  const view=await r.root.watch(context),users=view.value.entries.flatMap(entry=>entry.model||[]).filter(message=>message.role==='user');await view.stop();
+  terminal.input('\x04');await ui;
+  assert.equal(calls[0][0],'RETAINED_EDITOR_HISTORY_RESUBMITTED','must submit actual restored draft, not match old transcript output');
+  assert.ok(JSON.stringify(users.at(-1)).includes('RETAINED_EDITOR_HISTORY_RESUBMITTED'),'real durable transport must commit the distinguishable restored prompt');
+  assert.equal(r.root.id,1);assert.equal(r.launch.identity.uuid,f.launch.identity.uuid);
 });
