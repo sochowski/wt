@@ -16,14 +16,15 @@ import (
 )
 
 type delegationHostLaunch struct {
-	Owner   DelegationOwner   `json:"owner"`
-	Runtime string            `json:"runtime"`
-	Job     string            `json:"job"`
-	Turn    string            `json:"turn"`
-	Command string            `json:"command"`
-	Args    []string          `json:"args"`
-	Env     map[string]string `json:"env"`
-	Cwd     string            `json:"cwd"`
+	Owner    DelegationOwner        `json:"owner"`
+	Runtime  string                 `json:"runtime"`
+	Job      string                 `json:"job"`
+	Turn     string                 `json:"turn"`
+	Command  string                 `json:"command"`
+	Args     []string               `json:"args"`
+	Env      map[string]string      `json:"env"`
+	Cwd      string                 `json:"cwd"`
+	Recovery *NativeRecoveryRequest `json:"recovery,omitempty"`
 }
 
 // Dedicated fresh-host path. Restoring a missing host still hits the ordinary
@@ -76,7 +77,8 @@ func (s *Store) launchDelegationHost(input io.Reader) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if turn.State != "queued" || job.NativeID != "" || a.Runtime != "" || a.Stopped || request.Cwd != a.Cwd || !filepath.IsAbs(request.Command) || len(request.Args) == 0 || request.Env["PI_SUBAGENT_REQUIRED_NATIVE_PROVIDER"] != request.Owner.Provider {
+	cold := request.Recovery != nil
+	if turn.State != "queued" || (!cold && (job.NativeID != "" || a.Runtime != "")) || a.Stopped || request.Cwd != a.Cwd || !filepath.IsAbs(request.Command) || len(request.Args) == 0 || request.Env["PI_SUBAGENT_REQUIRED_NATIVE_PROVIDER"] != request.Owner.Provider {
 		return nil, errors.New("native host launch mismatch, already attempted, or non-fresh conversation; no replay")
 	}
 	if err = s.validateDelegationHostCommand(job, request); err != nil {
@@ -89,15 +91,38 @@ func (s *Store) launchDelegationHost(input io.Reader) (any, error) {
 			break
 		}
 	}
-	if view.ID == "" || livePane(w, view.ID) != "" {
+	pane := livePane(w, view.ID)
+	if view.ID == "" || (!cold && pane != "") {
 		return nil, errors.New("native host view is absent or already placed")
+	}
+	if cold {
+		if err = validateColdNativePlacement(job, view, pane, tmux); err != nil {
+			return nil, err
+		}
 	}
 	if err = os.MkdirAll(runtimeDir(), 0700); err != nil {
 		return nil, err
 	}
 	token := newID()
+	payloadName := job.ID + ".native-launch.json"
+	if cold {
+		if request.Recovery.Owner != request.Owner || request.Recovery.Runtime != request.Runtime || request.Recovery.Job != job.ID {
+			return nil, errors.New("cold launcher owner/operation mismatch")
+		}
+		nodeLock, lockErr := lockFile(nodeLockPath(a.ID))
+		if lockErr != nil {
+			return nil, errors.New("original native node is still owned; cold launch forbidden")
+		}
+		lease, epochErr := s.startNativeRecoveryEpoch(*request.Recovery, request.Turn)
+		nodeLock.Close() // New fenced wrapper acquires this lock before SDK start.
+		if epochErr != nil {
+			return nil, epochErr
+		}
+		token = lease.HostRuntime
+		payloadName = lease.ID + ".native-cold-launch.json"
+	}
 	request.Runtime = token
-	payload := filepath.Join(runtimeDir(), job.ID+".native-launch.json")
+	payload := filepath.Join(runtimeDir(), payloadName)
 	file, err := os.OpenFile(payload, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil {
 		return nil, err
@@ -110,20 +135,34 @@ func (s *Store) launchDelegationHost(input io.Reader) (any, error) {
 	if closeErr != nil {
 		return nil, closeErr
 	}
-	result, err := s.db.Exec(`UPDATE agent_sessions SET runtime=? WHERE root_id=? AND id=? AND runtime=''`, token, w.ID, a.ID)
-	if err != nil {
-		return nil, err
-	}
-	if count, err := result.RowsAffected(); err != nil || count != 1 {
-		return nil, errors.New("native host launch was already claimed")
+	if !cold {
+		result, err := s.db.Exec(`UPDATE agent_sessions SET runtime=? WHERE root_id=? AND id=? AND runtime=''`, token, w.ID, a.ID)
+		if err != nil {
+			return nil, err
+		}
+		if count, err := result.RowsAffected(); err != nil || count != 1 {
+			return nil, errors.New("native host launch was already claimed")
+		}
 	}
 	// Detached placement never changes the client's selected pane/window.
-	pane, err := tmux("new-window", "-d", "-P", "-F", "#{pane_id}", "-t", "="+w.Name, "-n", a.Name, "bash --noprofile --norc -i")
-	if err != nil {
-		return nil, err
-	}
-	if err = s.bindView(w, view, pane); err != nil {
-		return nil, err
+	if pane == "" {
+		pane, err = tmux("new-window", "-d", "-P", "-F", "#{pane_id}", "-t", "="+w.Name, "-n", a.Name, "bash --noprofile --norc -i")
+		if err != nil {
+			return nil, err
+		}
+		if err = s.bindView(w, view, pane); err != nil {
+			return nil, err
+		}
+	} else {
+		// Reuse only the exact dead original pane, never a live repair shell.
+		// Focus/protection drift after epoch consumption retains uncertainty;
+		// it never grants permission to kill a human's newly active pane.
+		if livePane(w, view.ID) != pane {
+			return nil, errors.New("cold native view placement drift")
+		}
+		if err = validateColdNativePlacement(job, view, pane, tmux); err != nil {
+			return nil, err
+		}
 	}
 	command := shellArgs("env", "WT_DB="+dbPath(), "WT_STATUS_DIR="+stateDir(), runtimeBinary(), "worktree", "_run-native-host", w.ID, a.ID, token, payload)
 	if _, err = tmux("respawn-pane", "-k", "-t", pane, "-c", a.Cwd, command); err != nil {
@@ -178,7 +217,11 @@ func (s *Store) runDelegationHost(root, child, token, payload string) error {
 	if err = json.Unmarshal(data, &request); err != nil {
 		return err
 	}
-	if request.Runtime != token || request.Cwd != a.Cwd || payload != filepath.Join(runtimeDir(), request.Job+".native-launch.json") {
+	payloadName := request.Job + ".native-launch.json"
+	if request.Recovery != nil {
+		payloadName = delegationDigest([]byte(jsonText([]string{request.Job, request.Recovery.Operation}))) + ".native-cold-launch.json"
+	}
+	if request.Runtime != token || request.Cwd != a.Cwd || payload != filepath.Join(runtimeDir(), payloadName) {
 		return errors.New("native host launch payload mismatch")
 	}
 	// Delegated Pi conversations use the package-owned runner instead of
@@ -225,7 +268,7 @@ func (s *Store) validateDelegationHostCommand(job DelegationJob, request delegat
 		return errors.New("native runner config must contain one JSON object")
 	}
 	binding, ok := config["nativeExecution"].(map[string]any)
-	if !ok || binding["jobId"] != job.ID || binding["turnId"] != request.Turn || binding["configDigest"] != job.ContractDigest || binding["provider"] != request.Owner.Provider || binding["ownerSessionId"] != request.Owner.OwnerSessionID || binding["parentSessionId"] != request.Owner.ParentNativeID {
+	if !ok || binding["jobId"] != job.ID || binding["turnId"] != request.Turn || (request.Recovery == nil && binding["configDigest"] != job.ContractDigest) || binding["provider"] != request.Owner.Provider || binding["ownerSessionId"] != request.Owner.OwnerSessionID || binding["parentSessionId"] != request.Owner.ParentNativeID {
 		return errors.New("native runner binding differs from its WT reservation")
 	}
 	delete(config, "nativeExecution")
@@ -244,6 +287,9 @@ func (s *Store) validateDelegationHostCommand(job DelegationJob, request delegat
 	decoder.UseNumber()
 	if err = decoder.Decode(&contract); err != nil {
 		return err
+	}
+	if request.Recovery != nil {
+		return s.validateColdNativeHostContract(job, request, binding, config, contract)
 	}
 	if !reflect.DeepEqual(config, contract) {
 		return errors.New("native runner changed its admitted package contract")
