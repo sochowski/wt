@@ -157,7 +157,7 @@ export async function createPluginHost(launch, fence, observer, preflight) {
     async update(){return receipts();},
     async uncertain(){return receipts(true);},
     async detach(){await emit('session_shutdown');},
-    async close(){if(disposed)return;try{await this.detach();}finally{disposed=true;operations.clear();}}, 
+    async close(){if(disposed)return;try{await this.detach();}finally{disposed=true;operations.clear();}},
   };
 }
 
