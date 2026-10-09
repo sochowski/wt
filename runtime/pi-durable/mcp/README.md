@@ -39,20 +39,57 @@ errors, cancellation, post-effect disconnect uncertainty, teardown, and actual
 bounded output/spill behavior through WT's narrow bridge. No paid inference,
 native session or production MCP server is involved.
 
+## Harness receipt library (still not a WT profile)
+
+`boundary.mjs` and `store.mjs` now compose the actual adapter with public
+Harness documents/tasks/entries. They persist initialization intent before
+transport discovery, immutable owner/source/config/catalog descriptors, and
+bounded tool admission/dispatch/remote-result/candidate journals. A candidate
+is not success: preflight verifies the authoritative assistant request, exact
+public tool task and matching committed `pi.tool-result`. Failed and ambiguous
+outcomes remain distinct. Rehashing a changed candidate cannot create a receipt.
+
+`preflightMcpBoundary` runs committed storage reads before the caller opens the
+Harness. Incomplete initialization, unreceipted/ambiguous operations, or unfinished
+core runs are held. `reopenMcpBoundary` refuses these stores before any actual
+factory, approval, transport or model effect. It never resumes retained work;
+owner-wide Harness.resume is not run-scoped continuation authority. Calling code
+must not admit input/config changes or poll inbox/jobs for a held store.
+
+A **required** `guardModels(models)` preserves the actual public model registry
+and fences its stream entrypoints, leaving Harness the sole inference owner.
+Ordinary hook exceptions are reported and can be ignored by the scheduler;
+they are not a hard model-effect fence. The guard refuses further provider
+requests after live ambiguity or a stale owner hook. Do not omit it when binding
+the extension. No abort mutation of retained work is used as a workaround.
+
+Library tests use an explicit private `mcp-boundary-v1` owner contract and real
+Harness/SQLite/faux inference, not WT CLI admission. This name is **not yet an
+accepted CLI profile**. Existing v1/v2 WT application envelopes cannot be adopted
+by changing a claimed profile. Read-only/delegated roles, process/auth/proxy
+options, ambient output-guard overrides, unlisted tools and stale identities
+reject. Current transport scope is explicit credential-free HTTP(S) server URLs,
+no redirects or automatic reconnects; broader auth/server modes are pending.
+
+Six actual process-kill checkpoints cover initialization intent, admission,
+dispatch intent, remote result, normalized candidate and committed result before
+provider continuation. Tests verify no factory/transport/approval/request replay,
+including a fully receipted tool whose core run is still unfinished. These are
+owned-process SIGKILL proofs, not exhaustive power-loss or remote exactly-once
+claims. Capacity: four servers, sixteen selected tools/server, 128 operations,
+256-byte call IDs, 16 KiB arguments, 128 KiB candidate, 4 MiB journal, 4096 history
+entries. Source scanning is cold-start-only; model refusal is an O(1) gate.
+
 ## Remaining activation gates
 
-1. Persist exact owner/source/config/catalog identities and remote dispatch
-   intents in Harness/SQLite; distinguish candidates from tool-result receipts.
-2. Run uncertain-store and unfinished-core preflight **before** factories,
-   transport/discovery, credentials, model, inbox and job effects. No automatic
-   remote retries or reconnects on uncertain work.
-3. Add bounded gateway discovery/describe/call, caller/server/tool permission
+1. Add bounded gateway discovery/describe/call, caller/server/tool permission
    ceilings and a separately defined scripting authority contract. Unknown
    APIs/options must fail visibly; never fabricate native owner identity.
-4. Private process-kill/reopen, role/budget/output/PTY/lifecycle gates and actual
+2. Complete role/budget/output/PTY/lifecycle gates and actual
    native independent review before product acceptance. Read-only native review
    is still unavailable in the current Durable parent; writer tests are not it.
-5. Explicit fresh-store profile, separate activation approval, no silent
+3. Explicit fresh-store CLI profile, wire the mandatory model guard and all
+   admission/inbox/job barriers, separate activation approval, no silent
    credential refresh/login, settings writes, dependency repair or store migration.
 
 Merging this library does not claim full #73 completion or install authorization.
