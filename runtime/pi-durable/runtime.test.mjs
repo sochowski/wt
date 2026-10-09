@@ -9,7 +9,7 @@ import { once } from 'node:events';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createModels } from '@earendil-works/pi-ai/models';
 import { fauxProvider, fauxAssistantMessage } from '@earendil-works/pi-ai/providers/faux';
-import { context, openRuntime, definition, dependencies, admitMessage, BridgeDoc, validateStore, readOnlyEnvironment, configuredModel } from './runtime.mjs';
+import { context, openRuntime, definition, dependencies, admitMessage, BridgeDoc, validateStore, readOnlyEnvironment, configuredModel, configuredThinking } from './runtime.mjs';
 import { interactive } from './tui.mjs';
 import { getKeybindings, setKeybindings, KeybindingsManager, TUI_KEYBINDINGS } from '@earendil-works/pi-tui';
 import { appActions, loadPresentation } from './presentation.mjs';
@@ -22,8 +22,9 @@ async function fixture(t, responses=[fauxAssistantMessage('OK')], options={}) {
   const directory = await realpath(await mkdtemp(join(tmpdir(),'wt-runtime-'))); t.after(()=>rm(directory,{recursive:true,force:true}));
   const launch = { root:'test-root',agent:'test-agent',runtime:'test-runtime',identity:{store:join(directory,'session.sqlite'),uuid:randomBytes(16).toString('hex'),conversation:1,definition,dependencies,cwd:directory,initialized:false,read_only:options.readOnly===true} };
   const faux = fauxProvider(options); faux.setResponses(responses); const models = createModels(); models.setProvider(faux.provider);
-  const runtime = await openRuntime(launch,{bootstrap:true,models,model:{provider:'faux',modelId:'faux-1'},fence:async()=>{}}); await runtime.close(); launch.identity.initialized=true;
-  const open = async (extra={}) => { const r = await openRuntime(launch,{models,fence:async()=>{},reportStatus:async()=>{},...extra}); t.after(()=>r.close()); return r; };
+  await writeFile(join(directory,'settings.json'),JSON.stringify(options.settings ?? {defaultThinkingLevel:'off'}));
+  const runtime = await openRuntime(launch,{bootstrap:true,models,agentDir:directory,model:{provider:'faux',modelId:'faux-1'},fence:async()=>{},reportDiagnostic:options.reportDiagnostic}); await runtime.close(); launch.identity.initialized=true;
+  const open = async (extra={}) => { const r = await openRuntime(launch,{models,agentDir:directory,fence:async()=>{},reportStatus:async()=>{},...extra}); t.after(()=>r.close()); return r; };
   return {launch,models,faux,open};
 }
 async function until(check) { for(let i=0;i<500;i++) { if(await check()) return; await delay(10); } throw new Error('condition timeout'); }
@@ -104,6 +105,43 @@ test('configured primary provider/model is exact; missing or unsupported model f
   await writeFile(join(agentDir,'settings.json'),JSON.stringify({defaultProvider:'openai-codex',defaultModel:'gpt-6.1-sol'}));
   assert.deepEqual(configuredModel(agentDir),{provider:'openai-codex',modelId:'gpt-6.1-sol'});
   await assert.rejects(openRuntime({...f.launch,identity:{...f.launch.identity,store:join(f.launch.identity.cwd,'unsupported.sqlite'),uuid:randomBytes(16).toString('hex'),initialized:false}},{bootstrap:true,models:f.models,model:{provider:'missing-primary',modelId:'unknown'},fence:async()=>{}}),/Configured primary model/);
+});
+
+test('fresh thinking follows native settings precedence, medium fallback and visible capability clamp', async t => {
+  for (const [settings, model, expected, diagnostic] of [
+    [{defaultThinkingLevel:'high'}, {id:'faux-1',reasoning:true}, 'high', false],
+    [{}, {id:'faux-1',reasoning:true}, 'medium', false],
+    [{defaultThinkingLevel:'low',modelThinkingLevels:{'faux/faux-1':'high'}}, {id:'faux-1',reasoning:true}, 'high', false],
+    [{defaultThinkingLevel:'high'}, {id:'faux-1',reasoning:false}, 'off', true],
+    [{}, {id:'faux-1',reasoning:false}, 'off', true],
+    [{defaultThinkingLevel:'max'}, {id:'faux-1',reasoning:true}, 'high', true],
+  ]) {
+    const notices=[];
+    const f=await fixture(t,undefined,{settings,models:[model],reportDiagnostic:message=>notices.push(message)}), r=await f.open();
+    assert.equal((await r.root.agent(context)).thinkingLevel,expected);
+    assert.equal((await r.root.agent(context)).model.modelId,'faux-1');
+    assert.equal(notices.length,diagnostic?1:0);
+    assert.equal(f.faux.state.callCount,0);
+    await r.close();
+  }
+});
+
+test('invalid thinking rejects bootstrap; reopen ignores changed/broken defaults and /thinking stays conversation-local', async t => {
+  for (const value of ['invalid', '', 2, {}, false]) {
+    assert.throws(()=>configuredThinking({defaultThinkingLevel:value},{provider:'faux',id:'faux-1',reasoning:true}),{code:'WT_PRIMARY_THINKING'});
+  }
+  const f=await fixture(t,undefined,{settings:{defaultThinkingLevel:'high'},models:[{id:'faux-1',reasoning:true}]});
+  const path=join(f.launch.identity.cwd,'settings.json');
+  await writeFile(path,JSON.stringify({defaultThinkingLevel:'invalid'}));
+  await assert.rejects(openRuntime({...f.launch,identity:{...f.launch.identity,store:join(f.launch.identity.cwd,'invalid.sqlite'),uuid:randomBytes(16).toString('hex'),initialized:false}},{bootstrap:true,models:f.models,agentDir:f.launch.identity.cwd,model:{provider:'faux',modelId:'faux-1'},fence:async()=>{}}),{code:'WT_PRIMARY_THINKING'});
+  const r=await f.open(); assert.equal((await r.root.agent(context)).thinkingLevel,'high');
+  const terminal=new Terminal(),ui=interactive(r,{terminal,poll:false});
+  await until(()=>terminal.started);terminal.type('/thinking low');terminal.input('\r');
+  await until(async()=>(await r.root.agent(context)).thinkingLevel==='low');
+  terminal.type('/quit');terminal.input('\r');await ui;
+  assert.equal(JSON.parse(await (await import('node:fs/promises')).readFile(path,'utf8')).defaultThinkingLevel,'invalid');
+  await writeFile(path,'broken JSON');
+  const reopened=await f.open();assert.equal((await reopened.root.agent(context)).thinkingLevel,'low');assert.equal(f.faux.state.callCount,0);
 });
 
 test('read-only host has fixed tools, no generic bash/WT mutations and an environment mutation/spawn veto',async t=>{

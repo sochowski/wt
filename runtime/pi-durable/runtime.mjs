@@ -7,6 +7,7 @@ import { promisify } from 'node:util';
 import { execFile } from 'node:child_process';
 import { BACKGROUND_CONTEXT as context } from '@earendil-works/chord/context';
 import { builtinModels } from '@earendil-works/pi-ai/providers/all';
+import { clampThinkingLevel } from '@earendil-works/pi-ai/models';
 import { Type, cleanupSessionResources } from '@earendil-works/pi-ai';
 import { Harness, createRegistry, defineExtension, defineTool, defineDoc, section, GenerationTask, hook, ProviderDoc } from '@earendil-works/pi-durable';
 import { CodingTools } from '@earendil-works/pi-durable/tools';
@@ -140,10 +141,19 @@ async function jobToolArguments(env, cwd, name, args) {
   return { ...args, path };
 }
 
-export function configuredModel(agentDir) {
-  let settings = {};
+function configuredSettings(agentDir) {
   const path = join(agentDir, 'settings.json');
-  if (existsSync(path)) settings = JSON.parse(readFileSync(path, 'utf8'));
+  return existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : {};
+}
+export function configuredThinking(settings, model, report = console.warn) {
+  // Native Pi precedence and fallback; never read defaults on reopen.
+  const requested = settings.modelThinkingLevels?.[`${model.provider}/${model.id}`] ?? settings.defaultThinkingLevel ?? 'medium';
+  if (!['off','minimal','low','medium','high','xhigh','max'].includes(requested)) throw Object.assign(new Error('Invalid configured thinking level'), { code: 'WT_PRIMARY_THINKING' });
+  const level = clampThinkingLevel(model, requested);
+  if (level !== requested) report(`wt durable: configured thinking ${requested} is unsupported by the selected model; using ${level} (native Pi capability clamp, model unchanged).`);
+  return level;
+}
+export function configuredModel(agentDir, settings = configuredSettings(agentDir)) {
   if (typeof settings.defaultProvider !== 'string' || !settings.defaultProvider || typeof settings.defaultModel !== 'string' || !settings.defaultModel) throw Object.assign(new Error('Durable WT requires explicit configured defaultProvider/defaultModel; no silent provider fallback'), { code: 'WT_PRIMARY_MODEL' });
   return { provider: settings.defaultProvider, modelId: settings.defaultModel };
 }
@@ -153,7 +163,7 @@ export async function openRuntime(launch, options = {}) {
   const fence = options.fence || (() => wtFence(launch));
   if (!options.bootstrap) await fence();
   validateStore(launch, options.bootstrap === true);
-  const agentDir = process.env.PI_CODING_AGENT_DIR || join(homedir(), '.pi', 'agent');
+  const agentDir = options.agentDir || process.env.PI_CODING_AGENT_DIR || join(homedir(), '.pi', 'agent');
   const models = options.models || builtinModels({ credentials: readOnlyCredentials(process.env.WT_PI_AUTH_PATH || join(agentDir, 'auth.json')) });
   if (process.env.WT_DURABLE_SMOKE === '1') {
     let requests = 0;
@@ -163,8 +173,11 @@ export async function openRuntime(launch, options = {}) {
       return stream(model, transcript, { ...requestOptions, maxTokens: 256, maxRetries: 0 });
     };
   }
-  const initialModel = options.bootstrap ? (options.model || configuredModel(agentDir)) : undefined;
-  if (initialModel && !models.getModel(initialModel.provider, initialModel.modelId)) throw Object.assign(new Error('Configured primary model is not supported by the pinned durable catalog; no fallback'), { code: 'WT_PRIMARY_MODEL' });
+  const settings = options.bootstrap ? configuredSettings(agentDir) : undefined;
+  const initialModel = options.bootstrap ? (options.model || configuredModel(agentDir, settings)) : undefined;
+  const selectedModel = initialModel && models.getModel(initialModel.provider, initialModel.modelId);
+  if (initialModel && !selectedModel) throw Object.assign(new Error('Configured primary model is not supported by the pinned durable catalog; no fallback'), { code: 'WT_PRIMARY_MODEL' });
+  const initialThinking = selectedModel ? configuredThinking(settings, selectedModel, options.reportDiagnostic) : undefined;
   const resources = resourcePrompt(launch.identity.cwd, agentDir, process.env.WT_DURABLE_TRUST_PROJECT === '1');
   const nodeEnv = options.environment || new NodeExecutionEnv({ cwd: launch.identity.cwd });
   const boundedEnv = launch.identity.job ? assignedEnvironment(nodeEnv, launch.identity.cwd) : nodeEnv;
@@ -210,7 +223,7 @@ export async function openRuntime(launch, options = {}) {
     models, registry, env: () => env, settings: { retry: { maxRetries: 0 }, compaction: { enabled: false }, stream: { timeoutMs: process.env.WT_DURABLE_SMOKE === '1' ? 20000 : 60000, maxRetries: 0, ...(process.env.WT_DURABLE_SMOKE === '1' ? { maxTokens: 256 } : {}) } },
   }, context);
   try {
-    const root = options.bootstrap ? await harness.root(context, { agent: { cwd: launch.identity.cwd, model: initialModel, thinkingLevel: 'off' } }) : await harness.conversation(launch.identity.conversation, context);
+    const root = options.bootstrap ? await harness.root(context, { agent: { cwd: launch.identity.cwd, model: initialModel, thinkingLevel: initialThinking } }) : await harness.conversation(launch.identity.conversation, context);
     if (!root) throw new Error('Missing exact durable conversation');
     const agent = await root.agent(context);
     if (agent.cwd !== launch.identity.cwd || !models.getModel(agent.model.provider, agent.model.modelId)) throw new Error('Persisted cwd/model incompatible with runtime');

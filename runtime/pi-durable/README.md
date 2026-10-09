@@ -59,6 +59,18 @@ expired or unsupported auth must be configured separately using ordinary Pi.
 Custom models.json/catalogs are not imported. Relaunch retains the stored model,
 thinking, cwd, UUID and exact conversation, not a changed default or cwd-latest.
 
+Fresh conversations read `modelThinkingLevels["provider/model"]` first, then
+`defaultThinkingLevel` from that same agent `settings.json`, falling back to
+`medium` when unset (native Pi semantics). Values are `off`, `minimal`, `low`,
+`medium`, `high`, `xhigh`, or `max`; invalid values fail bootstrap with a visible
+configuration diagnostic. Unsupported levels are clamped using the pinned Pi
+model capability rules, with a visible warning and **no model change** (e.g. a
+non-reasoning model uses `off`). Project settings are not imported. `/thinking`,
+its picker and Shift+Tab change only the stored conversation, never global
+settings. Resume/reopen does not read these defaults, even if settings have
+subsequently changed or become invalid. Admitted job contracts and tool ceilings
+are unchanged; worker reopen likewise uses its stored agent state.
+
 Interactive input: Enter chats or queues followUp; `/steer TEXT`, `/followup TEXT`,
 `/model PROVIDER/MODEL`, `/thinking LEVEL`, `/skill:NAME [TEXT]`, `/notifications`,
 `/abort`, `/quit`, `/stop`, `/help`. Abort durably cancels; quit/close/crash leaves
