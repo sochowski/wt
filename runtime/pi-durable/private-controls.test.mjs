@@ -8,7 +8,7 @@ import { promisify } from 'node:util';
 import { execFile, spawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 const exec=promisify(execFile),source=fileURLToPath(new URL('../..',import.meta.url));
-test('private compiled WT: real durable managed presentation reuse/protections and attached pinned human self-stop', {timeout:60000},async t=>{
+for(const profile of ['', 'native-compat-v2'])test(`private compiled WT: ${profile||'v1'} real durable presentation/protections, plugin PTY and pinned human self-stop`, {timeout:90000},async t=>{
  const home=realpathSync(await mkdtemp('/tmp/wt-durable-controls-')),bin=join(home,'bin'),config=join(home,'source','config'),runtime=join(home,'source','runtime','pi-durable');
  const socket=`wt-durable-controls-${process.pid}`,tmux=(await exec('which',['tmux'])).stdout.trim();let env,client,store,phase='fixture';
  t.after(async()=>{
@@ -33,7 +33,7 @@ test('private compiled WT: real durable managed presentation reuse/protections a
  const wt=async args=>{const out=(await exec(binary,['worktree',...args],{env,timeout:15000})).stdout.trim();return out?JSON.parse(out):undefined;};
  const until=async check=>{const deadline=Date.now()+15000;while(Date.now()<deadline){if(await check())return;await delay(50);}throw new Error(`controls deadline ${phase}`);};
  await tm(['-f','/dev/null','new-session','-d','-s','sandbox','-c',home]);
- const root=await wt(['new','controls','--cwd',join(home,'parent')]);const parent=root.agents[0];assert.equal(parent.adapter.backend,'durable');store=parent.adapter.durable.store;const view=root.views.find(v=>v.target===parent.id);
+ const root=await wt(['new','controls','--cwd',join(home,'parent'),...(profile?['--durable-profile',profile]:[])]);const parent=root.agents[0];assert.equal(parent.adapter.backend,'durable');store=parent.adapter.durable.store;const view=root.views.find(v=>v.target===parent.id);
  await until(async()=>(await tm(['capture-pane','-p','-t',view.pane])).includes('/help'));
  phase='native-ui-real-keyboard';
  const nativeSettings=await readFile(join(home,'pi','settings.json'),'utf8');
@@ -62,6 +62,16 @@ test('private compiled WT: real durable managed presentation reuse/protections a
  await wt(['view','pin',root.id,first[0].id]);phase='present-pin-protection';const pinned=await present(2);assert.equal(pinned.length,2);assert.equal(pinned.find(v=>v.id===first[0].id).pinned,true);
  assert.equal(await tm(['display-message','-p','-t',view.pane,'#{window_id}:#{pane_id}']),active);
  assert.ok((await tm(['list-clients','-F','#{client_session}:#{pane_id}'])).includes(`controls:${view.pane}`),'human client focus moved');
+ if(profile){
+  phase='actual-plugin-private-pty';
+  assert.equal(parent.adapter.durable.profile,profile);assert.equal(parent.adapter.durable.plugin_contract.length,64);
+  await input('Ask through actual installed package');await until(async()=>(await tm(['capture-pane','-p','-t',view.pane])).includes('ACTUAL_PRIVATE_PLUGIN_QUESTION?'));
+  await tm(['send-keys','-t',view.pane,'Enter']);await until(async()=>(await tm(['capture-pane','-p','-t',view.pane])).includes('ACTUAL_PLUGIN_QUESTION_DONE'));
+  await input('Create actual todo');await until(async()=>(await tm(['capture-pane','-p','-t',view.pane])).includes('ACTUAL_PLUGIN_TODO_DONE'));
+  await until(async()=>(await tm(['capture-pane','-p','-t',view.pane])).includes('ACTUAL_PRIVATE_TODO'));
+  await input('/todos');await until(async()=>(await tm(['capture-pane','-p','-t',view.pane])).includes('Pending'));
+  assert.equal(await tm(['display-message','-p','-t',view.pane,'#{window_id}:#{pane_id}']),active);
+ }
  // The ordinary model-origin route remains rejected even for self.
  const actorEnv={...env,WT_ROOT_ID:root.id,WT_AGENT_ID:parent.id,WT_RUNTIME_ID:parent.runtime};
  await exec(binary,['set','controls','--message','live nonjob fixture remains admitted'],{env:actorEnv,timeout:10000});

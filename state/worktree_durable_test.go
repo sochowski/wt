@@ -390,3 +390,59 @@ head -n 1
 		t.Fatal("resume migrated/relaunched stopped conversation or lost prepared checkout")
 	}
 }
+
+func TestDurablePluginProfileIsExplicitFreshStoreAndV1RemainsExact(t *testing.T) {
+	source, err := filepath.Abs("../config")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := worktreeTestStore(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
+	t.Setenv("WT_SOURCE_CONFIG", source)
+	t.Setenv("WT_STATUS_DIR", t.TempDir())
+	agentDir := filepath.Join(home, "pi")
+	if err = os.MkdirAll(agentDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(agentDir, "settings.json"), []byte(`{"defaultProvider":"anthropic","defaultModel":"claude-haiku-4-5-20251001"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PI_CODING_AGENT_DIR", agentDir)
+	v1 := testRoot(t, s, "profile-v1")
+	if err = s.initializeDurable(v1, v1.Agents[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	v1, _ = s.Worktree(v1.ID)
+	before := jsonText(v1.Agents[0].Adapter)
+	if err = s.initializeDurableProfile(v1, v1.Agents[0].ID, durablePluginProfile, false); err == nil {
+		t.Fatal("v1 adopted plugin profile")
+	}
+	after, _ := s.Worktree(v1.ID)
+	if jsonText(after.Agents[0].Adapter) != before {
+		t.Fatal("v1 identity mutated")
+	}
+	v2 := testRoot(t, s, "profile-v2")
+	if err = s.initializeDurableProfile(v2, v2.Agents[0].ID, durablePluginProfile, false); err != nil {
+		t.Fatal(err)
+	}
+	v2, _ = s.Worktree(v2.ID)
+	a := v2.Agents[0]
+	d := a.Adapter.Durable
+	if d.Profile != durablePluginProfile || d.Definition != durablePluginDefinition || len(d.PluginContract) != 64 || len(d.PluginSource) != 64 || d.UUID == v1.Agents[0].Adapter.Durable.UUID {
+		t.Fatalf("bad fresh plugin identity %+v", d)
+	}
+	if err = validateDurable(a); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.initializeDurableProfile(v2, a.ID, durablePluginProfile, false); err == nil {
+		t.Fatal("v2 rebootstrap allowed")
+	}
+	copy := *d
+	copy.Profile = "unknown"
+	a.Adapter.Durable = &copy
+	if err = validateDurable(a); err == nil {
+		t.Fatal("unknown profile admitted")
+	}
+}

@@ -1,0 +1,81 @@
+{
+  "sdk": "0.87.1",
+  "highlight": "10.7.3",
+  "theme": "dark",
+  "trueColor": true,
+  "md": {
+    "heading": "\u001b[38;2;240;198;116msample\u001b[39m",
+    "link": "\u001b[38;2;129;162;190msample\u001b[39m",
+    "linkUrl": "\u001b[38;2;102;102;102msample\u001b[39m",
+    "code": "\u001b[38;2;138;190;183msample\u001b[39m",
+    "codeBlock": "\u001b[38;2;181;189;104msample\u001b[39m",
+    "codeBlockBorder": "\u001b[38;2;128;128;128msample\u001b[39m",
+    "quote": "\u001b[38;2;128;128;128msample\u001b[39m",
+    "quoteBorder": "\u001b[38;2;128;128;128msample\u001b[39m",
+    "hr": "\u001b[38;2;128;128;128msample\u001b[39m",
+    "listBullet": "\u001b[38;2;138;190;183msample\u001b[39m",
+    "bold": "\u001b[1msample\u001b[22m",
+    "italic": "\u001b[3msample\u001b[23m",
+    "underline": "\u001b[4msample\u001b[24m",
+    "strikethrough": "\u001b[9msample\u001b[29m"
+  },
+  "borders": [
+    [
+      "<─>"
+    ],
+    [
+      "<─>"
+    ],
+    [
+      "<────────────>"
+    ]
+  ],
+  "codes": [
+    {
+      "lang": "javascript",
+      "code": "const x = \"<&>\"; // comment\nfunction f(n) { return n + 42; }",
+      "lines": [
+        "\u001b[38;2;86;156;214mconst\u001b[39m x = \u001b[38;2;206;145;120m\"<&>\"\u001b[39m; \u001b[38;2;106;153;85m// comment\u001b[39m",
+        "\u001b[38;2;86;156;214mfunction\u001b[39m\u001b[38;2;220;220;170m \u001b[39m\u001b[38;2;220;220;170mf\u001b[39m\u001b[38;2;220;220;170m(\u001b[39m\u001b[38;2;156;220;254mn\u001b[39m\u001b[38;2;220;220;170m) \u001b[39m{ \u001b[38;2;86;156;214mreturn\u001b[39m n + \u001b[38;2;181;206;168m42\u001b[39m; }"
+      ]
+    },
+    {
+      "lang": "python",
+      "code": "def greet(name):\n    return \"Hello \" + name",
+      "lines": [
+        "\u001b[38;2;86;156;214mdef\u001b[39m\u001b[38;2;220;220;170m \u001b[39m\u001b[38;2;220;220;170mgreet\u001b[39m\u001b[38;2;220;220;170m(\u001b[39m\u001b[38;2;156;220;254mname\u001b[39m\u001b[38;2;220;220;170m):\u001b[39m",
+        "    \u001b[38;2;86;156;214mreturn\u001b[39m \u001b[38;2;206;145;120m\"Hello \"\u001b[39m + name"
+      ]
+    },
+    {
+      "lang": "go",
+      "code": "package main\nfunc main() { println(42) }",
+      "lines": [
+        "\u001b[38;2;86;156;214mpackage\u001b[39m main",
+        "\u001b[38;2;86;156;214mfunc\u001b[39m\u001b[38;2;220;220;170m \u001b[39m\u001b[38;2;220;220;170mmain\u001b[39m\u001b[38;2;156;220;254m()\u001b[39m { \u001b[38;2;78;201;176mprintln\u001b[39m(\u001b[38;2;181;206;168m42\u001b[39m) }"
+      ]
+    },
+    {
+      "lang": "nix",
+      "code": "{ pkgs }: pkgs.hello",
+      "lines": [
+        "{ pkgs }: pkgs.hello"
+      ]
+    },
+    {
+      "lang": "unknown-language",
+      "code": "<raw>& text",
+      "lines": [
+        "\u001b[38;2;181;189;104m<raw>& text\u001b[39m"
+      ]
+    },
+    {
+      "lang": null,
+      "code": "no language\nraw",
+      "lines": [
+        "\u001b[38;2;181;189;104mno language\u001b[39m",
+        "\u001b[38;2;181;189;104mraw\u001b[39m"
+      ]
+    }
+  ]
+}

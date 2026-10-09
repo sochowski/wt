@@ -17,6 +17,7 @@ import { wtHostContext } from '../../config/pi-wt/orientation.js';
 import { resourcePrompt, readOnlyCredentials } from './resources.mjs';
 import { wtTools } from './wt-tools.mjs';
 import { observeJobTool, JobDoc } from './jobs.mjs';
+import { pluginProfile, pluginDefinition, pluginDependencies } from './plugin-contract-v2.mjs';
 
 export { context };
 export const definition = 'wt-durable-v1';
@@ -42,8 +43,10 @@ export async function humanSelfStop(launch) {
 }
 export function identityValue(launch) {
   const d = launch.identity;
-  if (!launch.root || !launch.agent || !d || d.conversation !== 1 || !/^[a-f0-9]{32}$/.test(d.uuid) || d.definition !== definition || d.dependencies !== dependencies || realpathSync(d.cwd) !== d.cwd || realpathSync(dirname(d.store)) !== dirname(d.store)) throw new Error('Incompatible durable launch identity');
-  return { root: launch.root, agent: launch.agent, store: d.store, uuid: d.uuid, conversation: d.conversation, cwd: d.cwd, writer_lock: d.writer_lock, read_only: d.read_only === true, ...(d.job ? { job: d.job, role: d.role, tools: d.tools } : {}), definition, dependencies };
+  const plugins = d?.profile === pluginProfile;
+  const expectedDefinition = plugins ? pluginDefinition : definition, expectedDependencies = plugins ? pluginDependencies : dependencies;
+  if (!launch.root || !launch.agent || !d || d.conversation !== 1 || !/^[a-f0-9]{32}$/.test(d.uuid) || d.definition !== expectedDefinition || d.dependencies !== expectedDependencies || (!plugins && (d.profile || d.plugin_source || d.plugin_contract)) || (plugins && (!/^[a-f0-9]{64}$/.test(d.plugin_source || '') || !/^[a-f0-9]{64}$/.test(d.plugin_contract || ''))) || realpathSync(d.cwd) !== d.cwd || realpathSync(dirname(d.store)) !== dirname(d.store)) throw new Error('Incompatible durable launch identity');
+  return { root: launch.root, agent: launch.agent, store: d.store, uuid: d.uuid, conversation: d.conversation, cwd: d.cwd, writer_lock: d.writer_lock, read_only: d.read_only === true, ...(d.job ? { job: d.job, role: d.role, tools: d.tools } : {}), definition:expectedDefinition, dependencies:expectedDependencies, ...(plugins ? {profile:pluginProfile,plugin_source:d.plugin_source,plugin_contract:d.plugin_contract} : {}) };
 }
 /** Validate the application envelope before Harness.open can reconcile running tasks. */
 export function validateStore(launch, bootstrap = false) {
@@ -162,7 +165,20 @@ export function configuredModel(agentDir, settings = configuredSettings(agentDir
 export async function openRuntime(launch, options = {}) {
   const fence = options.fence || (() => wtFence(launch));
   if (!options.bootstrap) await fence();
-  validateStore(launch, options.bootstrap === true);
+  if (!options.bootstrap || existsSync(launch.identity.store)) validateStore(launch, options.bootstrap === true);
+  let plugins, interruptedRun;
+  if (launch.identity.profile === pluginProfile) {
+    if (launch.identity.definition !== pluginDefinition || launch.identity.dependencies !== pluginDependencies) throw new Error('Incompatible plugin profile');
+    const { createPluginHost } = await import('./plugins-v2.mjs');
+    let preflight;
+    if (!options.bootstrap) { const { inspectPluginStore } = await import('./plugin-store-v2.mjs'); preflight = await inspectPluginStore(launch); interruptedRun = preflight.unfinishedRun; }
+    plugins = await createPluginHost(launch, fence, options.pluginObserver, preflight);
+    if (options.bootstrap && !existsSync(launch.identity.store) && !launch.identity.plugin_contract && !launch.identity.plugin_source) {
+      launch.identity.plugin_source = plugins.sourceFingerprint; launch.identity.plugin_contract = plugins.fingerprint;
+    }
+    if (launch.identity.plugin_contract !== plugins.fingerprint || launch.identity.plugin_source !== plugins.sourceFingerprint) throw new Error('Immutable plugin contract mismatch');
+  }
+  if (options.bootstrap) validateStore(launch, true);
   const agentDir = options.agentDir || process.env.PI_CODING_AGENT_DIR || join(homedir(), '.pi', 'agent');
   const models = options.models || builtinModels({ credentials: readOnlyCredentials(process.env.WT_PI_AUTH_PATH || join(agentDir, 'auth.json')) });
   if (process.env.WT_DURABLE_SMOKE === '1') {
@@ -208,7 +224,7 @@ export async function openRuntime(launch, options = {}) {
     await fence(); // Safe replay bypasses beforeTool, so validate here too.
     return { content: [{ type: 'text', text: JSON.stringify(await stateCommand(['workspace', launch.root])) }] };
   } });
-  const managedTools = options.bootstrap || launch.identity.read_only || launch.identity.job ? [] : wtTools(launch, fence, stateCommand);
+  const managedTools = (options.bootstrap && !plugins) || launch.identity.read_only || launch.identity.job ? [] : wtTools(launch, fence, stateCommand);
   const workspaceTools = !ceiling || ceiling.includes('wt_workspace') ? [wtRead] : [];
   registry.install(defineExtension({ name: 'wt-host', tools: [...guardedTools, ...workspaceTools, ...managedTools], sections: [
     section('wt-instructions', () => `You are a coding assistant in WT. Work only on assigned resources; obey project instructions. Tool mutations/bash are not exactly-once across crashes.\n${resources.prompt}`),
@@ -219,26 +235,33 @@ export async function openRuntime(launch, options = {}) {
     }),
     section('wt-orientation', async () => options.bootstrap ? undefined : wtHostContext({ cwd: launch.identity.cwd, tools: [...guardedTools.map(t => t.name), ...workspaceTools.map(t => t.name), ...managedTools.map(t => t.name)], systemPrompt: '' }, process.env, root => stateCommand(['workspace', root])), { tag: false }),
   ], hooks: [hook(GenerationTask, { beforeRequest: async () => { await fence(); } })] }));
+  if (plugins) registry.install(plugins.extension);
   const harness = await Harness.open(await openNodeSqliteStorage(launch.identity.store), {
     models, registry, env: () => env, settings: { retry: { maxRetries: 0 }, compaction: { enabled: false }, stream: { timeoutMs: process.env.WT_DURABLE_SMOKE === '1' ? 20000 : 60000, maxRetries: 0, ...(process.env.WT_DURABLE_SMOKE === '1' ? { maxTokens: 256 } : {}) } },
   }, context);
   try {
     const root = options.bootstrap ? await harness.root(context, { agent: { cwd: launch.identity.cwd, model: initialModel, thinkingLevel: initialThinking } }) : await harness.conversation(launch.identity.conversation, context);
     if (!root) throw new Error('Missing exact durable conversation');
+    if (plugins && options.bootstrap) { const { PluginContractDoc } = await import('./plugin-store-v2.mjs'); await root.commit(async tx => { const doc = await tx.doc(PluginContractDoc); Object.assign(doc, plugins.descriptor); }, context); }
     const agent = await root.agent(context);
     if (agent.cwd !== launch.identity.cwd || !models.getModel(agent.model.provider, agent.model.modelId)) throw new Error('Persisted cwd/model incompatible with runtime');
     let closed = false;
-    return { launch, harness, root, models, resources, fence,
-      async resume() { await fence(); harness.resume(); },
+    const runtime = { launch, harness, root, models, resources, fence, plugins,
+      continuationHeld:Boolean(interruptedRun), interruptedRun,
+      async resume() { await fence(); if (!plugins?.recoveryHeld && !interruptedRun) harness.resume(); },
       async reportStatus(status) { if (options.reportStatus) return options.reportStatus(status); await fence(); await stateCommand(['hook',status]); },
       async input(content, mode = 'followUp', requestId) {
         await fence();
+        if (plugins?.recoveryHeld) throw new Error('Uncertain plugin recovery is read-only inspection; new work requires separate authorized recovery identity');
+        if (interruptedRun) throw new Error('Interrupted v2 core run awaits separate human-authorized continuation; continuation unavailable in this checkpoint');
         return root.submit({ type: 'input', content, whenBusy: mode, requestId }, context);
       },
-      async abort() { await fence(); await root.abort(context); },
+      async abort() { await fence(); if (plugins?.recoveryHeld || interruptedRun) throw new Error('Interrupted plugin recovery cannot mutate retained work'); await root.abort(context); },
       async close() {
         if (closed) return; closed = true;
         const provider = await harness.snapshot(ProviderDoc, root.id, context);
+        try { if (plugins) await plugins.close(); }
+        finally {
         try { await harness.close(context); }
         finally {
           // Codex retains a websocket/idle timer after generation settles.
@@ -246,8 +269,11 @@ export async function openRuntime(launch, options = {}) {
           try { if (provider?.sessionId) cleanupSessionResources(provider.sessionId); }
           finally { await env.cleanup(context); }
         }
+        }
       },
     };
+    if (plugins) await plugins.bind(runtime, registry);
+    return runtime;
   } catch (error) { await harness.close(context); await env.cleanup(context); throw error; }
 }
 

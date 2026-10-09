@@ -27,6 +27,7 @@ try {
   if (mode === 'bootstrap') {
     const runtime = await openRuntime(launch, { bootstrap: true, fence: async () => {} });
     await runtime.close(); // Never resume/bootstrap generation.
+    if (runtime.plugins) console.log(JSON.stringify({ plugin_source: launch.identity.plugin_source, plugin_contract: launch.identity.plugin_contract }));
   } else {
     if (!launch.identity.read_only) inheritedLock(5, launch.identity.writer_lock);
     {

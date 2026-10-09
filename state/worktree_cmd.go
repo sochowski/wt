@@ -234,6 +234,7 @@ func worktreeCommand(s *Store, args []string) error {
 		open := fs.Bool("switch", false, "focus new agent")
 		offline := fs.Bool("offline", false, "persist without launching tmux")
 		backend := fs.String("backend", "durable", "Pi backend for modern new sessions: durable or explicit native")
+		durableProfile := fs.String("durable-profile", "", "explicit new-store native-compat-v2 plugin profile; default v1 unchanged")
 		readOnly := fs.Bool("read-only", false, "durable host read-only coding ceiling")
 		if err := fs.Parse(args); err != nil {
 			return err
@@ -250,15 +251,15 @@ func worktreeCommand(s *Store, args []string) error {
 		if explicitCwd && *cwd == "" {
 			return errors.New("explicit --cwd must be an existing directory")
 		}
-		if (*backend != "native" && *backend != "durable") || (*readOnly && *backend != "durable") {
-			return errors.New("unsupported Pi backend/permission selection")
+		if (*backend != "native" && *backend != "durable") || (*readOnly && *backend != "durable") || (*durableProfile != "" && (*durableProfile != durablePluginProfile || *backend != "durable")) {
+			return errors.New("unsupported Pi backend/permission/profile selection")
 		}
 		w, err := s.createNamedRoot(name, *cwd)
 		if err != nil {
 			return err
 		}
 		if *backend == "durable" {
-			if err = s.initializeDurable(w, w.Agents[0].ID, *readOnly); err != nil {
+			if err = s.initializeDurableProfile(w, w.Agents[0].ID, *durableProfile, *readOnly); err != nil {
 				return err
 			}
 			w, err = s.Worktree(w.ID)
@@ -440,12 +441,13 @@ func worktreeCommand(s *Store, args []string) error {
 			open := fs.Bool("open", false, "human focus")
 			task := fs.String("task", "", "initial durable delegated request")
 			backend := fs.String("backend", defaultPiBackend(w), "Pi backend: durable for modern roots, explicit native for legacy")
+			durableProfile := fs.String("durable-profile", "", "explicit new-store native-compat-v2 plugin profile; default v1 unchanged")
 			readOnly := fs.Bool("read-only", false, "durable host read-only coding ceiling")
 			if err = fs.Parse(args[1:]); err != nil {
 				return err
 			}
-			if (*backend != "native" && *backend != "durable") || (*readOnly && *backend != "durable") {
-				return errors.New("unsupported Pi backend/permission selection")
+			if (*backend != "native" && *backend != "durable") || (*readOnly && *backend != "durable") || (*durableProfile != "" && (*durableProfile != durablePluginProfile || *backend != "durable")) {
+				return errors.New("unsupported Pi backend/permission/profile selection")
 			}
 			if actor != "" && *open {
 				return errors.New("agent creation cannot steal focus")
@@ -466,7 +468,7 @@ func worktreeCommand(s *Store, args []string) error {
 				return err
 			}
 			if *backend == "durable" {
-				if err = s.initializeDurable(w, id, *readOnly); err != nil {
+				if err = s.initializeDurableProfile(w, id, *durableProfile, *readOnly); err != nil {
 					return err
 				}
 				w, err = s.Worktree(w.ID)
