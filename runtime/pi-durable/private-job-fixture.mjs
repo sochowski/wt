@@ -31,9 +31,13 @@ if(mode==='job'){
 if(mode==='interactive') {
   if (!launch.identity.read_only) {
     const deck={title:'Durable proof',scenes:[{title:'Managed target',narrative:'Private presentation',artifact:{kind:'markdown',content:'# DURABLE_MANAGED_DECK'}}]};
-    faux.setResponses(Array.from({length:3},(_,i)=>[
+    const responses=Array.from({length:3},(_,i)=>[
       fauxAssistantMessage([fauxToolCall('wt_present_deck',deck,{id:`present-${i}`})],{stopReason:'toolUse'}),fauxAssistantMessage(`PRESENT_PROOF_${i}`),
-    ]).flat());
+    ]).flat();
+    if(launch.identity.profile==='native-compat-v2')responses.push(
+      fauxAssistantMessage(fauxToolCall('ask_user_question',{questions:[{question:'ACTUAL_PRIVATE_PLUGIN_QUESTION?',header:'Private',options:[{label:'Alpha',description:'First'},{label:'Beta',description:'Second'}]}]},{id:'private-question'}),{stopReason:'toolUse'}),fauxAssistantMessage('ACTUAL_PLUGIN_QUESTION_DONE'),
+      fauxAssistantMessage(fauxToolCall('todo',{action:'create',subject:'ACTUAL_PRIVATE_TODO'},{id:'private-todo'}),{stopReason:'toolUse'}),fauxAssistantMessage('ACTUAL_PLUGIN_TODO_DONE'));
+    faux.setResponses(responses);
   } else faux.setResponses([fauxAssistantMessage('INBOX_FIXTURE_OK')]);
 }
 if(mode!=='bootstrap') {
@@ -41,7 +45,7 @@ if(mode!=='bootstrap') {
   models.streamSimple=(...args)=>{appendFileSync(`${launch.identity.store}.calls`,'1\n');return stream(...args);};
 }
 const runtime=await openRuntime(launch,{models,...(mode==='bootstrap'?{bootstrap:true,model:{provider:'faux',modelId:'faux-1'},fence:async()=>{}}:{})});
-if(mode==='bootstrap')await runtime.close();
+if(mode==='bootstrap'){await runtime.close();if(runtime.plugins)console.log(JSON.stringify({plugin_source:launch.identity.plugin_source,plugin_contract:launch.identity.plugin_contract}));}
 else if(mode==='job'){
   const command=async(args,input)=>{
     if(args[1]==='finish' && launch.identity.role==='writer' && process.env.WT_FIXTURE_FAULT==='publication' && !existsSync(`${launch.identity.store}.kill-seen`)) {

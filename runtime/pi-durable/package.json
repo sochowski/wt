@@ -2,12 +2,23 @@
   "name": "wt-pi-durable-runtime",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=22.22.0 <23" },
-  "scripts": { "test": "node run-tests.mjs", "test:integration": "node --test private-jobs.test.mjs" },
+  "engines": {
+    "node": ">=22.22.0 <23"
+  },
+  "scripts": {
+    "test": "node run-tests.mjs",
+    "test:integration": "node --test private-jobs.test.mjs"
+  },
   "dependencies": {
     "@earendil-works/pi-durable": "1.0.3",
     "@earendil-works/pi-ai": "1.0.3",
     "@earendil-works/chord": "1.0.3",
-    "@earendil-works/pi-tui": "0.87.1"
+    "@earendil-works/pi-tui": "0.87.1",
+    "@juicesharp/rpiv-ask-user-question": "2.9.0",
+    "@juicesharp/rpiv-todo": "2.9.0",
+    "@juicesharp/rpiv-config": "2.9.0",
+    "typebox": "1.3.27",
+    "jiti": "2.7.0",
+    "highlight.js": "10.7.3"
   }
 }

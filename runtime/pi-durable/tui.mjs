@@ -11,7 +11,7 @@ import { getSupportedThinkingLevels } from '@earendil-works/pi-ai/models';
 import { ActionEditor, SearchSelector } from './editor-ui.mjs';
 export { renderConversation } from './conversation-ui.mjs';
 
-/** WT-owned public pi-tui controller. No native extension host is loaded. */
+/** WT-owned public pi-tui controller; no native inference/session engine. */
 export async function interactive(runtime, { terminal, poll = true, commandTransport = stateCommand, selfStop = humanSelfStop, stateObserver, presentation } = {}) {
   const previousKeybindings = getKeybindings();
   let tui, watch, pump, jobs, timer, signalClose, selectorContainer, selector, closePromise, closed = false;
@@ -29,6 +29,7 @@ export async function interactive(runtime, { terminal, poll = true, commandTrans
         await attempt(() => pump?.stop()); await attempt(() => jobs?.stop());
         await attempt(() => observe('closing'));
         selector = undefined; await attempt(() => selectorContainer?.clear());
+        await attempt(() => runtime.plugins?.detach());
         await attempt(() => watch?.stop()); await attempt(() => tui?.stop());
         await attempt(() => runtime.close());
         await attempt(() => stateObserver?.({ stage: 'closed', at: Date.now() }));
@@ -47,7 +48,8 @@ export async function interactive(runtime, { terminal, poll = true, commandTrans
     const transcript = new Container(), notices = new Text('', 0, 0), status = new Text('', 0, 0);
     const editor = new ActionEditor(tui, { borderColor: text => theme.fg('borderAccent', text), selectList: selectTheme(theme) }, keybindings, { paddingX: presentation.editorPaddingX, autocompleteMaxVisible: presentation.autocompleteMaxVisible });
     selectorContainer = new Container();
-    tui.addChild(transcript); tui.addChild(notices); tui.addChild(selectorContainer); tui.addChild(editor); tui.addChild(status); tui.setFocus(editor);
+    const widgets = new Container();
+    tui.addChild(transcript); tui.addChild(notices); tui.addChild(selectorContainer); tui.addChild(widgets); tui.addChild(editor); tui.addChild(status); tui.setFocus(editor);
     const commands = ['help', 'hotkeys', 'quit', 'abort', 'stop', 'model', 'thinking', 'steer', 'followup', 'notifications', ...runtime.resources.skills.map(skill => `skill:${skill.name}`)];
     editor.setAutocompleteProvider(new CombinedAutocompleteProvider(commands.map(name => ({ name })), runtime.launch.identity.cwd, null));
     watch = await runtime.root.watch(context);
@@ -57,11 +59,12 @@ export async function interactive(runtime, { terminal, poll = true, commandTrans
     }
     let current = watch.value, queue = Promise.resolve(), reportedStatus, lastSubmission;
     let hideThinking = presentation.hideThinking, expandedTools = false, lastClear = -Infinity;
+    if (runtime.plugins) await runtime.plugins.attach({ tui, theme, keybindings, editor, notices, widgets, getToolsExpanded: () => expandedTools });
     const notice = text => { notices.setText(theme.fg('warning', text)); tui.requestRender(); };
     function enqueue(operation) { queue = queue.then(() => closed ? undefined : operation()).catch(() => notice('Operation rejected or failed; no native fallback. Check command, runtime identity or authentication.')); }
     const models = () => [...runtime.models.getModels()].sort((a, b) => `${a.provider}/${a.id}`.localeCompare(`${b.provider}/${b.id}`));
     const thinkingLevels = agent => getSupportedThinkingLevels(runtime.models.getModel(agent.model.provider, agent.model.modelId));
-    async function configure(config) { await runtime.fence(); await runtime.root.configure(config, context); await update(current); }
+    async function configure(config) { await runtime.fence(); if(runtime.plugins?.recoveryHeld||runtime.continuationHeld)throw new Error('Interrupted recovery cannot change configuration'); await runtime.root.configure(config, context); await update(current); }
     function select(title, items, selected, accept) {
       if (selector) return;
       selector = new SearchSelector(title, items, selected, theme, keybindings, value => {
@@ -105,7 +108,8 @@ export async function interactive(runtime, { terminal, poll = true, commandTrans
       status.setText(footerText(value, agent, runtime.launch.identity.cwd, theme));
       const doc = await runtime.harness.snapshot(BridgeDoc, runtime.root.id, context);
       const jobDoc = await runtime.harness.snapshot(JobDoc, runtime.root.id, context);
-      notices.setText([...presentation.diagnostics, ...Object.values(doc?.notifications || {}).map(p => `Notification from ${plain(p.sender)}: ${plain(p.body)}`), ...Object.entries(jobDoc?.results || {}).map(([id, result]) => `Delegation ${id.slice(0,12)}: ${result.state}${result.state === 'succeeded' ? ' (independent review accepted)' : ' (not success until independent review)'}`)].join('\n').slice(-8192));
+      const uncertain = runtime.plugins ? await runtime.plugins.update() : [];
+      notices.setText([...presentation.diagnostics, ...(runtime.plugins?.notice ? [runtime.plugins.notice] : []), ...(runtime.continuationHeld ? [`Interrupted v2 run ${runtime.interruptedRun.taskId} (${runtime.interruptedRun.kind} v${runtime.interruptedRun.version}) awaits explicit human-authorized continuation (unavailable at this checkpoint). Receipted tools remain completed; provider continuation is NOT exactly-once. No automatic input/model/inbox/job wake.`] : []), ...(uncertain.length ? [`Plugin recovery paused: ${uncertain.length} interrupted/uncertain operation(s). Stored answers/candidates are NOT completed tool receipts. Plugin execution/UI and new input are disabled; /plugin-inspect is read-only.`] : []), ...Object.values(doc?.notifications || {}).map(p => `Notification from ${plain(p.sender)}: ${plain(p.body)}`), ...Object.entries(jobDoc?.results || {}).map(([id, result]) => `Delegation ${id.slice(0,12)}: ${result.state}${result.state === 'succeeded' ? ' (independent review accepted)' : ' (not success until independent review)'}`)].join('\n').slice(-8192));
       tui.requestRender();
       await observe('view', value);
     }
@@ -141,6 +145,7 @@ export async function interactive(runtime, { terminal, poll = true, commandTrans
         await input(`Skill from ${JSON.stringify(skill.filePath)}; relative paths resolve from its directory:\n${readFileSync(skill.filePath, 'utf8')}\n${argument}`); return;
       }
       if (name === '/steer' || name === '/followup') { if (!argument) throw new Error('Input required'); await input(argument, name === '/steer' ? 'steer' : 'followUp'); return; }
+      if (name.startsWith('/') && await runtime.plugins?.command(name.slice(1), argument)) return;
       if (name.startsWith('/')) throw new Error('Unsupported durable command');
       await input(text, current.docs['pi.live']?.run ? 'steer' : 'followUp');
     }
@@ -173,7 +178,7 @@ export async function interactive(runtime, { terminal, poll = true, commandTrans
       let running = false;
       timer = setInterval(async () => {
         if (running || closed) return; running = true;
-        try { await runtime.fence(); await pump.poll(); await jobs.poll(); await update(current); }
+        try { await runtime.fence(); if(!runtime.plugins?.recoveryHeld&&!runtime.continuationHeld){await pump.poll(); await jobs.poll();} await update(current); }
         catch { notices.setText('WT fence/inbox unavailable: closing recoverably; no further automatic admission.'); tui.requestRender(); await close().catch(done.reject); }
         finally { running = false; }
       }, 1000);

@@ -23,20 +23,26 @@ func defaultPiBackend(w Worktree) string {
 
 const durableDefinition = "wt-durable-v1"
 const durableDependencies = "pi-durable=1.0.3;pi-ai=1.0.3;chord=1.0.3;pi-tui=0.87.1"
+const durablePluginProfile = "native-compat-v2"
+const durablePluginDefinition = "wt-durable-native-compat-v2"
+const durablePluginDependencies = "pi-durable=1.0.3;pi-ai=1.0.3;chord=1.0.3;pi-tui=0.87.1;rpiv-ask-user-question=2.9.0;rpiv-todo=2.9.0;rpiv-config=2.9.0;typebox=1.3.27;jiti=2.7.0;highlight.js=10.7.3;wt-plugin-adapter=2"
 
 type DurableSnapshot struct {
-	Store        string   `json:"store"`
-	UUID         string   `json:"uuid"`
-	Conversation int      `json:"conversation"`
-	Definition   string   `json:"definition"`
-	Dependencies string   `json:"dependencies"`
-	Cwd          string   `json:"cwd"`
-	Initialized  bool     `json:"initialized"`
-	WriterLock   string   `json:"writer_lock"`
-	ReadOnly     bool     `json:"read_only"`
-	Job          string   `json:"job,omitempty"`
-	Role         string   `json:"role,omitempty"`
-	Tools        []string `json:"tools,omitempty"`
+	Store          string   `json:"store"`
+	UUID           string   `json:"uuid"`
+	Conversation   int      `json:"conversation"`
+	Definition     string   `json:"definition"`
+	Dependencies   string   `json:"dependencies"`
+	Cwd            string   `json:"cwd"`
+	Initialized    bool     `json:"initialized"`
+	WriterLock     string   `json:"writer_lock"`
+	ReadOnly       bool     `json:"read_only"`
+	Job            string   `json:"job,omitempty"`
+	Role           string   `json:"role,omitempty"`
+	Tools          []string `json:"tools,omitempty"`
+	Profile        string   `json:"profile,omitempty"`
+	PluginSource   string   `json:"plugin_source,omitempty"`
+	PluginContract string   `json:"plugin_contract,omitempty"`
 }
 
 type DurableLaunch struct {
@@ -62,7 +68,11 @@ func durableEntrypoint() string {
 
 func validateDurable(a AgentSession) error {
 	d := a.Adapter.Durable
-	if a.Profile != "pi" || a.Adapter.Version != 1 || a.Adapter.Backend != "durable" || d == nil || !d.Initialized || d.UUID == "" || d.Conversation != 1 || d.Definition != durableDefinition || d.Dependencies != durableDependencies || a.NativeID != "" || a.Adapter.File != "" {
+	contract := d != nil && d.Profile == "" && d.Definition == durableDefinition && d.Dependencies == durableDependencies && d.PluginSource == "" && d.PluginContract == ""
+	if d != nil && d.Profile == durablePluginProfile {
+		contract = d.Definition == durablePluginDefinition && d.Dependencies == durablePluginDependencies && len(d.PluginSource) == 64 && len(d.PluginContract) == 64
+	}
+	if a.Profile != "pi" || a.Adapter.Version != 1 || a.Adapter.Backend != "durable" || d == nil || !d.Initialized || d.UUID == "" || d.Conversation != 1 || !contract || a.NativeID != "" || a.Adapter.File != "" {
 		return errors.New("incompatible or incomplete durable identity")
 	}
 	cwd, err := canonicalDir(a.Cwd)
@@ -86,6 +96,13 @@ func validateDurable(a AgentSession) error {
 // Explicit bootstrap is only for a never-launched native placeholder or an
 // interrupted durable bootstrap intent. Relaunch never creates a missing store.
 func (s *Store) initializeDurable(w Worktree, id string, readOnly ...bool) error {
+	return s.initializeDurableProfile(w, id, "", len(readOnly) > 0 && readOnly[0])
+}
+
+func (s *Store) initializeDurableProfile(w Worktree, id, profile string, readOnly bool) error {
+	if profile != "" && profile != durablePluginProfile {
+		return errors.New("unsupported durable profile")
+	}
 	a, err := w.agent(id)
 	if err != nil {
 		return err
@@ -104,7 +121,7 @@ func (s *Store) initializeDurable(w Worktree, id string, readOnly ...bool) error
 	defer node.Close()
 	d := a.Adapter.Durable
 	if a.Adapter.Backend == "durable" {
-		if d == nil || d.Initialized {
+		if d == nil || d.Initialized || d.Profile != profile {
 			return errors.New("durable store is already initialized or incompatible")
 		}
 	} else {
@@ -123,7 +140,11 @@ func (s *Store) initializeDurable(w Worktree, id string, readOnly ...bool) error
 		if err != nil {
 			return err
 		}
-		d = &DurableSnapshot{Store: filepath.Join(directory, "session.sqlite"), UUID: newID(), Conversation: 1, Definition: durableDefinition, Dependencies: durableDependencies, Cwd: cwd, WriterLock: durableWriterLock(cwd), ReadOnly: len(readOnly) > 0 && readOnly[0]}
+		d = &DurableSnapshot{Store: filepath.Join(directory, "session.sqlite"), UUID: newID(), Conversation: 1, Definition: durableDefinition, Dependencies: durableDependencies, Cwd: cwd, WriterLock: durableWriterLock(cwd), ReadOnly: readOnly, Profile: profile}
+		if profile == durablePluginProfile {
+			d.Definition = durablePluginDefinition
+			d.Dependencies = durablePluginDependencies
+		}
 		a.Adapter = PiSnapshot{Version: 1, Backend: "durable", Durable: d}
 		// Persist intent before any store creation. A failed init remains stopped and
 		// cannot accidentally fall back to a fresh ordinary Pi conversation.
@@ -140,10 +161,21 @@ func (s *Store) initializeDurable(w Worktree, id string, readOnly ...bool) error
 	command.ExtraFiles = []*os.File{node, storeLock}
 	command.Env = append(os.Environ(), "WT_DB="+dbPath(), "WT_STATUS_DIR="+stateDir())
 	command.Stdin = strings.NewReader(jsonText(DurableLaunch{Root: w.ID, Agent: a.ID, Identity: *d}))
-	command.Stdout = os.Stdout
 	command.Stderr = os.Stderr
-	if err = command.Run(); err != nil {
+	output, err := command.Output()
+	if err != nil {
 		return err
+	}
+	if profile == durablePluginProfile {
+		var receipt struct {
+			Source   string `json:"plugin_source"`
+			Contract string `json:"plugin_contract"`
+		}
+		if err = json.Unmarshal(output, &receipt); err != nil || len(receipt.Source) != 64 || len(receipt.Contract) != 64 {
+			return errors.New("missing durable plugin bootstrap identity")
+		}
+		d.PluginSource = receipt.Source
+		d.PluginContract = receipt.Contract
 	}
 	d.Initialized = true
 	_, err = s.db.Exec(`UPDATE agent_sessions SET adapter=?,stopped=0 WHERE root_id=? AND id=? AND runtime=''`, jsonText(a.Adapter), w.ID, a.ID)
