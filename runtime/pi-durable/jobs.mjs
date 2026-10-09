@@ -45,14 +45,14 @@ export async function checkoutEvidence(cwd) {
   if(top!==cwd) throw new Error('Delegation requires exact canonical git checkout root');
   const head=(await git(['rev-parse','HEAD'])).trim();
   const paths=[...new Set((await git(['ls-files','-z','--cached','--others'])).split('\0').filter(Boolean))].sort();
-  if(paths.length>4096) throw new Error('Host evidence file limit');
+  if(paths.length>4096) throw Object.assign(new Error('Host evidence file limit'),{code:'WT_JOB_EVIDENCE_FILES'});
   const files={}; let bytes=0;
   for(const path of paths) {
     if(relative(cwd,join(cwd,path)).startsWith('..')) throw new Error('Evidence path escapes checkout');
     let stat;try{stat=await lstat(join(cwd,path));}catch(e){if(e.code==='ENOENT'){files[path]=null;continue;}throw e;}
     if(stat.isSymbolicLink()) files[path]={kind:'link',hash:digest(await readlink(join(cwd,path)))};
     else if(stat.isFile()) {
-      bytes+=stat.size;if(stat.size>16*1024*1024 || bytes>64*1024*1024) throw new Error('Host evidence size limit');
+      bytes+=stat.size;if(stat.size>16*1024*1024 || bytes>64*1024*1024) throw Object.assign(new Error('Host evidence size limit'),{code:'WT_JOB_EVIDENCE_SIZE'});
       files[path]={kind:'file',mode:stat.mode & 0o777,hash:digest(await readFile(join(cwd,path)))};
     } else throw new Error('Unsupported evidence file type');
   }
@@ -187,7 +187,7 @@ export function jobPump(runtime,command) {
       catch { current={state:'reconciliation-pending',result:job.result,review:job.review}; }
       await runtime.root.commit(async tx=>{
         const doc=await tx.doc(JobDoc,runtime.root.id);
-        doc.results ||= {};doc.results[job.id]={state:current.state,result:current.result,review:current.review,...(current.reconciliation_pending?{reconciliation_pending:true}:{})};
+        doc.results ||= {};doc.results[job.id]={state:current.state,result:current.result,review:current.review,...(current.blocked_reason?{blocked_reason:current.blocked_reason}:{}),...(current.reconciliation_pending?{reconciliation_pending:true}:{})};
       },context); // Commit-only notification: parent work is not awakened.
     }
   }};

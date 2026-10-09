@@ -7,7 +7,7 @@
   },
   "scripts": {
     "test": "node run-tests.mjs",
-    "test:integration": "node --test private-jobs.test.mjs"
+    "test:integration": "node --test private-jobs.test.mjs private-host-failure.test.mjs"
   },
   "dependencies": {
     "@earendil-works/pi-durable": "1.0.3",

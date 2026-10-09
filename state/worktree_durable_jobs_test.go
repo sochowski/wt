@@ -2,10 +2,12 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -338,5 +340,83 @@ func TestDurableJobBusyProjectionRetainsEvidenceAndLocks(t *testing.T) {
 	r.Operation = "occupied-writer"
 	if _, err := s.reserveDurableJob(w.ID, parent, "parent-runtime", r); err == nil {
 		t.Fatal("pending projection weakened checkout writer lease")
+	}
+}
+
+func TestDurableFailedHostIsBlockedWithoutRelaunchOrForgedResults(t *testing.T) {
+	s, w, r := durableJobFixture(t)
+	j, err := s.reserveDurableJob(w.ID, w.Agents[0].ID, "parent-runtime", r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, _ := setDurableHost(t, s, j, "writer")
+	before, _ := s.Worktree(w.ID)
+	a, _ := before.agent(child)
+	if err = s.pauseFailedDurableJobHost(a); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 5; i++ {
+		status, err := s.reconcileDurableJob(w.ID, j.Parent, "parent-runtime", j.ID)
+		if err != nil || status.State != "blocked" || status.Phase != "writer" || status.BlockedReason == "" {
+			t.Fatalf("%+v %v", status, err)
+		}
+		if len(status.Result) != 0 || len(status.Review) != 0 || status.ID != j.ID || status.ResultID != j.ResultID || status.ReviewID != j.ReviewID {
+			t.Fatal("failure forged completion or changed identity")
+		}
+	}
+	after, _ := s.Worktree(w.ID)
+	paused, _ := after.agent(child)
+	if !paused.Stopped || paused.Status != "error" || paused.Runtime != a.Runtime || !reflect.DeepEqual(paused.Adapter, a.Adapter) || after.WakeBudget != before.WakeBudget || len(after.Agents) != len(before.Agents) {
+		t.Fatal("failure spent budget or replaced identity")
+	}
+	retained, _ := s.durableJob(j.ID)
+	if !reflect.DeepEqual(retained, j) {
+		t.Fatal("changed immutable job/phase/result instead of retaining failed admission")
+	}
+}
+func TestDurableHostFailureCannotClobberNewRuntimeOrPublishedWriter(t *testing.T) {
+	s, w, r := durableJobFixture(t)
+	j, err := s.reserveDurableJob(w.ID, w.Agents[0].ID, "parent-runtime", r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, key := setDurableHost(t, s, j, "writer")
+	current, _ := s.Worktree(w.ID)
+	old, _ := current.agent(child)
+	s.db.Exec(`UPDATE agent_sessions SET runtime='new-runtime' WHERE id=?`, child)
+	if err = s.pauseFailedDurableJobHost(old); err != nil {
+		t.Fatal(err)
+	}
+	current, _ = s.Worktree(w.ID)
+	fresh, _ := current.agent(child)
+	if fresh.Stopped {
+		t.Fatal("stale exit stopped replacement runtime")
+	}
+	s.db.Exec(`UPDATE agent_sessions SET runtime='host-runtime' WHERE id=?`, child)
+	if err = s.finishDurableJob(j.Root, child, "host-runtime", key, DurableJobObservation{ID: j.ResultID, Success: true, Evidence: json.RawMessage(`{"host":"observed"}`)}); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.pauseFailedDurableJobHost(old); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := s.durableJob(j.ID)
+	if got.State != "review" || len(got.Result) == 0 {
+		t.Fatal("late writer exit clobbered publication/mandatory reviewer")
+	}
+}
+func TestDurableOversizedCheckoutRefusesBeforeChildAndWakeAdmission(t *testing.T) {
+	s, w, r := durableJobFixture(t)
+	for i := 0; i < 4097; i++ {
+		if err := os.WriteFile(filepath.Join(r.Cwd, fmt.Sprintf("inventory-%04d", i)), []byte("small"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before, _ := s.Worktree(w.ID)
+	if _, err := s.reserveDurableJob(w.ID, w.Agents[0].ID, "parent-runtime", r); err == nil || !strings.Contains(err.Error(), "4096") {
+		t.Fatalf("oversized checkout admitted: %v", err)
+	}
+	after, _ := s.Worktree(w.ID)
+	if len(after.Agents) != len(before.Agents) || after.WakeBudget != before.WakeBudget {
+		t.Fatal("unsupported checkout spent admission")
 	}
 }
