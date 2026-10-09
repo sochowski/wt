@@ -197,3 +197,20 @@ test('retained success revalidates current contract/snapshot without another uns
  await exec('git',['-C',f.cwd,'add','input.txt']);r=await f.open();await assert.rejects(runJob(r,transport),/snapshot changed/);
  assert.equal(f.faux.state.callCount,calls);assert.equal(published,1);
 });
+
+test('parent job pump preserves busy reconciliation without inventing result or review acceptance',async()=>{
+ const {jobPump}=await import('./jobs.mjs');
+ const doc={},calls=[];
+ const launch={root:'root',agent:'parent',runtime:'runtime',identity:{}};
+ const retained={id:'job',state:'writer',result:null,review:null};
+ const runtime={launch,root:{id:1,commit:async callback=>callback({doc:async()=>doc})}};
+ const command=async(args,body)=>{
+  calls.push({args,body});
+  if(args[1]==='list')return [retained];
+  assert.equal(args[1],'reconcile');
+  return {...retained,reconciliation_pending:true};
+ };
+ await jobPump(runtime,command).poll();
+ assert.deepEqual(doc.results.job,{state:'writer',result:null,review:null,reconciliation_pending:true});
+ assert.deepEqual(calls.map(c=>c.args[1]),['list','reconcile']);
+});

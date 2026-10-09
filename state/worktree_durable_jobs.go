@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
-	"time"
 )
 
 // This is WT's own v1 contract, not pi-subagents' opaque native admission.
@@ -63,6 +62,8 @@ type DurableJob struct {
 	ReviewID string             `json:"review_id"`
 	Result   json.RawMessage    `json:"result"`
 	Review   json.RawMessage    `json:"review"`
+	// Transient projection contention is not a job failure or a launch receipt.
+	ReconciliationPending bool `json:"reconciliation_pending,omitempty"`
 }
 type DurableJobObservation struct {
 	ID      string `json:"id"`
@@ -418,10 +419,12 @@ func (s *Store) advanceDurableJob(id string) (DurableJob, error) {
 		return j, err
 	}
 	lock, err := s.rootLock(w)
-	deadline := time.Now().Add(5 * time.Second)
-	for errors.Is(err, syscall.EWOULDBLOCK) && time.Now().Before(deadline) {
-		time.Sleep(20 * time.Millisecond)
-		lock, err = s.rootLock(w)
+	if errors.Is(err, syscall.EWOULDBLOCK) {
+		// A concurrent reconciler owns projection. Return current durable evidence
+		// without touching panes, bootstrapping another owner, or spending permits.
+		j, err = s.durableJob(id)
+		j.ReconciliationPending = err == nil
+		return j, err
 	}
 	if err != nil {
 		return j, err
@@ -476,6 +479,29 @@ func (s *Store) advanceDurableJob(id string) (DurableJob, error) {
 				}
 			}
 		}
+		// A healthy exact child needs no topology restore on every status poll.
+		// Missing/dead panes still use the existing fenced restoration path.
+		if a.Runtime != "" && !a.Stopped {
+			live, e := s.liveRoot(w)
+			if e != nil {
+				return j, e
+			}
+			if live {
+				for _, v := range w.Views {
+					if v.Kind == "agent" && v.Target == child && v.Problem == "" {
+						if p := livePane(w, v.ID); p != "" {
+							dead, e := tmux("display-message", "-p", "-t", p, "#{pane_dead}")
+							if e != nil {
+								return j, e
+							}
+							if dead == "0" {
+								return s.durableJob(id)
+							}
+						}
+					}
+				}
+			}
+		}
 		// Do not resume an explicitly stopped initialized child. Crash/recoverable
 		// close has stopped=false and runs with the same task/submission identity.
 		if e = s.restore(w); e != nil {
@@ -520,8 +546,8 @@ func durableJobsCommand(s *Store, op string, input io.Reader) (any, error) {
 		if err == nil {
 			var id string
 			if e := s.db.QueryRow(`SELECT id FROM durable_jobs WHERE root_id=? AND child_id=? AND state='review'`, r.Root, r.Child).Scan(&id); e == nil {
-				_, e = s.advanceDurableJob(id)
-				pending = e != nil // Publication remains durable; parent reporter retries placement only.
+				advanced, advanceErr := s.advanceDurableJob(id)
+				pending = advanceErr != nil || advanced.ReconciliationPending // Publication remains durable; parent retries placement only.
 			}
 		}
 		return struct {

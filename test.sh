@@ -8,6 +8,13 @@
 
 set -uo pipefail
 
+# Explicit template: BSD mktemp may ignore TMPDIR without one.
+test_temp_dir() {
+    local path
+    path=$(mktemp -d "${TMPDIR:-/tmp}/wt-fixture.XXXXXX") || return
+    (cd "$path" && pwd -P)
+}
+
 PASS=0
 FAIL=0
 TEST_REPO=""
@@ -53,7 +60,7 @@ section() {
 #  Setup: create a temp git repo for testing
 # =============================================================================
 setup() {
-    TEST_REPO=$(mktemp -d)/test-wt-repo
+    TEST_REPO=$(test_temp_dir)/test-wt-repo
     mkdir -p "$TEST_REPO"
     git -C "$TEST_REPO" init -b main >/dev/null 2>&1
     git -C "$TEST_REPO" commit --allow-empty -m "init" >/dev/null 2>&1
@@ -172,7 +179,7 @@ test_find_git_repos() {
     #   scanroot/childrepo/.git <- primary repo child
     #   scanroot/childtree/.git <- worktree (.git file), must be skipped
     #   scanroot/notarepo/      <- plain dir, must be skipped
-    local scanroot; scanroot=$(mktemp -d)/scanroot
+    local scanroot; scanroot=$(test_temp_dir)/scanroot
     mkdir -p "$scanroot/.git" "$scanroot/childrepo/.git" \
              "$scanroot/childtree" "$scanroot/notarepo"
     echo "gitdir: /elsewhere" > "$scanroot/childtree/.git"
@@ -545,12 +552,16 @@ test_managed_shells() {
         && pass "persistent log supports unread cursor" \
         || fail "unread cursor did not advance" "first=$first second=$second"
 
-    "${wt[@]}" run job -- sh -c 'sleep 1; printf "job-ready\\n"; exit 7' >/dev/null 2>&1
+    # A release barrier, not elapsed time, proves no process output exists yet.
+    local job_release="$HOME/job-release"
+    rm -f "$job_release"
+    "${wt[@]}" run job -- sh -c 'while [ ! -f "$1" ]; do sleep 0.05; done; printf "job-ready\\n"; exit 7' sh "$job_release" >/dev/null 2>&1
     local early_rc=0
     "${wt[@]}" wait job --match job-ready --timeout 0 >/dev/null 2>&1 || early_rc=$?
     [[ "$early_rc" -eq 124 ]] \
         && pass "wait --match ignores the echoed launch command" \
         || fail "wait matched command echo before process output" "rc=$early_rc"
+    touch "$job_release"
     if "${wt[@]}" wait job --match job-ready --timeout 5 >/dev/null 2>&1; then
         pass "shell run output is persistently readable"
     else
@@ -777,7 +788,7 @@ test_presentation_canvas() {
     fi
 
     local tmp sock pid response context lua
-    tmp=$(mktemp -d)
+    tmp=$(test_temp_dir)
     sock="$tmp/nvim.sock"
     lua="$(dirname "$WT_BIN_DIR")/config/wt-present.lua"
     printf 'one\ntwo\nthree\nfour\n' > "$tmp/example.txt"
@@ -1136,7 +1147,7 @@ test_wt_hook_stable_session_identity() {
     # A future workspace agent can run tools outside its original checkout.
     # The exported identity must keep those hook writes on the owning session.
     local outside
-    outside=$(mktemp -d)
+    outside=$(test_temp_dir)
     (cd "$outside" && WT_SESSION="$TEST_SESSION" "$WT_BIN_DIR/wt-hook" pre-tool CrossRepo) 2>/dev/null
 
     local status message
@@ -1704,7 +1715,7 @@ test_pi_extension() {
     # mock ExtensionAPI delivers native events to stub wt-hook/wt-present
     # commands. Use the injectable factory, without Pi's TUI entry imports.
     # Copy the package so Node honors its ESM package boundary.
-    local tmp; tmp=$(mktemp -d)
+    local tmp; tmp=$(test_temp_dir)
     cp -R "$extension_dir" "$tmp/pi-wt"
     extension_file="$tmp/pi-wt/extension.js"
     cat > "$tmp/wt-hook" <<'SH'
@@ -1866,7 +1877,7 @@ test_opencode_mcp_config() {
     section "opencode MCP Config"
 
     local tmp_dir tmp_config target out
-    tmp_dir=$(mktemp -d)
+    tmp_dir=$(test_temp_dir)
     tmp_config="$tmp_dir/wt-config"
     target="$tmp_dir/worktree"
     mkdir -p "$tmp_config/mcp-profiles" "$target"
@@ -1959,7 +1970,7 @@ test_agent_launch_plan() {
 
     # Claude with no IDE locks → bare binary, no --ide.
     local plan
-    plan=$("$WT_STATE" agent claude launch-plan --sh --home "$(mktemp -d)" 2>/dev/null)
+    plan=$("$WT_STATE" agent claude launch-plan --sh --home "$(test_temp_dir)" 2>/dev/null)
     if grep -q "WT_LAUNCH_BINARY='claude'" <<<"$plan" && grep -q 'WT_LAUNCH_ARGS=()' <<<"$plan"; then
         pass "claude launch-plan: bare binary when no IDE lock"
     else
@@ -2008,7 +2019,7 @@ test_hook_format_and_install() {
     # Surgical + idempotent install: seed a settings file with a foreign hook and
     # a legacy wt entry; install twice; expect the legacy entry gone, the foreign
     # one kept, and exactly one wt entry (no duplicates).
-    local hd; hd=$(mktemp -d)
+    local hd; hd=$(test_temp_dir)
     mkdir -p "$hd/.claude"
     cat > "$hd/.claude/settings.json" <<'JSON'
 { "model": "x", "hooks": { "PreToolUse": [
@@ -2100,7 +2111,7 @@ test_wt_state_cli() {
         return
     fi
 
-    local tmp; tmp=$(mktemp -d)
+    local tmp; tmp=$(test_temp_dir)
 
     # migrate: a legacy escaped .status file must import with the space decoded.
     printf 'status=idle\nmessage=opencode\\ finished\nrepo=wt\nagent=opencode\n' \
@@ -2206,7 +2217,10 @@ run_isolated() {
     self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
     repo_dir="$(dirname "$WT_BIN_DIR")"
     sock="wt-test-$$"
-    priv="$(mktemp -d)"
+    # Short, physical temp paths avoid macOS /var aliases and Unix socket limits.
+    priv="$(mktemp -d /tmp/wt-test.XXXXXX)"
+    priv="$(cd "$priv" && pwd -P)"
+    export TMPDIR="$priv/tmp"; mkdir -p "$TMPDIR"
     log="$(mktemp)"
     rc_file="$(mktemp)"
 
@@ -2257,7 +2271,7 @@ run_isolated() {
     # then signal completion. The trailing echo/signal run even if the suite
     # fails, so the waiter below never hangs on a non-zero exit.
     tmux -f /dev/null -L "$sock" new-session -d -x 220 -y 50 -s runner \
-        "bash '$self' --inner > '$log' 2>&1; echo \$? > '$rc_file'; tmux -L '$sock' wait-for -S wt-test-done"
+        "export TMPDIR='$TMPDIR'; bash '$self' --inner > '$log' 2>&1; echo \$? > '$rc_file'; tmux -L '$sock' wait-for -S wt-test-done"
     tmux -L "$sock" wait-for wt-test-done
 
     cat "$log"
