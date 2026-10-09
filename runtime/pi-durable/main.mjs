@@ -50,6 +50,7 @@ try {
   }
 } catch (error) {
   if (error?.code === 'WT_PRIMARY_MODEL') console.error('wt durable: configured primary provider/model missing or unsupported by the pinned catalog; configure ordinary Pi first. No silent model/provider fallback.');
+  if (error?.code === 'WT_PRIMARY_THINKING') console.error('wt durable: invalid configured defaultThinkingLevel/modelThinkingLevels; use off, minimal, low, medium, high, xhigh or max. Configure ordinary Pi first.');
   // Provider/credential errors can include secret material. Never print them.
   console.error('wt durable: launch failed (identity, locks, dependency, terminal or authentication); no replacement/native fallback.');
   process.exitCode = 1;
