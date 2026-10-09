@@ -187,7 +187,7 @@ export function jobPump(runtime,command) {
       catch { current={state:'reconciliation-pending',result:job.result,review:job.review}; }
       await runtime.root.commit(async tx=>{
         const doc=await tx.doc(JobDoc,runtime.root.id);
-        doc.results ||= {};doc.results[job.id]={state:current.state,result:current.result,review:current.review};
+        doc.results ||= {};doc.results[job.id]={state:current.state,result:current.result,review:current.review,...(current.reconciliation_pending?{reconciliation_pending:true}:{})};
       },context); // Commit-only notification: parent work is not awakened.
     }
   }};

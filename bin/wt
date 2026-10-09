@@ -1914,8 +1914,8 @@ shell_prepare_dirs() {
     local root
     root=$(shell_session_dir "$1")
     umask 077
-    mkdir -p "$root/logs" "$root/inputs" "$root/cursors" "$root/watches"
-    chmod 700 "$root" "$root/logs" "$root/inputs" "$root/cursors" "$root/watches" 2>/dev/null || true
+    mkdir -p "$root/logs" "$root/inputs" "$root/cursors" "$root/watches" "$root/commands"
+    chmod 700 "$root" "$root/logs" "$root/inputs" "$root/cursors" "$root/watches" "$root/commands" 2>/dev/null || true
 }
 
 # Remember text wt sent to a shell so normalized reads and watches can omit the
@@ -2081,8 +2081,17 @@ shell_run() {
     fi
     # The pane starts as a normal interactive shell so pipe-pane can be attached
     # before the command emits output. exec preserves the real exit status.
-    shell_record_input "$session_name" "$name" "exec $cmd"
-    tmux send-keys -t "$pane_id" -l "exec $cmd"
+    # Do not type user command text into a line-editing terminal: shells can
+    # wrap/redraw it so partial echoes survive normalization and match waits.
+    # A private executable launcher carries the exact argv, while the terminal
+    # sees only an opaque path. Output logging is already attached above.
+    local launcher launch_text
+    launcher="$(shell_session_dir "$session_name")/commands/$name.sh"
+    (umask 077; printf '#!/usr/bin/env bash\nexec %s\n' "$cmd" > "$launcher") || return
+    chmod 700 "$launcher" || return
+    printf -v launch_text 'exec %q' "$launcher"
+    shell_record_input "$session_name" "$name" "$launch_text"
+    tmux send-keys -t "$pane_id" -l "$launch_text"
     tmux send-keys -t "$pane_id" Enter
     echo "Started '$name': $cmd"
 }
@@ -2209,7 +2218,7 @@ shell_remove() {
         tmux kill-window -t "$target"
     fi
     root=$(shell_session_dir "$session_name")
-    rm -f "$root/logs/$name.log" "$root/inputs/$name.txt" "$root/cursors/$name.agent"
+    rm -f "$root/logs/$name.log" "$root/inputs/$name.txt" "$root/cursors/$name.agent" "$root/commands/$name.sh"
 }
 
 shell_pick() {

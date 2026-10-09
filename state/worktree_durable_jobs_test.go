@@ -286,3 +286,57 @@ func TestDurableTaskTopLevelStateAndRegistryAdmission(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestDurableJobBusyProjectionRetainsEvidenceAndLocks(t *testing.T) {
+	s, w, r := durableJobFixture(t)
+	parent := w.Agents[0].ID
+	j, err := s.reserveDurableJob(w.ID, parent, "parent-runtime", r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := s.Worktree(w.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock, err := s.rootLock(w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	for i := 0; i < 3; i++ {
+		pending, err := s.reconcileDurableJob(w.ID, parent, "parent-runtime", j.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !pending.ReconciliationPending {
+			t.Fatal("busy projection not disclosed")
+		}
+		pending.ReconciliationPending = false
+		if !reflect.DeepEqual(pending, j) {
+			t.Fatal("busy poll fabricated or changed job evidence")
+		}
+	}
+	after, err := s.Worktree(w.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(before, after) {
+		t.Fatal("busy poll mutated root, identity, budgets or views")
+	}
+	if _, err := s.reconcileDurableJob(w.ID, parent, "stale", j.ID); err == nil {
+		t.Fatal("busy lock bypassed parent authentication")
+	}
+	if other, err := s.rootLock(w); err == nil {
+		other.Close()
+		t.Fatal("busy poll released another owner's lock")
+	}
+	writer, err := lockFile(durableWriterLock(r.Cwd))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	r.Operation = "occupied-writer"
+	if _, err := s.reserveDurableJob(w.ID, parent, "parent-runtime", r); err == nil {
+		t.Fatal("pending projection weakened checkout writer lease")
+	}
+}
