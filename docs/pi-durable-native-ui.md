@@ -37,6 +37,10 @@ This change deliberately excludes the unreviewed `native-compat-v2` questionnair
 todo integration. Web/MCP plugins and custom Durable subagent workflows remain
 separate implementation/review work. Native-style appearance is not plugin parity.
 
+See [the capability audit](pi-durable-capabilities.md) for the current prompt,
+skill trust/discovery, settings and tool boundaries. Unlisted native settings
+and plugins are not implicitly supported by this UI.
+
 The twelve implementation/test/theme files were recovered byte-for-byte from the
 independently accepted M1 snapshot (47 runtime tests plus managed private PTY
 proof). No runtime engine, package/dependency lock, WT state/control, permissions,

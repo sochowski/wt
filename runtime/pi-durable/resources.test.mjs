@@ -23,6 +23,52 @@ test('context precedence, scalar skill discovery, trust and no executable/projec
   r = resourcePrompt(cwd,agent,true); assert.deepEqual(r.skills.map(s=>s.name),['global','local']);
 });
 
+test('disabled model invocation, duplicate names and unsupported scalar syntax are explicit', async t => {
+  const home = await mkdtemp(join(tmpdir(), 'wt-skill-boundaries-')); t.after(() => rm(home,{recursive:true,force:true}));
+  const cwd = join(home,'repo'), agent = join(home,'agent');
+  await mkdir(cwd,{recursive:true});
+  for (const [directory, header] of [
+    ['a-manual', 'name: audit-manual\ndescription: Explicit invocation only\ndisable-model-invocation: true'],
+    ['b-duplicate', 'name: audit-manual\ndescription: Must not replace first'],
+    ['c-block', 'name: audit-block\ndescription: |\n  Unsupported multiline description'],
+  ]) {
+    await mkdir(join(agent,'skills',directory),{recursive:true});
+    await writeFile(join(agent,'skills',directory,'SKILL.md'),`---\n${header}\n---\nManual instructions`);
+  }
+  const r = resourcePrompt(cwd,agent);
+  const manual = r.skills.find(s => s.name === 'audit-manual');
+  assert.equal(manual.disabled,true);
+  assert.equal(manual.filePath,join(agent,'skills','a-manual','SKILL.md'));
+  assert.ok(!r.prompt.includes('Explicit invocation only'));
+  assert.ok(!r.skills.some(s => s.name === 'audit-block'));
+  assert.ok(r.diagnostics.includes('Duplicate skill name: audit-manual'));
+  assert.ok(r.diagnostics.some(d => d.startsWith('Unsupported skill frontmatter:')));
+});
+
+test('project trust does not enable ancestor skills, native prompt overrides or executable resources', async t => {
+  const home = await mkdtemp(join(tmpdir(),'wt-project-boundaries-')); t.after(()=>rm(home,{recursive:true,force:true}));
+  const cwd = join(home,'repo'), agent = join(home,'agent');
+  for (const base of [home,cwd]) {
+    const directory = join(base,'.agents','skills',base === cwd ? 'audit-local' : 'audit-ancestor');
+    await mkdir(directory,{recursive:true});
+    await writeFile(join(directory,'SKILL.md'),`---\nname: ${base === cwd ? 'audit-local' : 'audit-ancestor'}\ndescription: Project skill\n---\nInstructions`);
+  }
+  for (const base of [agent,join(cwd,'.pi')]) {
+    await mkdir(join(base,'extensions'),{recursive:true});
+    await writeFile(join(base,'SYSTEM.md'),'NATIVE_REPLACEMENT_SENTINEL');
+    await writeFile(join(base,'APPEND_SYSTEM.md'),'NATIVE_APPEND_SENTINEL');
+    await writeFile(join(base,'settings.json'),'invalid project/resource settings');
+    await writeFile(join(base,'extensions','throw.js'),'throw new Error("must not execute")');
+  }
+  const untrusted = resourcePrompt(cwd,agent);
+  assert.ok(!untrusted.skills.some(s => s.name === 'audit-local'));
+  const trusted = resourcePrompt(cwd,agent,true);
+  assert.ok(trusted.skills.some(s => s.name === 'audit-local'));
+  assert.ok(!trusted.skills.some(s => s.name === 'audit-ancestor'));
+  assert.ok(!trusted.prompt.includes('NATIVE_REPLACEMENT_SENTINEL'));
+  assert.ok(!trusted.prompt.includes('NATIVE_APPEND_SENTINEL'));
+});
+
 test('read-only credential store accepts standard keys and fresh OAuth; rejects commands, malformed and expired without writes/secrets', async t => {
   const home = await mkdtemp(join(tmpdir(),'wt-auth-')); t.after(()=>rm(home,{recursive:true,force:true}));
   const path = join(home,'auth.json'), store = readOnlyCredentials(path);

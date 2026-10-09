@@ -86,6 +86,39 @@ test('public TUI real editor input, committed render, model/thinking and termina
   assert.equal(states.at(-1).stage,'closed');
 });
 
+test('help discloses the v1 capability boundary without invoking the model or changing settings',async t=>{
+  const f=await fixture(t),r=await f.open(),terminal=new Terminal(); terminal.columns=240;
+  const before=await r.root.agent(context);
+  const ui=interactive(r,{terminal,poll:false});
+  await until(()=>terminal.started);terminal.type('/help');terminal.input('\r');
+  await until(()=>terminal.output.includes('docs/pi-durable-capabilities.md'));
+  for(const text of ['wt-durable-v1','Harness/SQLite','project settings','not shipped','only this conversation']) {
+    assert.ok(terminal.output.includes(text),`help missing ${text}`);
+  }
+  assert.equal(f.faux.state.callCount,0);
+  const after=await r.root.agent(context);
+  assert.deepEqual(after.model,before.model);assert.equal(after.thinkingLevel,before.thinkingLevel);
+  terminal.type('/quit');terminal.input('\r');await ui;
+});
+
+test('unsupported commands never submit inference; model-disabled skills remain explicitly invokable',async t=>{
+  const f=await fixture(t,[fauxAssistantMessage('manual skill answer')]); const r=await f.open();
+  const path=join(f.launch.identity.cwd,'SKILL.md');
+  await writeFile(path,'---\nname: audit-manual\ndescription: Explicit only\ndisable-model-invocation: true\n---\nMANUAL_SKILL_BODY');
+  r.resources.skills.push({name:'audit-manual',description:'Explicit only',filePath:path,disabled:true});
+  const terminal=new Terminal(),ui=interactive(r,{terminal,poll:false});
+  await until(()=>terminal.started);
+  terminal.type('/reload');terminal.input('\r');
+  await until(()=>terminal.output.includes('Operation rejected or failed; no native fallback.'));
+  assert.equal(f.faux.state.callCount,0);
+  terminal.type('/skill:audit-manual extra request');terminal.input('\r');
+  await until(()=>terminal.output.includes('manual skill answer'));
+  assert.equal(f.faux.state.callCount,1);
+  assert.ok(terminal.output.includes('MANUAL_SKILL_BODY'));
+  assert.ok(terminal.output.includes('extra request'));
+  terminal.type('/quit');terminal.input('\r');await ui;
+});
+
 test('settled close releases exact public provider-session resources and owner exits without forced process.exit',async t=>{
   const f=await fixture(t);const path=join(f.launch.identity.cwd,'close.json');await writeFile(path,JSON.stringify(f.launch));
   const child=fork(new URL('./close-worker.mjs',import.meta.url),[path],{stdio:['ignore','pipe','pipe','ipc']});

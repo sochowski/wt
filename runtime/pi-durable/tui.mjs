@@ -116,7 +116,7 @@ export async function interactive(runtime, { terminal, poll = true, commandTrans
       if (name === '/stop') { await runtime.fence(); await selfStop(runtime.launch); return close(); }
       if (name === '/hotkeys') { notice(Object.keys(appActions).map(action => `${action}: ${keybindings.getKeys(action).join(', ') || '(disabled)'}`).join('\n')); return; }
       if (name === '/help') {
-        notices.setText('Enter: chat / busy steer; Alt-Enter followUp; Escape durably aborts; Ctrl-C clears, twice within 500ms recoverably closes. /hotkeys; /steer TEXT; /followup TEXT; /abort; /quit; /stop (private human WT stop); /model [PROVIDER/MODEL]; /thinking [LEVEL]; /skill:NAME [TEXT]; /notifications. This is a bounded native-style UI milestone, NOT native plugin/delegation parity.'); tui.requestRender(); return;
+        notices.setText('Enter: chat / busy steer; Alt-Enter followUp; Escape durably aborts; Ctrl-C clears, twice within 500ms recoverably closes. /hotkeys; /steer TEXT; /followup TEXT; /abort; /quit; /stop (private human WT stop); /model [PROVIDER/MODEL]; /thinking [LEVEL]; /skill:NAME [TEXT]; /notifications. Profile: wt-durable-v1; Harness/SQLite owns inference and state. Native-style UI is NOT native plugin/delegation parity. Supported resources: instruction files and nonexecuting skills (project skills require explicit per-launch trust). Native prompt overrides, project settings and extension/package scripts are not loaded. Questionnaire/todo, web/MCP and custom subagent/council plugins are not shipped. /model and /thinking change only this conversation. See docs/pi-durable-capabilities.md for the capability matrix.'); tui.requestRender(); return;
       }
       if (name === '/model') {
         if (!argument) return selectModel();
