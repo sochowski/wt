@@ -52,6 +52,8 @@ try {
 } catch (error) {
   if (error?.code === 'WT_PRIMARY_MODEL') console.error('wt durable: configured primary provider/model missing or unsupported by the pinned catalog; configure ordinary Pi first. No silent model/provider fallback.');
   if (error?.code === 'WT_PRIMARY_THINKING') console.error('wt durable: invalid configured defaultThinkingLevel/modelThinkingLevels; use off, minimal, low, medium, high, xhigh or max. Configure ordinary Pi first.');
+  if(error?.code==='WT_JOB_EVIDENCE_FILES')console.error('wt durable: assigned checkout exceeds the bounded 4096-path evidence limit; task cannot run with this admission. Host is paused, not retried automatically.');
+  if(error?.code==='WT_JOB_EVIDENCE_SIZE')console.error('wt durable: assigned checkout exceeds the bounded evidence byte limit; task cannot run with this admission. Host is paused, not retried automatically.');
   // Provider/credential errors can include secret material. Never print them.
   console.error('wt durable: launch failed (identity, locks, dependency, terminal or authentication); no replacement/native fallback.');
   process.exitCode = 1;

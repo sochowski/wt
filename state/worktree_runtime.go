@@ -650,7 +650,7 @@ func (s *Store) insertView(v View) error {
 	return err
 }
 
-func (s *Store) runAgent(w Worktree, id, token string) error {
+func (s *Store) runAgent(w Worktree, id, token string) (err error) {
 	a, err := w.agent(id)
 	if err != nil {
 		return err
@@ -673,6 +673,20 @@ func (s *Store) runAgent(w Worktree, id, token string) error {
 		return err
 	}
 	defer lock.Close()
+	// Do not endlessly restart deterministic launch failures or clean exits without
+	// publication. Preserve signalled-crash recovery; pause only this exact job.
+	defer func() {
+		if a.Adapter.Durable == nil || a.Adapter.Durable.Job == "" {
+			return
+		}
+		var exited *exec.ExitError
+		if errors.As(err, &exited) && exited.ProcessState != nil && exited.ProcessState.ExitCode() < 0 {
+			return
+		}
+		if e := s.pauseFailedDurableJobHost(a); e != nil {
+			fmt.Fprintln(os.Stderr, "wt: failed host pause could not be recorded; inspect retained task")
+		}
+	}()
 	args, err := strictPiArgs(a)
 	if err != nil {
 		return err
@@ -775,6 +789,9 @@ func (s *Store) runAgent(w Worktree, id, token string) error {
 		}
 	}()
 	err = cmd.Wait()
+	if err != nil && a.Adapter.Durable != nil && a.Adapter.Durable.Job != "" {
+		return err
+	}
 	_ = s.updateAgent(w.ID, a.ID, token, "idle", "", nil)
 	return err
 }

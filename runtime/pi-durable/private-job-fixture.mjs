@@ -12,8 +12,13 @@ for(const [fd,path] of [[3,`${process.env.WT_DB}.agent-${launch.agent}.lock`],[4
   const inherited=fstatSync(fd),file=statSync(path);if(inherited.ino!==file.ino || inherited.dev!==file.dev)throw new Error('fixture missing actual inherited owner lock');
 }
 if(mode!=='bootstrap'){setHostCapability(readFileSync(6,'utf8'));closeSync(6);}
+if(mode==='bootstrap'&&launch.identity.role==='writer'&&process.env.WT_FIXTURE_FAULT==='bootstrap-failure'){appendFileSync(`${launch.identity.store}.bootstrap-failed-starts`,'once\n');console.error('PRIVATE_BOOTSTRAP_FAILURE');process.exit(1);}
 const faux=fauxProvider();const models=createModels();models.setProvider(faux.provider);
 if(mode==='job'){
+  if(launch.identity.role==='writer'&&['startup-exit-one','startup-exit-zero'].includes(process.env.WT_FIXTURE_FAULT)) {
+    appendFileSync(`${launch.identity.store}.failed-starts`,'once\n');
+    console.error('PRIVATE_UNPUBLISHED_HOST_FAILURE');process.exit(process.env.WT_FIXTURE_FAULT==='startup-exit-one'?1:0);
+  }
   const validation = 'set -e; deny() { if "$@" >/dev/null 2>&1; then echo "unadmitted WT mutation succeeded"; exit 1; fi; }; test "$(cat input.txt)" = after; deny "$WT_STATE" worktree agents create "$WT_ROOT_ID" nested --backend native; deny "$WT_STATE" worktree agents create "$WT_ROOT_ID" nested --backend durable; deny "$WT_STATE" worktree agents stop "$WT_ROOT_ID" "$WT_AGENT_ID"; deny "$WT_STATE" worktree view create "$WT_ROOT_ID" editor root; deny "$WT_STATE" worktree _durable-human-stop </dev/null; deny "$WT_STATE" set "$WT_SESSION" --status error; deny "$WT_STATE" delete "$WT_SESSION"; deny "$WT_STATE" migrate; deny "$WT_STATE" agents install-hooks --home "$HOME/forbidden-hooks" --template-dir "$WT_FIXTURE_HOOK_TEMPLATES"; deny "$WT_STATE" agent pi session-setup --dir "$PWD"; test ! -e "$HOME/forbidden-hooks"; test ! -e /dev/fd/6';
   const job=await stateCommand(['_durable-jobs','host'],{root:launch.root,child:launch.agent,runtime:launch.runtime});
   const criteria=job.contract.criteria.map((c,id)=>({id,reads:['review-read'],status:'satisfied',evidence:'Independently read fixture; host command/change evidence checked.'}));

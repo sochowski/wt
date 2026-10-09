@@ -63,7 +63,9 @@ type DurableJob struct {
 	Result   json.RawMessage    `json:"result"`
 	Review   json.RawMessage    `json:"review"`
 	// Transient projection contention is not a job failure or a launch receipt.
-	ReconciliationPending bool `json:"reconciliation_pending,omitempty"`
+	ReconciliationPending bool   `json:"reconciliation_pending,omitempty"`
+	Phase                 string `json:"phase,omitempty"`
+	BlockedReason         string `json:"blocked_reason,omitempty"`
 }
 type DurableJobObservation struct {
 	ID      string `json:"id"`
@@ -171,6 +173,23 @@ func (s *Store) reserveDurableJob(root, parent, runtime string, r DurableJobRequ
 		return prior, nil
 	} else if e != sql.ErrNoRows {
 		return empty, e
+	}
+	// Existing immutable operations above remain inspectable even if their
+	// checkout later outgrows limits. Only NEW admission gets this preflight.
+	if a.Runtime != runtime || runtime == "" || a.Stopped {
+		return empty, errors.New("stale durable admission owner")
+	}
+	attached := cwd == w.Cwd
+	for _, checkout := range w.Checkouts {
+		if checkout.Path == cwd {
+			attached = true
+		}
+	}
+	if !attached {
+		return empty, errors.New("task cwd must be explicitly attached or session home")
+	}
+	if err = preflightDurableEvidence(cwd); err != nil {
+		return empty, err
 	}
 	lease, err := lockFile(durableWriterLock(cwd))
 	if err != nil {
@@ -371,6 +390,23 @@ func (s *Store) finishDurableJob(root, child, runtime, capability string, o Dura
 	return tx.Commit()
 }
 
+// Observe a failed owned host without fabricating a worker result/review.
+// Exact runtime and admitted phase guard against stale exits racing publication.
+func (s *Store) pauseFailedDurableJobHost(a AgentSession) error {
+	d := a.Adapter.Durable
+	if d == nil || d.Job == "" {
+		return nil
+	}
+	phase, childColumn := "writer", "child_id"
+	if d.Role == "reviewer" {
+		phase, childColumn = "review", "reviewer_id"
+	} else if d.Role != "writer" {
+		return errors.New("invalid durable failure role")
+	}
+	_, err := s.db.Exec(`UPDATE agent_sessions SET stopped=1,status='error' WHERE root_id=? AND id=? AND runtime=? AND EXISTS(SELECT 1 FROM durable_jobs j WHERE j.id=? AND j.root_id=? AND j.`+childColumn+`=agent_sessions.id AND j.state=?)`, a.RootID, a.ID, a.Runtime, d.Job, a.RootID, phase)
+	return err
+}
+
 // Startup/relaunch uses the retained store. Only unfinished phases can run.
 func (s *Store) durableJobRunnable(a AgentSession) error {
 	d := a.Adapter.Durable
@@ -418,6 +454,27 @@ func (s *Store) advanceDurableJob(id string) (DurableJob, error) {
 	if err != nil {
 		return j, err
 	}
+	// Failure/explicit stop is durable status, not a projection operation. Report
+	// it even while another root reflow holds the topology lock.
+	if j.State == "writer" || j.State == "review" {
+		child := j.Child
+		if j.State == "review" {
+			child = j.Reviewer
+		}
+		a, e := w.agent(child)
+		if e != nil {
+			return j, e
+		}
+		if a.Stopped && (a.Status == "error" || a.Adapter.Durable.Initialized) {
+			j.Phase = j.State
+			j.State = "blocked"
+			j.BlockedReason = "durable-host-stopped; explicit human recovery required, no automatic relaunch"
+			if a.Status == "error" {
+				j.BlockedReason = "durable-host-failed; inspect retained store and use explicit human recovery, not automatic relaunch"
+			}
+			return j, nil
+		}
+	}
 	lock, err := s.rootLock(w)
 	if errors.Is(err, syscall.EWOULDBLOCK) {
 		// A concurrent reconciler owns projection. Return current durable evidence
@@ -450,8 +507,20 @@ func (s *Store) advanceDurableJob(id string) (DurableJob, error) {
 		if e != nil {
 			return j, e
 		}
+		if a.Stopped && (a.Status == "error" || a.Adapter.Durable.Initialized) {
+			j.Phase = j.State
+			j.State = "blocked"
+			j.BlockedReason = "durable-host-stopped; explicit human recovery required, no automatic relaunch"
+			if a.Status == "error" {
+				j.BlockedReason = "durable-host-failed; inspect retained store and use explicit human recovery, not automatic relaunch"
+			}
+			return j, nil
+		}
 		if !a.Adapter.Durable.Initialized {
 			if e = s.initializeDurable(w, child); e != nil {
+				if pauseErr := s.pauseFailedDurableJobHost(a); pauseErr != nil {
+					return j, pauseErr
+				}
 				return j, e
 			}
 			w, e = s.Worktree(root)
