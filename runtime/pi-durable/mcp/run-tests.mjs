@@ -6,7 +6,7 @@ import { once } from 'node:events';
 const home = await mkdtemp(join(tmpdir(), 'wt-mcp-tests-'));
 try {
   await mkdir(join(home,'pi'));
-  const child = spawn(process.execPath, ['--test', 'sdk.test.mjs', 'adapter.test.mjs'], {
+  const child = spawn(process.execPath, ['--test', 'sdk.test.mjs', 'adapter.test.mjs', 'dispatch.test.mjs', 'crash.test.mjs'], {
     cwd: new URL('.', import.meta.url), stdio:'inherit',
     env: { PATH:process.env.PATH, HOME:home, TMPDIR:home, PI_CODING_AGENT_DIR:join(home,'pi'), XDG_CONFIG_HOME:join(home,'config'), WT_STATUS_DIR:join(home,'state'), WT_DB:join(home,'wt.db'), WT_BASE_DIR:join(home,'worktrees') },
   });
