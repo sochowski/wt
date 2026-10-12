@@ -28,21 +28,27 @@ const durablePluginDefinition = "wt-durable-native-compat-v2"
 const durablePluginDependencies = "pi-durable=1.0.3;pi-ai=1.0.3;chord=1.0.3;pi-tui=0.87.1;rpiv-ask-user-question=2.9.0;rpiv-todo=2.9.0;rpiv-config=2.9.0;typebox=1.3.27;jiti=2.7.0;highlight.js=10.7.3;wt-plugin-adapter=2"
 
 type DurableSnapshot struct {
-	Store          string   `json:"store"`
-	UUID           string   `json:"uuid"`
-	Conversation   int      `json:"conversation"`
-	Definition     string   `json:"definition"`
-	Dependencies   string   `json:"dependencies"`
-	Cwd            string   `json:"cwd"`
-	Initialized    bool     `json:"initialized"`
-	WriterLock     string   `json:"writer_lock"`
-	ReadOnly       bool     `json:"read_only"`
-	Job            string   `json:"job,omitempty"`
-	Role           string   `json:"role,omitempty"`
-	Tools          []string `json:"tools,omitempty"`
-	Profile        string   `json:"profile,omitempty"`
-	PluginSource   string   `json:"plugin_source,omitempty"`
-	PluginContract string   `json:"plugin_contract,omitempty"`
+	McpConfigFile   string          `json:"mcp_config_file,omitempty"`
+	McpConfigDigest string          `json:"mcp_config_digest,omitempty"`
+	McpConfig       json.RawMessage `json:"mcp_config,omitempty"`
+	McpTools        []string        `json:"mcp_tools,omitempty"`
+	McpSource       string          `json:"mcp_source,omitempty"`
+	McpContract     string          `json:"mcp_contract,omitempty"`
+	Store           string          `json:"store"`
+	UUID            string          `json:"uuid"`
+	Conversation    int             `json:"conversation"`
+	Definition      string          `json:"definition"`
+	Dependencies    string          `json:"dependencies"`
+	Cwd             string          `json:"cwd"`
+	Initialized     bool            `json:"initialized"`
+	WriterLock      string          `json:"writer_lock"`
+	ReadOnly        bool            `json:"read_only"`
+	Job             string          `json:"job,omitempty"`
+	Role            string          `json:"role,omitempty"`
+	Tools           []string        `json:"tools,omitempty"`
+	Profile         string          `json:"profile,omitempty"`
+	PluginSource    string          `json:"plugin_source,omitempty"`
+	PluginContract  string          `json:"plugin_contract,omitempty"`
 }
 
 type DurableLaunch struct {
@@ -68,9 +74,12 @@ func durableEntrypoint() string {
 
 func validateDurable(a AgentSession) error {
 	d := a.Adapter.Durable
-	contract := d != nil && d.Profile == "" && d.Definition == durableDefinition && d.Dependencies == durableDependencies && d.PluginSource == "" && d.PluginContract == ""
+	contract := d != nil && d.Profile == "" && d.Definition == durableDefinition && d.Dependencies == durableDependencies && d.PluginSource == "" && d.PluginContract == "" && d.McpConfigFile == "" && d.McpSource == "" && d.McpContract == "" && len(d.McpConfig) == 0 && len(d.McpTools) == 0
 	if d != nil && d.Profile == durablePluginProfile {
 		contract = d.Definition == durablePluginDefinition && d.Dependencies == durablePluginDependencies && len(d.PluginSource) == 64 && len(d.PluginContract) == 64
+	}
+	if d != nil && d.Profile == durableMcpProfile {
+		contract = d.Definition == durableMcpDefinition && d.Dependencies == durableMcpDependencies && d.McpConfigFile != "" && len(d.McpConfigDigest) == 64 && len(d.McpSource) == 64 && len(d.McpContract) == 64 && len(d.McpTools) > 0 && !d.ReadOnly && d.Job == ""
 	}
 	if a.Profile != "pi" || a.Adapter.Version != 1 || a.Adapter.Backend != "durable" || d == nil || !d.Initialized || d.UUID == "" || d.Conversation != 1 || !contract || a.NativeID != "" || a.Adapter.File != "" {
 		return errors.New("incompatible or incomplete durable identity")
@@ -99,9 +108,12 @@ func (s *Store) initializeDurable(w Worktree, id string, readOnly ...bool) error
 	return s.initializeDurableProfile(w, id, "", len(readOnly) > 0 && readOnly[0])
 }
 
-func (s *Store) initializeDurableProfile(w Worktree, id, profile string, readOnly bool) error {
-	if profile != "" && profile != durablePluginProfile {
+func (s *Store) initializeDurableProfile(w Worktree, id, profile string, readOnly bool, mcp ...durableMcpAdmission) error {
+	if profile != "" && profile != durablePluginProfile && profile != durableMcpProfile {
 		return errors.New("unsupported durable profile")
+	}
+	if profile == durableMcpProfile && (readOnly || len(mcp) != 1 || mcp[0].Path == "" || len(mcp[0].Tools) == 0) {
+		return errors.New("MCP bootstrap requires fresh human admission")
 	}
 	a, err := w.agent(id)
 	if err != nil {
@@ -145,6 +157,14 @@ func (s *Store) initializeDurableProfile(w Worktree, id, profile string, readOnl
 			d.Definition = durablePluginDefinition
 			d.Dependencies = durablePluginDependencies
 		}
+		if profile == durableMcpProfile {
+			d.Definition = durableMcpDefinition
+			d.Dependencies = durableMcpDependencies
+			d.McpConfigFile = mcp[0].Path
+			d.McpConfigDigest = mcp[0].Digest
+			d.McpConfig = mcp[0].Config
+			d.McpTools = mcp[0].Tools
+		}
 		a.Adapter = PiSnapshot{Version: 1, Backend: "durable", Durable: d}
 		// Persist intent before any store creation. A failed init remains stopped and
 		// cannot accidentally fall back to a fresh ordinary Pi conversation.
@@ -176,6 +196,17 @@ func (s *Store) initializeDurableProfile(w Worktree, id, profile string, readOnl
 		}
 		d.PluginSource = receipt.Source
 		d.PluginContract = receipt.Contract
+	}
+	if profile == durableMcpProfile {
+		var receipt struct {
+			Source   string `json:"mcp_source"`
+			Contract string `json:"mcp_contract"`
+		}
+		if err = json.Unmarshal(output, &receipt); err != nil || len(receipt.Source) != 64 || len(receipt.Contract) != 64 {
+			return errors.New("missing actual MCP bootstrap receipt")
+		}
+		d.McpSource = receipt.Source
+		d.McpContract = receipt.Contract
 	}
 	d.Initialized = true
 	_, err = s.db.Exec(`UPDATE agent_sessions SET adapter=?,stopped=0 WHERE root_id=? AND id=? AND runtime=''`, jsonText(a.Adapter), w.ID, a.ID)

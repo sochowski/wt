@@ -118,6 +118,7 @@ test('actual schema/reducer errors are terminal errors, not mutations or accepte
 
 test('disposable actual-package module/factory/lifecycle sentinels remain ZERO on uncertain reopen, including UI inspection and attempted automatic poll', {timeout:30000},async t=>{
  const f=await fixture(t,[]),root=join(f.launch.identity.cwd,'source'),dir=join(root,'runtime','pi-durable'),original=dirname(fileURLToPath(import.meta.url));await mkdir(dir,{recursive:true});
+ await mkdir(join(dir,'mcp'));await cp(join(original,'mcp/contract.mjs'),join(dir,'mcp/contract.mjs'));
  for(const file of await readdir(original))if(file.endsWith('.mjs'))await cp(join(original,file),join(dir,file));await cp(join(original,'themes'),join(dir,'themes'),{recursive:true});await mkdir(join(root,'config'),{recursive:true});await symlink(join(original,'../../config/pi-wt'),join(root,'config/pi-wt'));
  const deps=join(dir,'node_modules');await mkdir(deps);for(const name of await readdir(join(original,'node_modules'))){if(name.startsWith('.'))continue;if(['@juicesharp','highlight.js','typebox','jiti'].includes(name))await cp(join(original,'node_modules',name),join(deps,name),{recursive:true});else await symlink(join(original,'node_modules',name),join(deps,name));}
  const sentinel=join(f.launch.identity.cwd,'actual-factory-sentinel.log');

@@ -1,8 +1,10 @@
-# Durable MCP boundary — staged, not activated
+# Actual Durable MCP profile
 
-This directory is the actual-package foundation for issue #73. It is not yet a
-WT profile or an exposed MCP tool. No ordinary/native/v1/v2 launch imports it,
-no existing store migrates, and the normal installer does not provision it.
+The explicit fresh-store `mcp-boundary-v1` profile now exposes actual direct
+MCP tools with deny-by-default per-call human approval. See
+[usage and capability matrix](../../../docs/pi-durable-mcp.md). Ordinary/native/
+v1/v2 stores never adopt it; the normal bootstrap provisions the separate
+script-disabled production closure without connecting to any server.
 
 `loader.mjs` loads only the public `pi-mcp-adapter/host-managed` entry from the
 actual pinned 5.1.0 package. It never loads the ordinary extension, auth/keyring
@@ -39,7 +41,7 @@ errors, cancellation, post-effect disconnect uncertainty, teardown, and actual
 bounded output/spill behavior through WT's narrow bridge. No paid inference,
 native session or production MCP server is involved.
 
-## Harness receipt library (still not a WT profile)
+## Harness receipt and fresh-profile runtime
 
 `boundary.mjs` and `store.mjs` now compose the actual adapter with public
 Harness documents/tasks/entries. They persist initialization intent before
@@ -63,13 +65,13 @@ they are not a hard model-effect fence. The guard refuses further provider
 requests after live ambiguity or a stale owner hook. Do not omit it when binding
 the extension. No abort mutation of retained work is used as a workaround.
 
-Library tests use an explicit private `mcp-boundary-v1` owner contract and real
-Harness/SQLite/faux inference, not WT CLI admission. This name is **not yet an
-accepted CLI profile**. Existing v1/v2 WT application envelopes cannot be adopted
-by changing a claimed profile. Read-only/delegated roles, process/auth/proxy
-options, ambient output-guard overrides, unlisted tools and stale identities
-reject. Current transport scope is explicit credential-free HTTP(S) server URLs,
-no redirects or automatic reconnects; broader auth/server modes are pending.
+The Go/WT CLI admits this profile only through explicit human config/ceiling
+flags. Real runtime/Go/PTY tests supplement the private library owner fixtures.
+Existing v1/v2 WT application envelopes cannot be adopted by changing a claimed
+profile. Read-only/delegated roles, process/auth/proxy options, ambient output-guard
+overrides, unlisted tools, stale identities and project-trust drift reject.
+Current transport scope is explicit credential-free HTTP(S), no redirects or
+automatic reconnects; broader auth/server modes remain unsupported.
 
 Six actual process-kill checkpoints cover initialization intent, admission,
 dispatch intent, remote result, normalized candidate and committed result before
@@ -80,16 +82,10 @@ claims. Capacity: four servers, sixteen selected tools/server, 128 operations,
 256-byte call IDs, 16 KiB arguments, 128 KiB candidate, 4 MiB journal, 4096 history
 entries. Source scanning is cold-start-only; model refusal is an O(1) gate.
 
-## Remaining activation gates
+## Remaining full-adapter gates
 
-1. Add bounded gateway discovery/describe/call, caller/server/tool permission
-   ceilings and a separately defined scripting authority contract. Unknown
-   APIs/options must fail visibly; never fabricate native owner identity.
-2. Complete role/budget/output/PTY/lifecycle gates and actual
-   native independent review before product acceptance. Read-only native review
-   is still unavailable in the current Durable parent; writer tests are not it.
-3. Explicit fresh-store CLI profile, wire the mandatory model guard and all
-   admission/inbox/job barriers, separate activation approval, no silent
-   credential refresh/login, settings writes, dependency repair or store migration.
-
-Merging this library does not claim full #73 completion or install authorization.
+Model gateway and scripting, broader auth/server modes, Apps/sampling and custom
+orchestration remain separate, explicitly unsupported capabilities. Actual native
+independent review is still outstanding; owner exceptions are not acceptance.
+Fresh-profile runtime already wires Models refusal and held input/config/inbox/job
+barriers and a real approval UI. No existing profile is silently activated.
