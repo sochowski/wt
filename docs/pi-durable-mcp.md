@@ -64,10 +64,10 @@ ordinary coding tools such as bash.
 | URL credentials, OAuth/login/refresh/keyring writes | Refused |
 | Stdio/process/package auto-install | Refused |
 | MCP Apps/browser UI and sampling | Not exposed in this profile |
-| Model gateway `mcp` / `mcpScript` | Pending; do not advertise parity |
+| Model gateway `mcp` / `mcpScript` | Supported narrowed catalog/call gateway and actual packaged QuickJS worker |
 | Custom subagent/council integration | Separate milestone |
 
-Auth, transport and scripting extensions need their own authority/replay contract,
+Broader auth/transport extensions need their own authority/replay contract,
 not silent native SDK API emulation. Direct support does not close issue #73 in
 its entirety.
 
@@ -104,3 +104,52 @@ credentials, provider probes, production-state tests or restarts used for tests.
 
 Native independent source review remains outstanding in the current Durable
 parent. Owner-authorized merge/install exceptions are not independent acceptance.
+
+## Gateway and bounded actual scripting
+
+To expose the gateway/script tools, explicitly add their names alongside the
+selected direct-tool names in `--mcp-tools`, for example:
+
+```sh
+wt new mcp-script-work --durable-profile mcp-boundary-v1 \
+  --mcp-config /absolute/canonical/mcp.json \
+  --mcp-tools example_lookup,mcp,mcpScript
+```
+
+`mcp` is WT's explicitly narrowed gateway over the **actual adapter catalog and
+execute callbacks**, not an emulated server/session engine: search, describe, or
+`{tool:"example_lookup",args:{...}}`. Auth/install/process/UI modes are not exposed.
+`mcpScript` hosts the **actual packaged pi-mcp-adapter5.1.0 QuickJS/WASM worker**
+with a version-pinned IPC contract. This internal package implementation contract
+is explicitly pinned/fingerprinted; it is not advertised as a native SDK API.
+There is no replacement evaluator, native manager/client facade or Node eval.
+
+```js
+const found = await tools.search({ query: "lookup", limit: 10 });
+const info = await tools.describe({ path: found.items[0].path });
+const result = await tools.call(info.path, { query: "example" });
+emit(result);
+```
+
+Search supports bounded query/server/limit/offset; describe supports path/server.
+Unknown options and `jev.evaluate` (extra inference) reject visibly. The sandbox
+has no Node/process/require/fetch/filesystem surface. Every subcall is checked
+against the exact caller/server/tool ceiling and actual input schema; each still
+requires deny-by-default **allow once**, with outer tool/subcall context in the UI.
+There are no blanket approvals for a script, indirect activation, auth refresh,
+transparent retries or remote exactly-once claims.
+
+Limits: 16 KiB code, 30s timeout, packaged worker64MiB memory, 64 host requests,
+16 serial remote calls, 64KiB output and128KiB intermediate transfers. Caller code
+can compose/fan out promises, but remote effects are serialized and separately
+approved. Timed-out/unawaited workers terminate and cancel pending dispatch
+authority; partial effects/unfinished records hold the store, rather than retry.
+
+Parent journal/assistant/task/tool-result receipts bind the whole invocation;
+every subcall additionally has genuine immutable application admission/result
+entries (no model/assistant identity fabricated). Rehashed subcall arguments or
+candidates cannot replace these witnesses. Individual sub-results never make an
+unfinished outer script or provider run successful. Script SIGKILL tests cover
+before subcall dispatch, after remote result, and after sub-result candidate; held
+reopen performs no factory/transport/approval/model replay. Native independent
+source review remains outstanding despite owner-authorized merge/install.

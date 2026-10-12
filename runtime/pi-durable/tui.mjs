@@ -64,7 +64,7 @@ export async function interactive(runtime, { terminal, poll = true, commandTrans
     runtime.attachMcpUi?.({
       showApproval(request,finish){
         if(selector){finish('deny');return;}
-        approvalSelector=new SearchSelector(`Approve MCP ${plain(request.server)}/${plain(request.tool)} once?\n${plain(JSON.stringify(request.arguments)).slice(0,2000)}`,[{value:'deny',label:'Deny'},{value:'allow_once',label:'Allow once'}],'deny',theme,keybindings,value=>finish(value==='allow_once'?'allow_once':'deny'));
+        approvalSelector=new SearchSelector(`Approve MCP ${plain(request.server)}/${plain(request.tool)} once?${request.batch?` [${plain(request.batch.tool)} subcall ${request.batch.index+1}]`:''}\n${plain(JSON.stringify(request.arguments)).slice(0,2000)}`,[{value:'deny',label:'Deny'},{value:'allow_once',label:'Allow once'}],'deny',theme,keybindings,value=>finish(value==='allow_once'?'allow_once':'deny'));
         selector=approvalSelector;selectorContainer.addChild(selector);tui.setFocus(selector);tui.requestRender();
       },
       clearApproval(){if(selector===approvalSelector){selector=undefined;selectorContainer.clear();tui.setFocus(editor);tui.requestRender();}approvalSelector=undefined;},
@@ -129,7 +129,7 @@ export async function interactive(runtime, { terminal, poll = true, commandTrans
       if (name === '/stop') { await runtime.fence(); await selfStop(runtime.launch); return close(); }
       if (name === '/hotkeys') { notice(Object.keys(appActions).map(action => `${action}: ${keybindings.getKeys(action).join(', ') || '(disabled)'}`).join('\n')); return; }
       if (name === '/help') {
-        if(runtime.mcp){notice('MCP profile: actual adapter, explicit servers/tool ceiling, allow-once human approval. /mcp list; /mcp describe TOOL; /mcp-inspect (read-only). Use chat to call real MCP tools. No auth refresh/login, process transports or automatic uncertain continuation. Existing stores are not migrated. Scripting/custom councils/web remain separate. /model and /thinking are conversation-local.');return;}
+        if(runtime.mcp){notice('MCP profile: actual adapter, explicit servers/tool ceiling, allow-once human approval. /mcp list; /mcp describe TOOL; /mcp-inspect (read-only). Use chat to call real MCP tools. No auth refresh/login, process transports or automatic uncertain continuation. Existing stores are not migrated. Configured mcp/mcpScript support bounded gateway and actual sandbox worker; every remote subcall requires approval. Auth/process/Apps/sampling, custom councils and web remain separate. /model and /thinking are conversation-local.');return;}
         notices.setText('Enter: chat / busy steer; Alt-Enter followUp; Escape durably aborts; Ctrl-C clears, twice within 500ms recoverably closes. /hotkeys; /steer TEXT; /followup TEXT; /abort; /quit; /stop (private human WT stop); /model [PROVIDER/MODEL]; /thinking [LEVEL]; /skill:NAME [TEXT]; /notifications. Profile: wt-durable-v1; Harness/SQLite owns inference and state. Native-style UI is NOT native plugin/delegation parity. Supported resources: instruction files and nonexecuting skills (project skills require explicit per-launch trust). Native prompt overrides, project settings and extension/package scripts are not loaded. Questionnaire/todo, web/MCP and custom subagent/council plugins are not shipped. /model and /thinking change only this conversation. See docs/pi-durable-capabilities.md for the capability matrix.'); tui.requestRender(); return;
       }
       if (name === '/model') {
