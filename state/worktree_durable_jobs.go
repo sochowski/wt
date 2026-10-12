@@ -33,11 +33,12 @@ func migrateDurableJobs(tx *sql.Tx) error {
 }
 
 type DurableJobRequest struct {
-	Version   int      `json:"version"`
-	Operation string   `json:"operation"`
-	Task      string   `json:"task"`
-	Cwd       string   `json:"cwd"`
-	Criteria  []string `json:"criteria"`
+	EvidenceProfile string   `json:"evidence_profile,omitempty"`
+	Version         int      `json:"version"`
+	Operation       string   `json:"operation"`
+	Task            string   `json:"task"`
+	Cwd             string   `json:"cwd"`
+	Criteria        []string `json:"criteria"`
 }
 type DurableJobContract struct {
 	DurableJobRequest
@@ -109,7 +110,7 @@ func durableCeiling(d *DurableSnapshot) []string {
 }
 func (s *Store) reserveDurableJob(root, parent, runtime string, r DurableJobRequest) (DurableJob, error) {
 	var empty DurableJob
-	if r.Version != 1 || !delegationText(r.Operation, 256) || !delegationText(r.Task, delegationPromptLimit) || len(r.Criteria) == 0 || len(r.Criteria) > 16 {
+	if (r.EvidenceProfile != "" && r.EvidenceProfile != "whole-checkout-v2") || r.Version != 1 || !delegationText(r.Operation, 256) || !delegationText(r.Task, delegationPromptLimit) || len(r.Criteria) == 0 || len(r.Criteria) > 16 {
 		return empty, errors.New("invalid bounded durable v1 task/criteria")
 	}
 	for _, c := range r.Criteria {
@@ -156,7 +157,11 @@ func (s *Store) reserveDurableJob(root, parent, runtime string, r DurableJobRequ
 	if containsTool(tools, "wt_workspace") {
 		reviewer = append(reviewer, "wt_workspace")
 	}
-	contract := DurableJobContract{DurableJobRequest: r, Root: root, Parent: parent, ParentUUID: a.Adapter.Durable.UUID, ParentConversation: a.Adapter.Durable.Conversation, RoleVersion: "wt-builtins-v1", WriterTools: writer, ReviewerTools: reviewer}
+	roleVersion := "wt-builtins-v1"
+	if r.EvidenceProfile == "whole-checkout-v2" {
+		roleVersion = "wt-builtins-v2"
+	}
+	contract := DurableJobContract{DurableJobRequest: r, Root: root, Parent: parent, ParentUUID: a.Adapter.Durable.UUID, ParentConversation: a.Adapter.Durable.Conversation, RoleVersion: roleVersion, WriterTools: writer, ReviewerTools: reviewer}
 	id := delegationDigest([]byte(jsonText([]string{"wt-durable-job-v1", root, parent, contract.ParentUUID, r.Operation})))
 	if prior, e := s.durableJob(id); e == nil {
 		if jsonText(prior.Contract) != jsonText(contract) {
@@ -188,7 +193,7 @@ func (s *Store) reserveDurableJob(root, parent, runtime string, r DurableJobRequ
 	if !attached {
 		return empty, errors.New("task cwd must be explicitly attached or session home")
 	}
-	if err = preflightDurableEvidence(cwd); err != nil {
+	if err = preflightDurableEvidenceProfile(cwd, r.EvidenceProfile); err != nil {
 		return empty, err
 	}
 	lease, err := lockFile(durableWriterLock(cwd))
