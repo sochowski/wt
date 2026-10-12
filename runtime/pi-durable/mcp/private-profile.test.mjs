@@ -43,9 +43,9 @@ test('compiled WT fresh MCP profile: real config admission, inherited locks, PTY
  const deniedRoot=await wt(['new','mcp-deny-proof','--cwd',join(home,'deny-cwd'),'--durable-profile','mcp-boundary-v1','--mcp-config',path,'--mcp-tools','private_echo']);
  const deniedAgent=deniedRoot.agents[0],deniedPane=deniedRoot.views.find(view=>view.target===deniedAgent.id).pane;
  await until(async()=>(await tm(['capture-pane','-p','-t',deniedPane])).includes('/help'));
- await tm(['send-keys','-H','-t',deniedPane,...[...Buffer.from('request denial\\r')].map(byte=>byte.toString(16))]);
+ await tm(['send-keys','-H','-t',deniedPane,...[...Buffer.from('request denial\r')].map(byte=>byte.toString(16))]);
  await until(async()=>(await tm(['capture-pane','-p','-t',deniedPane])).includes('Approve MCP private/echo once?'));
  await tm(['send-keys','-t',deniedPane,'Enter']);await until(async()=>(await tm(['capture-pane','-p','-t',deniedPane])).includes('ACTUAL_MCP_DONE'));assert.equal(remote.calls.length,1);
- await tm(['send-keys','-H','-t',deniedPane,...[...Buffer.from('/stop\\r')].map(byte=>byte.toString(16))]);await until(async()=>(await wt(['agents','show',deniedRoot.id,deniedAgent.id])).stopped);
+ await tm(['send-keys','-H','-t',deniedPane,...[...Buffer.from('/stop\r')].map(byte=>byte.toString(16))]);await until(async()=>(await wt(['agents','show',deniedRoot.id,deniedAgent.id])).stopped);
  phase='completed';
 });

@@ -56,6 +56,9 @@ func admitDurableMcp(profile, backend string, readOnly bool, path, tools string)
 	if err != nil {
 		return out, err
 	}
+	if len(data) > 16384 {
+		return out, errors.New("MCP config grew beyond admission bound")
+	}
 	// Full server semantics are validated by the actual runtime before effects.
 	var config struct {
 		Servers []struct {
@@ -74,7 +77,7 @@ func admitDurableMcp(profile, backend string, readOnly bool, path, tools string)
 	}
 	serverNames := map[string]bool{}
 	for _, server := range config.Servers {
-		endpoint, err := url.ParseRequestURI(server.URL)
+		endpoint, err := url.Parse(server.URL)
 		if !regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]{0,63}$`).MatchString(server.Name) || serverNames[server.Name] || err != nil || endpoint.Host == "" || (endpoint.Scheme != "http" && endpoint.Scheme != "https") || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" || len(server.Tools) < 1 || len(server.Tools) > 16 {
 			return out, errors.New("MCP server URL/name/options are unsupported")
 		}

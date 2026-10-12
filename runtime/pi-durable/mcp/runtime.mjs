@@ -68,7 +68,7 @@ export async function openMcpRuntime(launch,options={}) {
     runtime.resources=resourcePrompt(d.cwd,agentDir,process.env.WT_DURABLE_TRUST_PROJECT==='1');
     const env=options.environment||new NodeExecutionEnv({cwd:d.cwd});runtime.environment=env;
     const registry=createRegistry(),coding=CodingTools.tools.filter(tool=>!d.tools||d.tools.includes(tool.name)).map(tool=>defineTool({...tool,replay:'unsafe',execute:async(args,api,ctx)=>{await fence();if(mcp?.held||runtime.continuationHeld||realpathSync((await api.agent(ctx)).cwd)!==d.cwd)throw new Error('Held or incompatible MCP coding owner');return tool.execute(args,api,ctx);}}));
-    const managed=options.bootstrap?[]:wtTools(launch,fence,stateCommand).filter(tool=>tool.name!=='wt_delegate');
+    const managed=options.bootstrap?[]:wtTools(launch,fence,stateCommand).filter(tool=>tool.name!=='wt_delegate').map(tool=>({...tool,execute:async(...args)=>{await fence();if(mcp?.held||runtime.continuationHeld)throw new Error('Held MCP owner cannot execute managed operations');return tool.execute(...args);}}));
     registry.install(defineExtension({name:'wt-host',tools:[...coding,...managed],sections:[
       section('wt-instructions',()=>`You are a coding assistant in WT. Work only on assigned resources; obey project instructions. Tool mutations/bash are not exactly-once across crashes.\n${runtime.resources.prompt}`),
       section('wt-orientation',async()=>options.bootstrap?undefined:wtHostContext({cwd:d.cwd,tools:[...coding,...managed,...(mcp?.extension.tools||[])].map(tool=>tool.name),systemPrompt:''},process.env,root=>stateCommand(['workspace',root])),{tag:false}),
@@ -103,8 +103,8 @@ export async function openMcpRuntime(launch,options={}) {
       if(name==='mcp-inspect')return JSON.stringify(mcp.inspection||await preflightMcpBoundary(launch,config),null,2);
       if(name!=='mcp')return;
       const [action='list',tool]=args.trim().split(/\s+/);
-      if(action==='list')return mcp.descriptor.catalog.map(item=>`${item.name}: ${item.description}`).join('\n');
-      if(action==='describe'){const item=mcp.descriptor.catalog.find(item=>item.name===tool);if(!item)throw new Error('Unknown MCP tool');return JSON.stringify(item,null,2);}
+      if(action==='list')return (mcp.descriptor.catalog||[]).map(item=>`${item.name}: ${item.description}`).join('\n');
+      if(action==='describe'){const item=(mcp.descriptor.catalog||[]).find(item=>item.name===tool);if(!item)throw new Error('Unknown MCP tool');return JSON.stringify(item,null,2);}
       throw new Error('Unsupported MCP command. Use chat for approved tool calls; /mcp list or describe NAME for the real cached catalog.');
     };
     return runtime;
