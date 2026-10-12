@@ -6,16 +6,18 @@ import { execFile } from 'node:child_process';
 import { readFile, lstat, readlink } from 'node:fs/promises';
 import { join, relative } from 'node:path';
 import { createHash } from 'node:crypto';
+import { EVIDENCE_V2,checkoutEvidenceV2,compactEvidenceV2,evidenceSummary,validateCompactEvidenceV2 } from './evidence-v2.mjs';
 
 const exec = promisify(execFile);
 const digest = value => createHash('sha256').update(typeof value === 'string' || Buffer.isBuffer(value) ? value : JSON.stringify(value)).digest('hex');
+export const EvidenceDocV2=defineDoc({kind:'wt.job-evidence.v2',version:2,scope:'conversation',history:'latest',fork:'initial',initial:()=>({before:null,after:null})});
 export const JobDoc = defineDoc({kind:'wt.job',version:1,scope:'conversation',history:'latest',fork:'initial',initial:()=>({intent:null,submission:null,tools:{},observation:null})});
 const textResult = result => ({content:[{type:'text',text:JSON.stringify(result)}]});
 export function jobCommand(command, launch, operation, extra = {}) {
   return command(['_durable-jobs', operation], {root:launch.root,parent:launch.agent,runtime:launch.runtime,...extra});
 }
 export function delegationTools(launch, fence, command) {
-  return [defineTool({name:'wt_delegate',description:'WT-owned durable v1 delegation. Built-in writer plus mandatory independent read-only reviewer; no nested fanout. Assign an attached isolated git checkout, not the parent writer checkout. Parallel at most 4 with root/cumulative/wake limits. Retained task/result/review IDs and stores reconcile crash/relaunch. Missing/failed/uncertain review is never success. Status returns host-observed evidence, not merely model claims.',parameters:Type.Object({action:Type.Union([Type.Literal('start'),Type.Literal('status')]),tasks:Type.Optional(Type.Array(Type.Object({task:Type.String(),cwd:Type.String(),criteria:Type.Array(Type.String())}),{minItems:1,maxItems:4})),job:Type.Optional(Type.String())}),replay:'unsafe',execute:async(p,api)=>{
+  return [defineTool({name:'wt_delegate',description:'WT-owned durable delegation. Fresh tasks use explicit whole-checkout-v2 evidence (65536 paths/512 MiB, streaming whole-checkout hashes and compact receipts); old v1 admissions stay unchanged. Built-in writer plus mandatory independent read-only reviewer; no nested fanout. Assign an attached isolated git checkout, not the parent writer checkout. Parallel at most 4 with root/cumulative/wake limits. Retained task/result/review IDs and stores reconcile crash/relaunch. Missing/failed/uncertain review is never success. Status returns host-observed evidence, not merely model claims.',parameters:Type.Object({action:Type.Union([Type.Literal('start'),Type.Literal('status')]),tasks:Type.Optional(Type.Array(Type.Object({task:Type.String(),cwd:Type.String(),criteria:Type.Array(Type.String()),evidenceProfile:Type.Optional(Type.Literal('whole-checkout-v2'))}),{minItems:1,maxItems:4})),job:Type.Optional(Type.String())}),replay:'unsafe',execute:async(p,api)=>{
     await fence();
     if(p.action==='status') {
       if(!p.job) throw new Error('Exact task ID required');
@@ -24,7 +26,7 @@ export function delegationTools(launch, fence, command) {
     if(!p.tasks?.length || p.tasks.length>4) throw new Error('One to four tasks required');
     const jobs=[];
     for(let i=0;i<p.tasks.length;i++) {
-      const request={version:1,operation:`${launch.identity.uuid}:${api.callId}:${i}`,task:p.tasks[i].task,cwd:p.tasks[i].cwd,criteria:p.tasks[i].criteria};
+      const request={version:1,evidence_profile:p.tasks[i].evidenceProfile||EVIDENCE_V2,operation:`${launch.identity.uuid}:${api.callId}:${i}`,task:p.tasks[i].task,cwd:p.tasks[i].cwd,criteria:p.tasks[i].criteria};
       const j=await jobCommand(command,launch,'reserve',{request});
       jobs.push(await jobCommand(command,launch,'reconcile',{job:j.id}));
     }
@@ -88,6 +90,31 @@ function parseResult(text) {
   if(!value || Array.isArray(value) || typeof value!=='object') throw new Error('Structured object required');
   return value;
 }
+function validateV2Result(job,role,value,proof,tools){
+ const changed=validateCompactEvidenceV2(proof),receipts=Object.values(tools);
+ if(job.contract.role_version!=='wt-builtins-v2'||job.contract.evidence_profile!==EVIDENCE_V2)throw new Error('V2 evidence does not match admitted role/profile');
+ if(receipts.some(receipt=>receipt.state==='intent'))throw new Error('Interrupted v2 host effect is uncertain');
+ if(role==='writer'){
+  if(proof.before.indexDigest!==proof.after.indexDigest)throw new Error('Writer changed semantic Git index state');
+  if(value.status!=='succeeded'||proof.before.head!==proof.after.head)throw new Error('Writer status/baseline HEAD mismatch');
+  if(JSON.stringify(value.changedFiles)!==JSON.stringify(changed))throw new Error('Claimed files differ from whole-checkout host changes');
+  const commands=receipts.filter(t=>t.name==='bash').map(t=>({command:t.arguments.command,result:t.state}));
+  if(!commands.some(c=>c.result==='passed')||commands.some(c=>c.result==='failed')||JSON.stringify(value.commands)!==JSON.stringify(commands))throw new Error('Commands differ from host receipts');
+ }else{
+  if(value.reviewId!==job.review_id||value.verdict!=='accepted'||!Array.isArray(value.findings)||value.findings.length||!receipts.some(t=>t.name==='read'&&t.state==='passed'))throw new Error('Independent v2 review missing/failed/unobserved');
+  if(proof.before.digest!==proof.after.digest)throw new Error('Checkout changed during read-only review');
+  const writer=job.result;
+  if(!writer?.success||writer.evidence?.version!==2||proof.before.digest!==writer.evidence.after.digest)throw new Error('Review did not observe exact writer baseline');
+  const expected=validateCompactEvidenceV2(writer.evidence),reads=Object.entries(tools).filter(([,t])=>t.name==='read'&&t.state==='passed'),covered=new Set(reads.map(([,t])=>t.arguments.path));
+  for(const change of writer.evidence.changes){
+   if(change.after===null){if(!covered.has('wt://review-diff')||!writer.evidence.diff.includes(`diff --git a/${change.path} b/${change.path}`))throw new Error('Deleted artifact not independently reviewed');}
+   else if(!covered.has(join(job.contract.cwd,change.path)))throw new Error('Changed artifact not independently reviewed');
+  }
+  const relevant=new Set(reads.filter(([,t])=>!expected.length||writer.evidence.changes.some(change=>t.arguments.path===join(job.contract.cwd,change.path)||change.after===null&&t.arguments.path==='wt://review-diff')).map(([id])=>id));
+  for(const criterion of value.criteria)if(!Array.isArray(criterion.reads)||!criterion.reads.length||criterion.reads.some(id=>!relevant.has(id)))throw new Error('Criterion lacks relevant independent host reads');
+ }
+ return value;
+}
 export function validateJobResult(job,role,modelText,evidence,tools) {
   const value=parseResult(modelText);
   if(value.version!==1 || value.taskId!==job.id || value.resultId!==job.result_id) throw new Error('Immutable task/result identity mismatch');
@@ -96,6 +123,8 @@ export function validateJobResult(job,role,modelText,evidence,tools) {
     const c=value.criteria[i];if(c.id!==i || c.status!=='satisfied' || typeof c.evidence!=='string' || !c.evidence.trim()) throw new Error('Unsatisfied criterion');
   }
   if(!Array.isArray(value.risks) || value.risks.length) throw new Error('Unresolved risks prevent success');
+  if(job.contract.evidence_profile===EVIDENCE_V2)return validateV2Result(job,role,value,evidence,tools);
+  if(evidence.version===2)throw new Error('Old admission cannot adopt v2 evidence');
   if(!Array.isArray(evidence.before.index) || !Array.isArray(evidence.after.index)) throw new Error('Missing semantic Git index evidence');
   const receipts=Object.values(tools);
   if(receipts.some(t=>t.state==='intent')) throw new Error('Interrupted host effect is uncertain');
@@ -129,21 +158,24 @@ export function validateJobResult(job,role,modelText,evidence,tools) {
 function taskPrompt(job,role) {
   const common=`WT-owned durable v1 task. You are the trusted built-in ${role}; role version ${job.contract.role_version}. No delegation, MCP or ordinary extension execution. Assigned checkout: ${JSON.stringify(job.contract.cwd)}. Task ID ${job.id}; result ID ${job.result_id}; review ID ${job.review_id}. Acceptance criteria (zero-based IDs): ${JSON.stringify(job.contract.criteria)}. Return ONLY a JSON object, no extra prose. Common fields: version:1, taskId, resultId, criteria:[{id,status:"satisfied",evidence:string}], risks:[] (list any unresolved risks instead; then success is denied). Never claim human review/provenance.\nTask: ${job.contract.task}\n`;
   if(role==='writer') return common+'Writer fields: status:"succeeded", changedFiles:sorted array of exactly the paths you changed, commands:[{command:exact bash command,result:"passed"}] in execution order. Run at least one meaningful validation command. Any failed/uncertain check denies success. Do not commit, stage, change HEAD/index semantics or affect other resources; preserve any preexisting human staged baseline. Mandatory independent review follows; your own claim is not final acceptance.';
-  return common+`Reviewer fields: reviewId, verdict:"accepted" or "rejected", findings:[] (list blockers instead if any). Independently read ALL changed artifacts completely (no offset/limit/truncation; unsupported binary/empty artifacts fail closed). For deletions read path wt://review-diff to inspect the retained host diff. Each criterion must include reads:[toolCallId,...] referencing your successful relevant reads. Assess EVERY criterion against host evidence; you have no execution/mutation/spawn tools. Missing evidence or uncertainty is rejection. Writer host observation: ${JSON.stringify(job.result)}.`;
+  return common+`Reviewer fields: reviewId, verdict:"accepted" or "rejected", findings:[] (list blockers instead if any). Independently read ALL changed artifacts completely (no offset/limit/truncation; unsupported binary/empty artifacts fail closed). For deletions read path wt://review-diff to inspect the retained host diff. Each criterion must include reads:[toolCallId,...] referencing your successful relevant reads. Assess EVERY criterion against host evidence; you have no execution/mutation/spawn tools. Missing evidence or uncertainty is rejection. Writer host observation (compact whole-checkout receipts for v2): ${JSON.stringify(job.result)}.`;
 }
 
 /** Dedicated retained-store host, never native-provider/headless fallback. */
-export async function runJob(runtime,command, {evidence=checkoutEvidence}={}) {
+export async function runJob(runtime,command, {evidence}={}) {
   const launch=runtime.launch, role=launch.identity.role;
   const host=()=>command(['_durable-jobs','host'],{root:launch.root,child:launch.agent,runtime:launch.runtime});
   const job=await host();
-  if(job.digest!==digest(JSON.stringify(job.contract).replace(/[<>&\u2028\u2029]/g, c => `\\u${c.charCodeAt(0).toString(16).padStart(4,'0')}`)) || job.contract.role_version!=='wt-builtins-v1') throw new Error('Incompatible resolved role contract');
+  if(job.digest!==digest(JSON.stringify(job.contract).replace(/[<>&\u2028\u2029]/g, c => `\\u${c.charCodeAt(0).toString(16).padStart(4,'0')}`)) || !['wt-builtins-v1','wt-builtins-v2'].includes(job.contract.role_version)) throw new Error('Incompatible resolved role contract');
+  const v2=job.contract.evidence_profile===EVIDENCE_V2;
+  if(v2!==(job.contract.role_version==='wt-builtins-v2'))throw new Error('Evidence profile/role version mismatch');
+  const capture=evidence||(v2?checkoutEvidenceV2:checkoutEvidence);
   let doc=await runtime.harness.snapshot(JobDoc,runtime.root.id,context);
   const retainedObservation=Boolean(doc?.observation);
   if(!doc?.intent) {
-    const before=await evidence(launch.identity.cwd);
-    const intent={task:job.id,digest:job.digest,role,prompt:taskPrompt(job,role),before, ...(role==='reviewer'?{reviewDiff:job.result?.evidence?.after?.diff}: {})};
-    await runtime.root.commit(async tx=>{const d=await tx.doc(JobDoc,runtime.root.id);if(!d.intent)d.intent=intent;},context);
+    const before=await capture(launch.identity.cwd);
+    const intent={task:job.id,digest:job.digest,role,prompt:taskPrompt(job,role),before:v2?evidenceSummary(before):before, ...(role==='reviewer'?{reviewDiff:v2?job.result?.evidence?.diff:job.result?.evidence?.after?.diff}: {})};
+    await runtime.root.commit(async tx=>{const d=await tx.doc(JobDoc,runtime.root.id);if(!d.intent){d.intent=intent;if(v2)(await tx.doc(EvidenceDocV2,runtime.root.id)).before=before;}},context);
   }
   doc=await runtime.harness.snapshot(JobDoc,runtime.root.id,context);
   if(doc.intent.task!==job.id || doc.intent.digest!==job.digest || doc.intent.role!==role) throw new Error('Retained task intent mismatch');
@@ -152,24 +184,27 @@ export async function runJob(runtime,command, {evidence=checkoutEvidence}={}) {
     const submission=await runtime.input(doc.intent.prompt,'followUp',`wt-job:${job.id}:${role}`);
     await runtime.root.commit(async tx=>{(await tx.doc(JobDoc,runtime.root.id)).submission=submission.id;},context);
     const settled=await submission.wait(context);
-    const after=await evidence(launch.identity.cwd);
+    const after=await capture(launch.identity.cwd);
     const entries=(await runtime.root.entries({},1000,undefined,context)).items;
     const messages=entries.flatMap(e=>e.model||[]).filter(m=>m.role==='assistant');
     const last=messages[0], modelText=last?.content?.filter(b=>b.type==='text').map(b=>b.text).join('\n') || '';
     const current=await runtime.harness.snapshot(JobDoc,runtime.root.id,context);
-    const proof={before:doc.intent.before,after,tools:current.tools,modelText,humanProvenance:'not-observed'};
+    const raw=v2?await runtime.harness.snapshot(EvidenceDocV2,runtime.root.id,context):undefined;
+    if(v2&&JSON.stringify(evidenceSummary(raw.before))!==JSON.stringify(doc.intent.before))throw new Error('Retained private evidence baseline mismatch');
+    const proof={...(v2?compactEvidenceV2(raw.before,after):{before:doc.intent.before,after}),tools:current.tools,modelText,humanProvenance:'not-observed'};
     let success=false,validated=null;
     try{if(settled.status!=='done' || last?.stopReason==='error' || last?.stopReason==='aborted')throw new Error('Unsettled task');validated=validateJobResult(job,role,modelText,proof,current.tools);success=true;}catch{ /* bounded visible non-success; never infer acceptance from prose */ }
     const observation={id:role==='writer'?job.result_id:job.review_id,success,evidence:{...proof,validated}};
     if(JSON.stringify(observation).length>128*1024) throw new Error('Host result exceeds publication bound');
-    await runtime.root.commit(async tx=>{(await tx.doc(JobDoc,runtime.root.id)).observation=observation;},context);
+    await runtime.root.commit(async tx=>{(await tx.doc(JobDoc,runtime.root.id)).observation=observation;if(v2)(await tx.doc(EvidenceDocV2,runtime.root.id)).after=after;},context);
   }
   doc=await runtime.harness.snapshot(JobDoc,runtime.root.id,context);
   if(retainedObservation && doc.observation.success) {
     // Recovered host attestations must still satisfy today's contract and exact
     // observed snapshot; do not rerun unsafe tools or rewrite immutable IDs.
     validateJobResult(job,role,doc.observation.evidence.modelText,doc.observation.evidence,doc.observation.evidence.tools);
-    if((await evidence(launch.identity.cwd)).digest!==doc.observation.evidence.after.digest) throw new Error('Retained success snapshot changed before publication');
+    const snapshot=await capture(launch.identity.cwd);
+    if((v2?evidenceSummary(snapshot).digest:snapshot.digest)!==doc.observation.evidence.after.digest) throw new Error('Retained success snapshot changed before publication');
   }
   await command(['_durable-jobs','finish'],{root:launch.root,child:launch.agent,runtime:launch.runtime,observation:doc.observation});
   return doc.observation;

@@ -420,3 +420,56 @@ func TestDurableOversizedCheckoutRefusesBeforeChildAndWakeAdmission(t *testing.T
 		t.Fatal("unsupported checkout spent admission")
 	}
 }
+
+func TestDurableV2LargeCheckoutAdmissionIsExplicitAndImmutable(t *testing.T) {
+	s, w, r := durableJobFixture(t)
+	for i := 0; i < 4100; i++ {
+		if err := os.WriteFile(filepath.Join(r.Cwd, fmt.Sprintf("inventory-%04d", i)), []byte("unchanged"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.reserveDurableJob(w.ID, w.Agents[0].ID, "parent-runtime", r); err == nil {
+		t.Fatal("old v1 limits silently widened")
+	}
+	r.EvidenceProfile = "whole-checkout-v2"
+	j, err := s.reserveDurableJob(w.ID, w.Agents[0].ID, "parent-runtime", r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j.Contract.RoleVersion != "wt-builtins-v2" || j.Contract.EvidenceProfile != r.EvidenceProfile {
+		t.Fatal("evidence/role identity not admitted")
+	}
+	again, err := s.reserveDurableJob(w.ID, w.Agents[0].ID, "parent-runtime", r)
+	if err != nil || !reflect.DeepEqual(j, again) {
+		t.Fatal("v2 retry changed admission")
+	}
+	r.EvidenceProfile = ""
+	if _, err := s.reserveDurableJob(w.ID, w.Agents[0].ID, "parent-runtime", r); err == nil {
+		t.Fatal("same operation downgraded v2 role/evidence")
+	}
+	got, _ := s.Worktree(w.ID)
+	if got.WakeBudget != 62 || len(got.Agents) != 3 {
+		t.Fatal("preflight/retry spent budget twice")
+	}
+}
+func TestDurableV2DoesNotRetagPausedV1Admission(t *testing.T) {
+	s, w, r := durableJobFixture(t)
+	j, err := s.reserveDurableJob(w.ID, w.Agents[0].ID, "parent-runtime", r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, _ := setDurableHost(t, s, j, "writer")
+	current, _ := s.Worktree(w.ID)
+	a, _ := current.agent(child)
+	if err = s.pauseFailedDurableJobHost(a); err != nil {
+		t.Fatal(err)
+	}
+	r.EvidenceProfile = "whole-checkout-v2"
+	if _, err = s.reserveDurableJob(w.ID, w.Agents[0].ID, "parent-runtime", r); err == nil {
+		t.Fatal("paused old admission silently upgraded")
+	}
+	retained, _ := s.durableJob(j.ID)
+	if !reflect.DeepEqual(retained, j) {
+		t.Fatal("retained old contract or result changed")
+	}
+}

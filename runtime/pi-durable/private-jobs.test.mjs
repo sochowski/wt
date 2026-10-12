@@ -9,7 +9,7 @@ import { execFile } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 const exec=promisify(execFile), source=fileURLToPath(new URL('../..',import.meta.url));
 
-test('compiled WT/private tmux: independent writer/reviewer stores, SIGKILL publication recovery, parallel admission, budgets, peers and focus protections', {timeout:90000},async t=>{
+for(const evidenceProfile of ['', 'whole-checkout-v2'])test(`compiled WT/private tmux ${evidenceProfile||'legacy-v1'}: independent stores, SIGKILL publication, admission/budgets/focus`, {timeout:150000},async t=>{
   const home=realpathSync(await mkdtemp('/tmp/wt-durable-jobs-private-'));
   const bin=join(home,'bin'), config=join(home,'source','config'), runtime=join(home,'source','runtime','pi-durable');
   const socket=`wt-durable-jobs-${process.pid}`;const tmux=(await exec('which',['tmux'])).stdout.trim();
@@ -35,6 +35,7 @@ test('compiled WT/private tmux: independent writer/reviewer stores, SIGKILL publ
   for(const name of ['parent','a','b','c']) {
     const dir=join(home,name);await mkdir(dir);await writeFile(join(dir,'input.txt'),'before');await exec('git',['init',dir]);await exec('git',['-C',dir,'add','input.txt']);await exec('git',['-C',dir,'-c','user.name=Fixture','-c','user.email=fixture@invalid','commit','-m','fixture']);dirs.push(dir);
   }
+  if(evidenceProfile){await mkdir(join(dirs[1],'cache'));await writeFile(join(dirs[1],'.gitignore'),'cache/\n');for(let i=0;i<4100;i++)await writeFile(join(dirs[1],'cache',`file-${i}`),'unchanged');}
   await tm(['-f','/dev/null','new-session','-d','-s','sandbox','-c',home]);
   let root=await wt(['new','durable-jobs-proof','--cwd',dirs[0],'--backend','durable']);
   const parent=root.agents[0],owner={root:root.id,parent:parent.id,runtime:parent.runtime};
@@ -44,7 +45,7 @@ test('compiled WT/private tmux: independent writer/reviewer stores, SIGKILL publ
   await until(async()=>(await tm(['capture-pane','-p','-t',parentView.pane])).includes('/help'));
   await wt(['view','pin',root.id,parentView.id]);
   const activeBefore=await tm(['list-windows','-t',`=${root.name}`,'-F','#{window_id}:#{window_active}']);
-  const request={version:1,operation:'process-kill-proof',task:'Change input.txt and verify',cwd:dirs[1],criteria:['Fixture changed and independently reviewed']};
+  const request={version:1,...(evidenceProfile?{evidence_profile:evidenceProfile}:{}),operation:'process-kill-proof',task:'Change input.txt and verify',cwd:dirs[1],criteria:['Fixture changed and independently reviewed']};
   phase='single-child admission/recovery';
   let job=await internal('reserve',{...owner,request});
   let retry=await internal('reserve',{...owner,request});assert.equal(retry.child,job.child);assert.equal(retry.reviewer,job.reviewer);
@@ -55,7 +56,8 @@ test('compiled WT/private tmux: independent writer/reviewer stores, SIGKILL publ
   const pid=Number(await readFile(`${writer.adapter.durable.store}.kill-ready`,'utf8'));assert.ok(pid>0);
   process.kill(pid,'SIGKILL');
   await until(async()=>{job=await internal('reconcile',{...owner,job:job.id});return job.state==='succeeded';});
-  assert.equal(job.result.success,true);assert.equal(job.review.success,true);assert.equal(job.review.evidence.humanProvenance,'not-observed');
+  assert.equal(job.result.success,true);assert.equal(job.review.success,true);
+  if(evidenceProfile){assert.equal(job.contract.role_version,'wt-builtins-v2');assert.equal(job.result.evidence.version,2);assert.ok(job.result.evidence.after.fileCount>4096);assert.ok(Buffer.byteLength(JSON.stringify(job.result))<128*1024);assert.equal(job.result.evidence.after.files,undefined);assert.deepEqual(job.result.evidence.changes.map(item=>item.path),['input.txt']);}assert.equal(job.review.evidence.humanProvenance,'not-observed');
   assert.equal((await readFile(`${writer.adapter.durable.store}.calls`,'utf8')).trim().split('\n').length,3,'publication recovery spent provider calls twice');
   const reviewer=await wt(['agents','show',owner.root,job.reviewer]);
   assert.equal((await readFile(`${reviewer.adapter.durable.store}.calls`,'utf8')).trim().split('\n').length,2);
