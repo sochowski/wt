@@ -13,7 +13,7 @@ import { initializeMcpBoundary, preflightMcpBoundary, reopenMcpBoundary } from '
 for(const stage of ['initialization-intent','admitted','dispatch-intent','remote-result','candidate','receipted'])test(`actual SIGKILL MCP ${stage}: committed receipt is distinct from candidates and unfinished continuation`,{timeout:30000},async t=>{
   const dir=await realpath(await mkdtemp(join(tmpdir(),'wt-mcp-crash-')));t.after(()=>rm(dir,{recursive:true,force:true}));
   const remote=await privateMcpServer();t.after(()=>remote.close());
-  const launch={root:'private-crash-root',agent:'private-crash-agent',runtime:'private-crash-runtime',identity:{store:join(dir,'session.sqlite'),cwd:dir,uuid:randomBytes(16).toString('hex'),conversation:1,profile:'mcp-boundary-v1',read_only:false,tools:['private_echo']}};
+  const launch={root:'private-crash-root',agent:'private-crash-agent',runtime:'private-crash-runtime',identity:{store:join(dir,'session.sqlite'),cwd:dir,uuid:randomBytes(16).toString('hex'),conversation:1,profile:'mcp-boundary-v1',read_only:false,mcp_tools:['private_echo']}};
   const config={servers:[{name:'private',url:remote.url.toString(),tools:['echo']}]};
   if(stage!=='initialization-intent'){
     const bootstrap=await rawRuntime(launch,[]);

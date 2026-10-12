@@ -1,0 +1,51 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtemp,realpath,mkdir,symlink,writeFile,rm,readFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
+import { execFile } from 'node:child_process';
+import { privateMcpServer } from './fixture.mjs';
+const exec=promisify(execFile),source=fileURLToPath(new URL('../../..',import.meta.url));
+test('compiled WT fresh MCP profile: real config admission, inherited locks, PTY allow-once/deny, exact reopen and private human stop',{timeout:120000},async t=>{
+ const home=await realpath(await mkdtemp('/tmp/wt-mcp-pty-')),bin=join(home,'bin'),config=join(home,'source/config'),runtime=join(home,'source/runtime/pi-durable'),socket=`wt-mcp-pty-${process.pid}`;
+ const remote=await privateMcpServer();let env,phase='setup';
+ t.after(async()=>{
+  t.diagnostic(`phase=${phase}`);
+  if(env){if(phase!=='completed'){const panes=await exec('tmux',['-L',socket,'list-panes','-a','-F','#{pane_id}'],{env}).catch(()=>({stdout:''}));for(const pane of panes.stdout.trim().split('\n').filter(Boolean))t.diagnostic((await exec('tmux',['-L',socket,'capture-pane','-p','-t',pane],{env}).catch(()=>({stdout:''}))).stdout);}
+  await exec('tmux',['-L',socket,'kill-server'],{env}).catch(()=>{});}
+  await remote.close();await rm(home,{recursive:true,force:true,maxRetries:10,retryDelay:100});
+ });
+ await mkdir(bin);await mkdir(config,{recursive:true});await mkdir(runtime,{recursive:true});await mkdir(join(home,'pi'));await mkdir(join(home,'cwd'));await mkdir(join(home,'state'));
+ for(const name of ['wt-view.lua','wt-present.lua','wt-stack.lua','wt-shell.lua'])await symlink(join(source,'config',name),join(config,name));
+ await symlink(join(source,'runtime/pi-durable/private-job-fixture.mjs'),join(runtime,'main.mjs'));
+ const tmux=(await exec('which',['tmux'])).stdout.trim();await writeFile(join(bin,'tmux'),`#!/bin/sh\nexec '${tmux}' -L '${socket}' "$@"\n`,{mode:0o700});
+ const binary=join(bin,'wt-state');await exec('go',['build','-o',binary,'.'],{cwd:join(source,'state'),timeout:90000});
+ env={PATH:`${bin}:${process.env.PATH}`,HOME:home,TMPDIR:'/private/tmp',SHELL:'/bin/bash',TERM:'xterm-256color',LANG:'en_US.UTF-8',WT_STATE:binary,WT_DB:join(home,'state/wt.db'),WT_STATUS_DIR:join(home,'state'),WT_CONFIG_DIR:join(home,'config'),WT_BASE_DIR:join(home,'worktrees'),WT_SOURCE_CONFIG:config,PI_CODING_AGENT_DIR:join(home,'pi')};
+ const tm=async args=>(await exec(join(bin,'tmux'),args,{env,timeout:10000})).stdout.trim();
+ const wt=async args=>{const out=(await exec(binary,['worktree',...args],{env,timeout:60000})).stdout.trim();return out?JSON.parse(out):undefined;};
+ const until=async fn=>{for(let i=0;i<600;i++){if(await fn())return;await new Promise(r=>setTimeout(r,50));}throw new Error(`Private MCP PTY deadline at ${phase}`);};
+ const path=join(home,'mcp.json'),text=JSON.stringify({servers:[{name:'private',url:remote.url.toString(),tools:['echo']}]});await writeFile(path,text);
+ await tm(['-f','/dev/null','new-session','-d','-s','sandbox','-c',home]);
+ phase='fresh-WT-admission';const root=await wt(['new','mcp-live-proof','--cwd',join(home,'cwd'),'--durable-profile','mcp-boundary-v1','--mcp-config',path,'--mcp-tools','private_echo']);
+ const parent=root.agents[0],pane=root.views.find(view=>view.target===parent.id).pane;
+ assert.equal(parent.adapter.durable.profile,'mcp-boundary-v1');assert.equal(parent.adapter.durable.mcp_source.length,64);assert.equal(parent.adapter.durable.mcp_contract.length,64);assert.equal(parent.adapter.durable.mcp_config_file,path);
+ await until(async()=>(await tm(['capture-pane','-p','-t',pane])).includes('/help'));
+ const input=async value=>tm(['send-keys','-H','-t',pane,...[...Buffer.from(value+'\r')].map(byte=>byte.toString(16))]);
+ phase='real-broker-and-PTY';await input('call actual MCP');await until(async()=>(await tm(['capture-pane','-p','-t',pane])).includes('Approve MCP private/echo once?'));assert.equal(remote.calls.length,0);
+ await tm(['send-keys','-t',pane,'Down']);await tm(['send-keys','-t',pane,'Enter']);await until(async()=>(await tm(['capture-pane','-p','-t',pane])).includes('ACTUAL_MCP_DONE'));assert.equal(remote.calls.length,1);
+ phase='catalog-command';await input('/mcp describe private_echo');await until(async()=>(await tm(['capture-pane','-p','-t',pane])).includes('Private synthetic echo'));
+ phase='human-stop';await input('/stop');await until(async()=>(await wt(['agents','show',root.id,parent.id])).stopped);assert.equal(await readFile(path,'utf8'),text);
+ phase='exact-reopen-denial';await wt(['agents','resume',root.id,parent.id]);await until(async()=>(await tm(['capture-pane','-p','-t',pane])).includes('/help'));
+ await input('same provider fixture call ID must not redispatch');await new Promise(r=>setTimeout(r,1500));assert.equal(remote.calls.length,1);
+ await input('/stop');await until(async()=>(await wt(['agents','show',root.id,parent.id])).stopped);
+ phase='fresh-PTY-default-denial';await mkdir(join(home,'deny-cwd'));
+ const deniedRoot=await wt(['new','mcp-deny-proof','--cwd',join(home,'deny-cwd'),'--durable-profile','mcp-boundary-v1','--mcp-config',path,'--mcp-tools','private_echo']);
+ const deniedAgent=deniedRoot.agents[0],deniedPane=deniedRoot.views.find(view=>view.target===deniedAgent.id).pane;
+ await until(async()=>(await tm(['capture-pane','-p','-t',deniedPane])).includes('/help'));
+ await tm(['send-keys','-H','-t',deniedPane,...[...Buffer.from('request denial\\r')].map(byte=>byte.toString(16))]);
+ await until(async()=>(await tm(['capture-pane','-p','-t',deniedPane])).includes('Approve MCP private/echo once?'));
+ await tm(['send-keys','-t',deniedPane,'Enter']);await until(async()=>(await tm(['capture-pane','-p','-t',deniedPane])).includes('ACTUAL_MCP_DONE'));assert.equal(remote.calls.length,1);
+ await tm(['send-keys','-H','-t',deniedPane,...[...Buffer.from('/stop\\r')].map(byte=>byte.toString(16))]);await until(async()=>(await wt(['agents','show',deniedRoot.id,deniedAgent.id])).stopped);
+ phase='completed';
+});

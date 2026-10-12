@@ -19,8 +19,8 @@ export function bounded(value, bytes=128*1024) {
 }
 export function ownerIdentity(launch) {
   const d=launch.identity;
-  if(!launch.root||!launch.agent||d?.profile!=='mcp-boundary-v1'||d.conversation!==1||!/^[a-f0-9]{32}$/.test(d.uuid)||d.read_only||d.job||!Array.isArray(d.tools)||d.tools.length>64||d.tools.some(name=>typeof name!=='string'||name.length>128)||new Set(d.tools).size!==d.tools.length||realpathSync(d.cwd)!==d.cwd||realpathSync(dirname(d.store))!==dirname(d.store))throw new Error('MCP boundary requires exact fresh-profile owner and explicit nondelegated tool ceiling');
-  const owner=bounded({root:launch.root,agent:launch.agent,store:d.store,uuid:d.uuid,conversation:d.conversation,cwd:d.cwd,profile:d.profile,readOnly:false,tools:[...d.tools].sort()},16384);
+  if(!launch.root||!launch.agent||d?.profile!=='mcp-boundary-v1'||d.conversation!==1||!/^[a-f0-9]{32}$/.test(d.uuid)||d.read_only||d.job||!Array.isArray(d.mcp_tools)||d.mcp_tools.length>64||d.mcp_tools.some(name=>typeof name!=='string'||name.length>128)||new Set(d.mcp_tools).size!==d.mcp_tools.length||realpathSync(d.cwd)!==d.cwd||realpathSync(dirname(d.store))!==dirname(d.store))throw new Error('MCP boundary requires exact fresh-profile owner and explicit nondelegated tool ceiling');
+  const owner=bounded({root:launch.root,agent:launch.agent,store:d.store,uuid:d.uuid,conversation:d.conversation,cwd:d.cwd,profile:d.profile,readOnly:false,tools:[...d.mcp_tools].sort()},16384);
   if(existsSync(d.store)){
     const db=new DatabaseSync(d.store,{readOnly:true});
     try {

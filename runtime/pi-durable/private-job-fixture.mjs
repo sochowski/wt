@@ -42,7 +42,8 @@ if(mode==='interactive') {
     if(launch.identity.profile==='native-compat-v2')responses.push(
       fauxAssistantMessage(fauxToolCall('ask_user_question',{questions:[{question:'ACTUAL_PRIVATE_PLUGIN_QUESTION?',header:'Private',options:[{label:'Alpha',description:'First'},{label:'Beta',description:'Second'}]}]},{id:'private-question'}),{stopReason:'toolUse'}),fauxAssistantMessage('ACTUAL_PLUGIN_QUESTION_DONE'),
       fauxAssistantMessage(fauxToolCall('todo',{action:'create',subject:'ACTUAL_PRIVATE_TODO'},{id:'private-todo'}),{stopReason:'toolUse'}),fauxAssistantMessage('ACTUAL_PLUGIN_TODO_DONE'));
-    faux.setResponses(responses);
+    if(launch.identity.profile==='mcp-boundary-v1')faux.setResponses([fauxAssistantMessage(fauxToolCall('private_echo',{text:'ACTUAL_PRIVATE_MCP'},{id:'private-mcp'}),{stopReason:'toolUse'}),fauxAssistantMessage('ACTUAL_MCP_DONE')]);
+    else faux.setResponses(responses);
   } else faux.setResponses([fauxAssistantMessage('INBOX_FIXTURE_OK')]);
 }
 if(mode!=='bootstrap') {
@@ -50,7 +51,7 @@ if(mode!=='bootstrap') {
   models.streamSimple=(...args)=>{appendFileSync(`${launch.identity.store}.calls`,'1\n');return stream(...args);};
 }
 const runtime=await openRuntime(launch,{models,...(mode==='bootstrap'?{bootstrap:true,model:{provider:'faux',modelId:'faux-1'},fence:async()=>{}}:{})});
-if(mode==='bootstrap'){await runtime.close();if(runtime.plugins)console.log(JSON.stringify({plugin_source:launch.identity.plugin_source,plugin_contract:launch.identity.plugin_contract}));}
+if(mode==='bootstrap'){await runtime.close();if(runtime.mcp)console.log(JSON.stringify({mcp_source:launch.identity.mcp_source,mcp_contract:launch.identity.mcp_contract}));if(runtime.plugins)console.log(JSON.stringify({plugin_source:launch.identity.plugin_source,plugin_contract:launch.identity.plugin_contract}));}
 else if(mode==='job'){
   const command=async(args,input)=>{
     if(args[1]==='finish' && launch.identity.role==='writer' && process.env.WT_FIXTURE_FAULT==='publication' && !existsSync(`${launch.identity.store}.kill-seen`)) {

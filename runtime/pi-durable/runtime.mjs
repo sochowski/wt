@@ -18,6 +18,7 @@ import { resourcePrompt, readOnlyCredentials } from './resources.mjs';
 import { wtTools } from './wt-tools.mjs';
 import { observeJobTool, JobDoc } from './jobs.mjs';
 import { pluginProfile, pluginDefinition, pluginDependencies } from './plugin-contract-v2.mjs';
+import { mcpProfile, mcpDefinition, mcpDependencies } from './mcp/contract.mjs';
 
 export { context };
 export const definition = 'wt-durable-v1';
@@ -43,10 +44,10 @@ export async function humanSelfStop(launch) {
 }
 export function identityValue(launch) {
   const d = launch.identity;
-  const plugins = d?.profile === pluginProfile;
-  const expectedDefinition = plugins ? pluginDefinition : definition, expectedDependencies = plugins ? pluginDependencies : dependencies;
-  if (!launch.root || !launch.agent || !d || d.conversation !== 1 || !/^[a-f0-9]{32}$/.test(d.uuid) || d.definition !== expectedDefinition || d.dependencies !== expectedDependencies || (!plugins && (d.profile || d.plugin_source || d.plugin_contract)) || (plugins && (!/^[a-f0-9]{64}$/.test(d.plugin_source || '') || !/^[a-f0-9]{64}$/.test(d.plugin_contract || ''))) || realpathSync(d.cwd) !== d.cwd || realpathSync(dirname(d.store)) !== dirname(d.store)) throw new Error('Incompatible durable launch identity');
-  return { root: launch.root, agent: launch.agent, store: d.store, uuid: d.uuid, conversation: d.conversation, cwd: d.cwd, writer_lock: d.writer_lock, read_only: d.read_only === true, ...(d.job ? { job: d.job, role: d.role, tools: d.tools } : {}), definition:expectedDefinition, dependencies:expectedDependencies, ...(plugins ? {profile:pluginProfile,plugin_source:d.plugin_source,plugin_contract:d.plugin_contract} : {}) };
+  const plugins = d?.profile === pluginProfile, mcp=d?.profile===mcpProfile;
+  const expectedDefinition = mcp?mcpDefinition:plugins ? pluginDefinition : definition, expectedDependencies = mcp?mcpDependencies:plugins ? pluginDependencies : dependencies;
+  if (!launch.root || !launch.agent || !d || d.conversation !== 1 || !/^[a-f0-9]{32}$/.test(d.uuid) || d.definition !== expectedDefinition || d.dependencies !== expectedDependencies || (!plugins && !mcp && (d.profile || d.plugin_source || d.plugin_contract)) || (!mcp && (d.mcp_config_file||d.mcp_config||d.mcp_source||d.mcp_contract||d.mcp_tools)) || (mcp && (d.read_only||d.job||!Array.isArray(d.mcp_tools)||!d.mcp_tools.length||!/^[a-f0-9]{64}$/.test(d.mcp_config_digest||'')||!/^[a-f0-9]{64}$/.test(d.mcp_source||'')||!/^[a-f0-9]{64}$/.test(d.mcp_contract||''))) || (plugins && (!/^[a-f0-9]{64}$/.test(d.plugin_source || '') || !/^[a-f0-9]{64}$/.test(d.plugin_contract || ''))) || realpathSync(d.cwd) !== d.cwd || realpathSync(dirname(d.store)) !== dirname(d.store)) throw new Error('Incompatible durable launch identity');
+  return { root: launch.root, agent: launch.agent, store: d.store, uuid: d.uuid, conversation: d.conversation, cwd: d.cwd, writer_lock: d.writer_lock, read_only: d.read_only === true, ...(d.job ? { job: d.job, role: d.role, tools: d.tools } : {}), definition:expectedDefinition, dependencies:expectedDependencies, ...(plugins ? {profile:pluginProfile,plugin_source:d.plugin_source,plugin_contract:d.plugin_contract} : {}), ...(mcp?{profile:mcpProfile,mcp_config_file:d.mcp_config_file,mcp_config_digest:d.mcp_config_digest,mcp_config:d.mcp_config,mcp_tools:d.mcp_tools,mcp_source:d.mcp_source,mcp_contract:d.mcp_contract}:{}) };
 }
 /** Validate the application envelope before Harness.open can reconcile running tasks. */
 export function validateStore(launch, bootstrap = false) {
@@ -144,7 +145,7 @@ async function jobToolArguments(env, cwd, name, args) {
   return { ...args, path };
 }
 
-function configuredSettings(agentDir) {
+export function configuredSettings(agentDir) {
   const path = join(agentDir, 'settings.json');
   return existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : {};
 }
@@ -163,6 +164,7 @@ export function configuredModel(agentDir, settings = configuredSettings(agentDir
 
 /** One harness per owner; injected models/fence are for private fixture tests only. */
 export async function openRuntime(launch, options = {}) {
+  if(launch.identity?.profile===mcpProfile){const {openMcpRuntime}=await import('./mcp/runtime.mjs');return openMcpRuntime(launch,options);}
   const fence = options.fence || (() => wtFence(launch));
   if (!options.bootstrap) await fence();
   if (!options.bootstrap || existsSync(launch.identity.store)) validateStore(launch, options.bootstrap === true);
@@ -281,6 +283,7 @@ export async function openRuntime(launch, options = {}) {
 export async function admitMessage(runtime, message) {
   if (message.root_id !== runtime.launch.root || message.recipient !== runtime.launch.agent) throw new Error('Cross-recipient inbox admission');
   await runtime.fence();
+  if(runtime.mcp?.held||runtime.continuationHeld)throw new Error('Held MCP store cannot admit inbox effects');
   const key = `wt:${message.root_id}:${message.recipient}:${message.id}`;
   const immutable = { body: message.body, recipient: message.recipient, root: message.root_id, sender: message.sender, request: message.request, mode: 'followUp' };
   await runtime.root.commit(async tx => {

@@ -29,7 +29,7 @@ export async function interactive(runtime, { terminal, poll = true, commandTrans
         await attempt(() => pump?.stop()); await attempt(() => jobs?.stop());
         await attempt(() => observe('closing'));
         selector = undefined; await attempt(() => selectorContainer?.clear());
-        await attempt(() => runtime.plugins?.detach());
+        await attempt(() => runtime.plugins?.detach()); await attempt(() => runtime.detachMcpUi?.());
         await attempt(() => watch?.stop()); await attempt(() => tui?.stop());
         await attempt(() => runtime.close());
         await attempt(() => stateObserver?.({ stage: 'closed', at: Date.now() }));
@@ -50,7 +50,7 @@ export async function interactive(runtime, { terminal, poll = true, commandTrans
     selectorContainer = new Container();
     const widgets = new Container();
     tui.addChild(transcript); tui.addChild(notices); tui.addChild(selectorContainer); tui.addChild(widgets); tui.addChild(editor); tui.addChild(status); tui.setFocus(editor);
-    const commands = ['help', 'hotkeys', 'quit', 'abort', 'stop', 'model', 'thinking', 'steer', 'followup', 'notifications', ...runtime.resources.skills.map(skill => `skill:${skill.name}`)];
+    const commands = [...(runtime.mcp?['mcp','mcp-inspect']:[]), 'help', 'hotkeys', 'quit', 'abort', 'stop', 'model', 'thinking', 'steer', 'followup', 'notifications', ...runtime.resources.skills.map(skill => `skill:${skill.name}`)];
     editor.setAutocompleteProvider(new CombinedAutocompleteProvider(commands.map(name => ({ name })), runtime.launch.identity.cwd, null));
     watch = await runtime.root.watch(context);
     for (const entry of watch.value.entries) for (const message of entry.model || []) if (message.role === 'user') {
@@ -60,11 +60,20 @@ export async function interactive(runtime, { terminal, poll = true, commandTrans
     let current = watch.value, queue = Promise.resolve(), reportedStatus, lastSubmission;
     let hideThinking = presentation.hideThinking, expandedTools = false, lastClear = -Infinity;
     if (runtime.plugins) await runtime.plugins.attach({ tui, theme, keybindings, editor, notices, widgets, getToolsExpanded: () => expandedTools });
+    let approvalSelector;
+    runtime.attachMcpUi?.({
+      showApproval(request,finish){
+        if(selector){finish('deny');return;}
+        approvalSelector=new SearchSelector(`Approve MCP ${plain(request.server)}/${plain(request.tool)} once?\n${plain(JSON.stringify(request.arguments)).slice(0,2000)}`,[{value:'deny',label:'Deny'},{value:'allow_once',label:'Allow once'}],'deny',theme,keybindings,value=>finish(value==='allow_once'?'allow_once':'deny'));
+        selector=approvalSelector;selectorContainer.addChild(selector);tui.setFocus(selector);tui.requestRender();
+      },
+      clearApproval(){if(selector===approvalSelector){selector=undefined;selectorContainer.clear();tui.setFocus(editor);tui.requestRender();}approvalSelector=undefined;},
+    });
     const notice = text => { notices.setText(theme.fg('warning', text)); tui.requestRender(); };
     function enqueue(operation) { queue = queue.then(() => closed ? undefined : operation()).catch(() => notice('Operation rejected or failed; no native fallback. Check command, runtime identity or authentication.')); }
     const models = () => [...runtime.models.getModels()].sort((a, b) => `${a.provider}/${a.id}`.localeCompare(`${b.provider}/${b.id}`));
     const thinkingLevels = agent => getSupportedThinkingLevels(runtime.models.getModel(agent.model.provider, agent.model.modelId));
-    async function configure(config) { await runtime.fence(); if(runtime.plugins?.recoveryHeld||runtime.continuationHeld)throw new Error('Interrupted recovery cannot change configuration'); await runtime.root.configure(config, context); await update(current); }
+    async function configure(config) { await runtime.fence(); if(runtime.plugins?.recoveryHeld||runtime.mcp?.held||runtime.continuationHeld)throw new Error('Interrupted recovery cannot change configuration'); await runtime.root.configure(config, context); await update(current); }
     function select(title, items, selected, accept) {
       if (selector) return;
       selector = new SearchSelector(title, items, selected, theme, keybindings, value => {
@@ -109,7 +118,7 @@ export async function interactive(runtime, { terminal, poll = true, commandTrans
       const doc = await runtime.harness.snapshot(BridgeDoc, runtime.root.id, context);
       const jobDoc = await runtime.harness.snapshot(JobDoc, runtime.root.id, context);
       const uncertain = runtime.plugins ? await runtime.plugins.update() : [];
-      notices.setText([...presentation.diagnostics, ...(runtime.plugins?.notice ? [runtime.plugins.notice] : []), ...(runtime.continuationHeld ? [`Interrupted v2 run ${runtime.interruptedRun.taskId} (${runtime.interruptedRun.kind} v${runtime.interruptedRun.version}) awaits explicit human-authorized continuation (unavailable at this checkpoint). Receipted tools remain completed; provider continuation is NOT exactly-once. No automatic input/model/inbox/job wake.`] : []), ...(uncertain.length ? [`Plugin recovery paused: ${uncertain.length} interrupted/uncertain operation(s). Stored answers/candidates are NOT completed tool receipts. Plugin execution/UI and new input are disabled; /plugin-inspect is read-only.`] : []), ...Object.values(doc?.notifications || {}).map(p => `Notification from ${plain(p.sender)}: ${plain(p.body)}`), ...Object.entries(jobDoc?.results || {}).map(([id, result]) => `Delegation ${id.slice(0,12)}: ${result.state}${result.state === 'succeeded' ? ' (independent review accepted)' : ' (not success until independent review)'}${result.blocked_reason?`: ${plain(result.blocked_reason)}`:''}`)].join('\n').slice(-8192));
+      notices.setText([...presentation.diagnostics, ...(runtime.plugins?.notice ? [runtime.plugins.notice] : []), ...(runtime.mcp?.notice?[runtime.mcp.notice]:[]), ...(runtime.continuationHeld ? [`Interrupted ${runtime.launch.identity.profile||'v2'} run ${runtime.interruptedRun.taskId} (${runtime.interruptedRun.kind} v${runtime.interruptedRun.version||1}) awaits explicit human-authorized continuation (unavailable at this checkpoint). Receipted tools remain completed; provider continuation is NOT exactly-once. No automatic input/model/inbox/job wake.`] : []), ...(uncertain.length ? [`Plugin recovery paused: ${uncertain.length} interrupted/uncertain operation(s). Stored answers/candidates are NOT completed tool receipts. Plugin execution/UI and new input are disabled; /plugin-inspect is read-only.`] : []), ...Object.values(doc?.notifications || {}).map(p => `Notification from ${plain(p.sender)}: ${plain(p.body)}`), ...Object.entries(jobDoc?.results || {}).map(([id, result]) => `Delegation ${id.slice(0,12)}: ${result.state}${result.state === 'succeeded' ? ' (independent review accepted)' : ' (not success until independent review)'}${result.blocked_reason?`: ${plain(result.blocked_reason)}`:''}`)].join('\n').slice(-8192));
       tui.requestRender();
       await observe('view', value);
     }
@@ -120,6 +129,7 @@ export async function interactive(runtime, { terminal, poll = true, commandTrans
       if (name === '/stop') { await runtime.fence(); await selfStop(runtime.launch); return close(); }
       if (name === '/hotkeys') { notice(Object.keys(appActions).map(action => `${action}: ${keybindings.getKeys(action).join(', ') || '(disabled)'}`).join('\n')); return; }
       if (name === '/help') {
+        if(runtime.mcp){notice('MCP profile: actual adapter, explicit servers/tool ceiling, allow-once human approval. /mcp list; /mcp describe TOOL; /mcp-inspect (read-only). Use chat to call real MCP tools. No auth refresh/login, process transports or automatic uncertain continuation. Existing stores are not migrated. Scripting/custom councils/web remain separate. /model and /thinking are conversation-local.');return;}
         notices.setText('Enter: chat / busy steer; Alt-Enter followUp; Escape durably aborts; Ctrl-C clears, twice within 500ms recoverably closes. /hotkeys; /steer TEXT; /followup TEXT; /abort; /quit; /stop (private human WT stop); /model [PROVIDER/MODEL]; /thinking [LEVEL]; /skill:NAME [TEXT]; /notifications. Profile: wt-durable-v1; Harness/SQLite owns inference and state. Native-style UI is NOT native plugin/delegation parity. Supported resources: instruction files and nonexecuting skills (project skills require explicit per-launch trust). Native prompt overrides, project settings and extension/package scripts are not loaded. Questionnaire/todo, web/MCP and custom subagent/council plugins are not shipped. /model and /thinking change only this conversation. See docs/pi-durable-capabilities.md for the capability matrix.'); tui.requestRender(); return;
       }
       if (name === '/model') {
@@ -145,6 +155,7 @@ export async function interactive(runtime, { terminal, poll = true, commandTrans
         await input(`Skill from ${JSON.stringify(skill.filePath)}; relative paths resolve from its directory:\n${readFileSync(skill.filePath, 'utf8')}\n${argument}`); return;
       }
       if (name === '/steer' || name === '/followup') { if (!argument) throw new Error('Input required'); await input(argument, name === '/steer' ? 'steer' : 'followUp'); return; }
+      if (name.startsWith('/') && runtime.mcpCommand){const value=await runtime.mcpCommand(name.slice(1),argument);if(value!==undefined){notice(value);return;}}
       if (name.startsWith('/') && await runtime.plugins?.command(name.slice(1), argument)) return;
       if (name.startsWith('/')) throw new Error('Unsupported durable command');
       await input(text, current.docs['pi.live']?.run ? 'steer' : 'followUp');
@@ -178,7 +189,7 @@ export async function interactive(runtime, { terminal, poll = true, commandTrans
       let running = false;
       timer = setInterval(async () => {
         if (running || closed) return; running = true;
-        try { await runtime.fence(); if(!runtime.plugins?.recoveryHeld&&!runtime.continuationHeld){await pump.poll(); await jobs.poll();} await update(current); }
+        try { await runtime.fence(); if(!runtime.plugins?.recoveryHeld&&!runtime.mcp?.held&&!runtime.continuationHeld){await pump.poll(); await jobs.poll();} await update(current); }
         catch { notices.setText('WT fence/inbox unavailable: closing recoverably; no further automatic admission.'); tui.requestRender(); await close().catch(done.reject); }
         finally { running = false; }
       }, 1000);

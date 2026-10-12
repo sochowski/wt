@@ -5,7 +5,7 @@ export function inboxPump(runtime, command = stateCommand) {
   let cursor = 0, busy = false, stopped = false;
   return {
     async poll() {
-      if (busy || stopped) return;
+      if (busy || stopped || runtime.mcp?.held || runtime.continuationHeld) return;
       busy = true;
       try {
         await runtime.fence();

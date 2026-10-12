@@ -32,7 +32,7 @@ export function mcpSourceFingerprint() {
     } else if(stat.isFile()){hash.update(JSON.stringify([label,createHash('sha256').update(readFileSync(path)).digest('hex')]));}
     else throw new Error('Unsupported MCP source file');
   };
-  for(const name of ['package.json','package-lock.json','sdk.mjs','loader.mjs','store.mjs','boundary.mjs'])scan(join(directory,name),name);
+  for(const name of ['package.json','package-lock.json','sdk.mjs','loader.mjs','store.mjs','boundary.mjs','contract.mjs','runtime.mjs'])scan(join(directory,name),name);
   const lock=JSON.parse(readFileSync(join(directory,'package-lock.json'),'utf8'));
   for(const [path,metadata] of Object.entries(lock.packages).sort(([a],[b])=>a.localeCompare(b))){
     if(!path||metadata.dev)continue;

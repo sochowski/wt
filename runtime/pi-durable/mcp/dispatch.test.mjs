@@ -16,7 +16,7 @@ const response=(id='call')=>[fauxAssistantMessage(fauxToolCall('private_echo',{t
 async function fixture(t, options={}){
   const dir=await realpath(await mkdtemp(join(tmpdir(),'wt-mcp-dispatch-')));t.after(()=>rm(dir,{recursive:true,force:true}));
   const remote=await privateMcpServer();t.after(()=>remote.close());
-  const launch={root:'private-root',agent:'private-agent',runtime:'private-runtime',identity:{store:join(dir,'session.sqlite'),cwd:dir,uuid:randomBytes(16).toString('hex'),conversation:1,profile:'mcp-boundary-v1',read_only:false,tools:['private_echo']}};
+  const launch={root:'private-root',agent:'private-agent',runtime:'private-runtime',identity:{store:join(dir,'session.sqlite'),cwd:dir,uuid:randomBytes(16).toString('hex'),conversation:1,profile:'mcp-boundary-v1',read_only:false,mcp_tools:['private_echo']}};
   const config={servers:[{name:'private',url:remote.url.toString(),tools:['echo']}]};
   const runtime=await rawRuntime(launch,response()),events=[];t.after(()=>runtime.close());
   const boundary=await initializeMcpBoundary(runtime,{config,approve:async()=>options.approve??'allow_once',observer:event=>events.push(event)});t.after(()=>boundary.close());
@@ -61,7 +61,7 @@ test('post-effect transport ambiguity blocks the next provider call and reopen b
 test('source/config/owner/ceiling tampering fails preflight without transport effects; no v1/v2 adoption',async t=>{
   const f=await fixture(t);await f.boundary.close();await f.runtime.close();const requests=f.remote.requests.length;
   await assert.rejects(preflightMcpBoundary({...f.launch,agent:'other'},f.config),/immutable/);
-  await assert.rejects(preflightMcpBoundary({...f.launch,identity:{...f.launch.identity,tools:[]}},f.config),/immutable/);
+  await assert.rejects(preflightMcpBoundary({...f.launch,identity:{...f.launch.identity,mcp_tools:[]}},f.config),/immutable/);
   await assert.rejects(preflightMcpBoundary(f.launch,{servers:[{...f.config.servers[0],url:'http://127.0.0.1:1/mcp'}]}),/immutable/);
   await assert.rejects(preflightMcpBoundary({...f.launch,identity:{...f.launch.identity,profile:'native-compat-v2'}},f.config),/fresh-profile/);
   assert.equal(f.remote.requests.length,requests);

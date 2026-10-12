@@ -6,3 +6,6 @@ set -euo pipefail
 SOURCE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 node -e 'const [major, minor] = process.versions.node.split(".").map(Number); if (major !== 22 || minor < 22) { console.error("wt durable requires Node 22.22+ (22.x)"); process.exit(1); }'
 npm --prefix "$SOURCE/runtime/pi-durable" ci --ignore-scripts
+# Provision the separately locked actual MCP closure without loading any server,
+# native SDK/session engine, credentials, or existing-profile migration.
+npm --prefix "$SOURCE/runtime/pi-durable/mcp" ci --omit=dev --ignore-scripts

@@ -214,7 +214,7 @@ export async function runJob(runtime,command, {evidence}={}) {
 export function jobPump(runtime,command) {
   let stopped=false;
   return {stop(){stopped=true;},async poll(){
-    if(stopped || runtime.launch.identity.read_only || runtime.launch.identity.job) return;
+    if(stopped || runtime.launch.identity.read_only || runtime.launch.identity.job || runtime.mcp?.held || runtime.continuationHeld) return;
     const jobs=await jobCommand(command,runtime.launch,'list');
     for(const job of jobs) {
       let current;
