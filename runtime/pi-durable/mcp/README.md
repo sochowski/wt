@@ -84,8 +84,9 @@ entries. Source scanning is cold-start-only; model refusal is an O(1) gate.
 
 ## Remaining full-adapter gates
 
-Model gateway and scripting, broader auth/server modes, Apps/sampling and custom
+Broader auth/server modes, Apps/sampling and custom
 orchestration remain separate, explicitly unsupported capabilities. Actual native
 independent review is still outstanding; owner exceptions are not acceptance.
-Fresh-profile runtime already wires Models refusal and held input/config/inbox/job
+The gateway and actual packaged QuickJS worker host now add bounded, separately
+approved subcalls with immutable admission/result witnesses. Fresh-profile runtime wires Models refusal and held input/config/inbox/job
 barriers and a real approval UI. No existing profile is silently activated.

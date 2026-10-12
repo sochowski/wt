@@ -42,7 +42,7 @@ if(mode==='interactive') {
     if(launch.identity.profile==='native-compat-v2')responses.push(
       fauxAssistantMessage(fauxToolCall('ask_user_question',{questions:[{question:'ACTUAL_PRIVATE_PLUGIN_QUESTION?',header:'Private',options:[{label:'Alpha',description:'First'},{label:'Beta',description:'Second'}]}]},{id:'private-question'}),{stopReason:'toolUse'}),fauxAssistantMessage('ACTUAL_PLUGIN_QUESTION_DONE'),
       fauxAssistantMessage(fauxToolCall('todo',{action:'create',subject:'ACTUAL_PRIVATE_TODO'},{id:'private-todo'}),{stopReason:'toolUse'}),fauxAssistantMessage('ACTUAL_PLUGIN_TODO_DONE'));
-    if(launch.identity.profile==='mcp-boundary-v1')faux.setResponses([fauxAssistantMessage(fauxToolCall('private_echo',{text:'ACTUAL_PRIVATE_MCP'},{id:'private-mcp'}),{stopReason:'toolUse'}),fauxAssistantMessage('ACTUAL_MCP_DONE')]);
+    if(launch.identity.profile==='mcp-boundary-v1')faux.setResponses([fauxAssistantMessage(fauxToolCall(process.env.WT_FIXTURE_MCP_SCRIPT==='1'?'mcpScript':'private_echo',process.env.WT_FIXTURE_MCP_SCRIPT==='1'?{code:'await tools.call("private_echo",{text:"FIRST"});return await tools.call("private_echo",{text:"SECOND"});'}:{text:'ACTUAL_PRIVATE_MCP'},{id:'private-mcp'}),{stopReason:'toolUse'}),fauxAssistantMessage('ACTUAL_MCP_DONE')]);
     else faux.setResponses(responses);
   } else faux.setResponses([fauxAssistantMessage('INBOX_FIXTURE_OK')]);
 }

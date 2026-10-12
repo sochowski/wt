@@ -44,16 +44,17 @@ export function verifyRequest(id, record, entries, catalog) {
   const call=assistant?.model?.find(message=>message.role==='assistant')?.content.find(block=>block.type==='toolCall'&&block.id===id&&block.name===record.name);
   if(!tool||!call||digest(validateToolArguments(tool,call))!==record.argumentsDigest)throw new Error('MCP request differs from authoritative assistant call');
 }
-export function classifyCalls(doc, entries, contract, catalog) {
+export function classifyCalls(doc, entries, contract, catalog, owner) {
   if(Object.keys(doc?.calls||{}).length>128)throw new Error('MCP operation capacity exceeded');
   bounded(doc??{},4*1024*1024);
   const uncertain=[],receipted=[];
   for(const[id,call]of Object.entries(doc?.calls||{})){
     if(!id||Buffer.byteLength(id)>256||call.contract!==contract||digest(call.arguments)!==call.argumentsDigest||!contract||!Number.isSafeInteger(call.taskId)||call.taskId<1||catalog&&!catalog.some(tool=>tool.name===call.name)||!['admitted','dispatch-intent','remote-result','candidate'].includes(call.phase)||call.candidate&&digest(call.candidate)!==call.candidateDigest)throw new Error('MCP immutable operation mismatch');
     if(catalog)verifyRequest(id,call,entries,catalog);
+    if(call.subcalls){if(!Array.isArray(call.subcalls)||call.subcalls.length>16)throw new Error('MCP subcall budget mismatch');for(let index=0;index<call.subcalls.length;index++){const sub=call.subcalls[index];if(!owner||sub.id!==digest([owner.uuid,id,index]))throw new Error('MCP subcall ID mismatch');if(!catalog?.some(tool=>tool.name===sub.name)||digest(sub.arguments)!==sub.argumentsDigest||sub.candidate&&digest(sub.candidate)!==sub.candidateDigest)throw new Error('MCP subcall identity/digest mismatch');const admission=entries.find(entry=>entry.id===sub.admission);if(!admission||admission.kind!=='wt.mcp-subcall-admission.v1'||admission.byTaskId!==call.taskId||admission.data?.owner!==owner.uuid||admission.data?.outer!==id||admission.data?.index!==index||admission.data?.id!==sub.id||admission.data?.name!==sub.name||admission.data?.argumentsDigest!==sub.argumentsDigest)throw new Error('MCP subcall differs from immutable admission receipt');if(sub.candidate){const result=entries.find(entry=>entry.id===sub.resultReceipt);if(!result||result.kind!=='wt.mcp-subcall-result.v1'||result.byTaskId!==call.taskId||result.data?.owner!==owner.uuid||result.data?.outer!==id||result.data?.index!==index||result.data?.id!==sub.id||result.data?.candidateDigest!==sub.candidateDigest||result.data?.ambiguous!==sub.ambiguous)throw new Error('MCP subcall differs from immutable result receipt');}}}
     const receipt=call.candidate&&entries.find(entry=>entry.kind==='pi.tool-result'&&entry.byTaskId===call.taskId&&entry.model?.some(message=>message.role==='toolResult'&&message.toolCallId===id&&message.toolName===call.name&&digest(resultValue(message))===digest(resultValue(call.candidate))));
     const value={id,...call};
-    if(!receipt||call.ambiguous||ambiguousResult(call.candidate))uncertain.push(value);
+    if(!receipt||call.ambiguous||ambiguousResult(call.candidate)||call.subcalls?.some(sub=>sub.phase!=='candidate'||sub.ambiguous||ambiguousResult(sub.candidate)))uncertain.push(value);
     else receipted.push({...value,receipt:receipt.id,failed:Boolean(call.candidate.isError||call.candidate.details?.error)});
   }
   return {uncertain,receipted};
@@ -75,7 +76,7 @@ export async function inspectMcpStore(launch, expected) {
     const entries=[];let cursor;
     do {const page=await storage.scanEntries({conversationId:owner.conversation},256,cursor,context);entries.push(...page.items);cursor=page.next;if(entries.length>4096)throw new Error('MCP preflight history limit exceeded');}while(cursor);
     const calls=await read('wt.mcp-calls.v1',{kind:'conversation',conversationId:owner.conversation});
-    const classified=classifyCalls(calls,entries,descriptor.contract,descriptor.catalog);
+    const classified=classifyCalls(calls,entries,descriptor.contract,descriptor.catalog,descriptor.owner);
     for(const [id,call]of Object.entries(calls?.calls??{})){
       const task=await storage.task(call.taskId,context);
       if(!task||task.kind!=='pi.tool'||task.version!==1||task.conversationId!==owner.conversation||task.input.assistant!==call.assistant||task.input.callId!==id)throw new Error('MCP task/call admission identity mismatch');

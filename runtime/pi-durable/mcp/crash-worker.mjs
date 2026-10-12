@@ -9,7 +9,8 @@ setInterval(()=>{},1000); // A paused checkpoint must remain available for SIGKI
 const observer=async event=>{
   if(event.stage===stage){process.send({stage});await new Promise(()=>{});}
 };
-const runtime=await rawRuntime(launch,[fauxAssistantMessage(fauxToolCall('private_echo',{text:'CRASH_EFFECT'},{id:'crash-call'}),{stopReason:'toolUse'}),fauxAssistantMessage('DONE')]);
+const scripted=launch.identity.mcp_tools.includes('mcpScript');
+const runtime=await rawRuntime(launch,[fauxAssistantMessage(fauxToolCall(scripted?'mcpScript':'private_echo',scripted?{code:'await tools.call("private_echo",{text:"FIRST"}); await tools.call("private_echo",{text:"SECOND"});'}:{text:'CRASH_EFFECT'},{id:'crash-call'}),{stopReason:'toolUse'}),fauxAssistantMessage('DONE')]);
 const options={config,approve:async()=> 'allow_once',observer};
 const boundary=stage==='initialization-intent'
   ? await initializeMcpBoundary(runtime,options)
