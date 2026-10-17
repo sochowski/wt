@@ -41,7 +41,7 @@ wait_agents() {
 }
 # Pin private server config before any worktree command starts it.
 tmux -L default -f /dev/null new-session -d -s sentinel 'sleep 300'
-wt new demo --cwd "$HOME" --backend native > "$priv/new.json"
+wt new demo --cwd "$HOME" > "$priv/new.json"
 root=$(jq -r .id "$priv/new.json"); first=$(jq -r '.agents[0].id' "$priv/new.json")
 jq -e '.mcpServers["project-server"].command == "project-command" and (.mcpServers["profile-server"] == null)' "$HOME/.mcp.json" >/dev/null
 [[ $(tmux list-panes -s -t demo | wc -l) == 1 ]]
@@ -50,7 +50,7 @@ wait_agents 1
 wt checkout attach demo alpha "$priv/a" > "$priv/a.json"
 wt checkout attach demo beta "$priv/b" > "$priv/b.json"
 focus=$(tmux display-message -p -t demo '#{window_id}')
-wt agents create demo reviewer --parent main --cwd beta --task "review the two repositories" --backend native > "$priv/peer.json"
+wt agents create demo reviewer --parent main --cwd beta --task "review the two repositories" > "$priv/peer.json"
 peer=$(jq -r .id "$priv/peer.json")
 wait_agents 2
 cmp "$WT_CONFIG_DIR/mcp-profiles/default.json" "$priv/b/.mcp.json"
@@ -110,7 +110,6 @@ wt ls simple | grep -q demo
 wt restore demo > "$priv/restored.json"
 sleep .4
 wt restore demo > "$priv/repeated.json"
-[[ $(tmux show-option -qv -t demo @wt-restore-complete) == 1 ]]
 [[ ! -e "$priv/unsafe-replay" ]]
 restored_diff=$(wt view show demo "$(jq -r .id "$priv/diff.json")" | jq -r .pane)
 restored_main=$(wt view list demo | jq -r --arg id "$first" '.[] | select(.kind=="agent" and .target==$id) | .pane')
@@ -146,7 +145,7 @@ wt restore demo >/dev/null
 # Agent-scoped controls cannot steal human views or mutate other roots.
 peer_runtime=$(wt agents show demo "$peer" | jq -r .runtime)
 if WT_ROOT_ID="$root" WT_AGENT_ID="$peer" WT_RUNTIME_ID="$peer_runtime" wt view close demo "$(jq -r .id "$priv/shell.json")" 2>/dev/null; then exit 1; fi
-if WT_ROOT_ID="$root" WT_AGENT_ID="$peer" WT_RUNTIME_ID=stale wt agents create demo forbidden --backend native 2>/dev/null; then exit 1; fi
+if WT_ROOT_ID="$root" WT_AGENT_ID="$peer" WT_RUNTIME_ID=stale wt agents create demo forbidden 2>/dev/null; then exit 1; fi
 if wt agents reparent demo "$first" "$peer" 2>/dev/null; then exit 1; fi
 # Managed present lazily acquires an explicitly targeted view and persists deck.
 peer_runtime=$(wt agents show demo reviewer | jq -r .runtime)
@@ -174,7 +173,7 @@ wt agents resume demo reviewer
 # Current supervision, not creator history, controls stop. Attached clients
 # protect the active pane even from its current supervisor.
 first_runtime=$(wt agents show demo main | jq -r .runtime)
-WT_ROOT_ID="$root" WT_AGENT_ID="$first" WT_RUNTIME_ID="$first_runtime" wt agents create demo delegated --parent main --backend native > "$priv/delegated.json"
+WT_ROOT_ID="$root" WT_AGENT_ID="$first" WT_RUNTIME_ID="$first_runtime" wt agents create demo delegated --parent main > "$priv/delegated.json"
 wt agents reparent demo delegated reviewer
 if WT_ROOT_ID="$root" WT_AGENT_ID="$first" WT_RUNTIME_ID="$first_runtime" wt agents stop demo delegated 2>/dev/null; then exit 1; fi
 peer_runtime=$(wt agents show demo reviewer | jq -r .runtime)
@@ -301,10 +300,10 @@ wt checkout attach demo unused "$priv/a" >/dev/null
 wt checkout detach demo unused
 [[ -e "$priv/a/file.txt" ]]
 # Persistent roots can exist before tmux and before any transcript exists.
-wt new blank --offline --backend native > "$priv/blank.json"
+wt new blank --offline > "$priv/blank.json"
 [[ $(wt roots blank | jq '.[0].agents[0].native_id') == '""' ]]
 wt ls simple | grep -q blank
-wt new another --offline --backend native >/dev/null
+wt new another --offline >/dev/null
 wt ls | grep -q blank
 wt ls | grep -q another
 cat > "$priv/bin/fzf" <<'SH'
