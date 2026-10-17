@@ -27,21 +27,8 @@ func main() {
 		return
 	}
 
-	// A task's ordinary bash/CLI cannot bypass its WT ceiling through legacy
-	// state or registry mutation handlers that normally run before DB open.
-	var st *Store
-	if os.Getenv("WT_AGENT_ID") != "" {
-		var err error
-		st, err = Open(dbPath())
-		if err != nil {
-			fatalf("actor admission: %v", err)
-		}
-		defer st.Close()
-		if err = st.authorizeDurableStateCommand(cmd, args); err != nil {
-			fatalf("actor admission: %v", err)
-		}
-	}
-	// Human/non-agent registry queries still avoid opening/creating the DB.
+	// Agent-registry commands are pure metadata/filesystem work and never touch
+	// the session store, so dispatch them before opening (and creating) the DB.
 	switch cmd {
 	case "fzf-bindings":
 		if err := fzfBindingsCommand(args); err != nil {
@@ -56,14 +43,11 @@ func main() {
 		return
 	}
 
-	if st == nil {
-		var err error
-		st, err = Open(dbPath())
-		if err != nil {
-			fatalf("open db: %v", err)
-		}
-		defer st.Close()
+	st, err := Open(dbPath())
+	if err != nil {
+		fatalf("open db: %v", err)
 	}
+	defer st.Close()
 
 	switch cmd {
 	case "worktree":

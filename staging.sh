@@ -18,10 +18,9 @@ set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STAGE="${WT_STAGING_HOME:-${TMPDIR:-/tmp}/wt-staging}"
-SOCKET="${WT_STAGING_SOCKET:-wt-staging}"
+SOCKET="wt-staging"
 # Dependency source is not live state/identity; preserve it only for installation.
 native_package_source="${WT_PI_SUBAGENTS_SOURCE:-}"
-durable_bootstrap="${WT_INSTALL_DURABLE:-0}"
 # Discard ambient state/identity overrides before installing or starting tmux.
 for inherited in ${!WT_@}; do unset "$inherited"; done
 unset TMUX TMUX_PANE
@@ -73,7 +72,7 @@ GOCACHE="$(go env GOCACHE 2>/dev/null || true)"
 echo "Running install.sh into the sandbox..."
 env -u WT_BASE_DIR -u WT_STATUS_DIR -u WT_CONFIG_DIR -u WT_LOG_FILE \
     -u WT_STATE -u WT_DB -u WT_DEFAULT_AGENT -u TMUX \
-    HOME="$STAGE" PATH="$STUB_BIN:$PATH" WT_PI_SUBAGENTS_SOURCE="$native_package_source" WT_INSTALL_DURABLE="$durable_bootstrap" \
+    HOME="$STAGE" PATH="$STUB_BIN:$PATH" WT_PI_SUBAGENTS_SOURCE="$native_package_source" \
     GOMODCACHE="$GOMODCACHE" GOCACHE="$GOCACHE" \
     bash "$REPO/install.sh"
 

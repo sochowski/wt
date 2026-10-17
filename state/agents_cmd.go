@@ -1,7 +1,6 @@
 // CLI dispatch for the agent registry: `wt-state agents ...` (roster-wide) and
 // `wt-state agent <name> ...` (one agent). These commands never touch the
-// SQLite store. Human/non-agent main dispatch avoids DB open; durable task
-// actors must first pass the central exact-identity/permission admission.
+// SQLite store, so main dispatches them before opening the DB.
 package main
 
 import (
