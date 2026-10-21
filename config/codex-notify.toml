@@ -1,1 +1,0 @@
-notify = ["$HOME/bin/wt-hook", "stop"]

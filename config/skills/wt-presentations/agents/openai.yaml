@@ -1,4 +1,0 @@
-interface:
-  display_name: "WT Presentations"
-  short_description: "Show code, diffs, trees, and Mermaid-first Markdown in Neovim"
-  default_prompt: "Use $wt-presentations to build a visual walkthrough in wt, preferring focused Mermaid diagrams whenever relationships can be shown visually."
