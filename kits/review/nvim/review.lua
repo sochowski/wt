@@ -7,8 +7,8 @@
 -- a renderer are installed), with treesitter highlighting fenced code.
 --
 -- Keys on a slide keep vim's meaning where they can: j / k, gg / G, ctrl-d
--- and friends move within the slide; l / h (or ]] / [[) go to the next and
--- previous slide and take a count; L / H go to the last and first; gf or
+-- and friends move within the slide; J / K (or ]] / [[) go to the next and
+-- previous slide and take a count; H / L go to the first and last; gf or
 -- <CR> opens the path:line under the cursor beside the slides; q quits; g?
 -- lists the keys. :SlideEdit opens the deck at the current slide, and
 -- :Slide N jumps to slide N.
@@ -79,7 +79,7 @@ local function render()
   vim.bo[buf].modified = false
   for _, win in ipairs(vim.fn.win_findbuf(buf)) do
     local name = vim.fn.fnamemodify(deck.path, ':t'):gsub('%%', '%%%%')
-    vim.wo[win].winbar = string.format(' %s  %d/%d%%=h/l slide · H/L first/last · gf open · g? keys ', name, deck.idx, deck.count)
+    vim.wo[win].winbar = string.format(' %s  %d/%d%%=J/K slide · H/L first/last · gf open · g? keys ', name, deck.idx, deck.count)
     vim.api.nvim_win_set_cursor(win, { 1, 0 })
   end
 end
@@ -100,8 +100,8 @@ end
 
 local keys_help = {
   'j k gg G ctrl-d ctrl-u   move within the slide',
-  'l ]]  /  h [[            next / previous slide (with a count: 3l)',
-  'L  /  H                  last / first slide',
+  'J ]]  /  K [[            next / previous slide (with a count: 3J)',
+  'H  /  L                  first / last slide',
   'gf  or  <CR>             open the path:line under the cursor beside the slides',
   'q                        quit the panel',
   ':Slide N  :SlideEdit     jump to slide N; edit the deck at this slide',
@@ -141,10 +141,10 @@ local function deck_buf()
   local function map(keys, fn)
     for _, k in ipairs(keys) do vim.keymap.set('n', k, fn, { buffer = buf, nowait = true, silent = true }) end
   end
-  map({ 'l', ']]' }, step(1))
-  map({ 'h', '[[' }, step(-1))
-  map({ 'L' }, go('last'))
+  map({ 'J', ']]' }, step(1))
+  map({ 'K', '[[' }, step(-1))
   map({ 'H' }, go(1))
+  map({ 'L' }, go('last'))
   map({ 'gf', '<CR>' }, function()
     local ref = ref_under_cursor()
     if ref then M.code(ref.path, ref.line) else vim.notify('no path under the cursor') end
