@@ -11,6 +11,7 @@ Unless the human asks for something else, the session goes:
 Rules:
 
 - Never push, commit, approve, request changes, post or resolve comments, or reply on GitHub or anywhere else without explicit approval for that specific action. Drafts go in the chat and in `review/NOTES.md`.
+- Write comments in the reviewer's own voice. No AI attribution or "drafted by" signatures, and don't copy sign-offs from other people's comments on the PR.
 - Review each PR against the layer below it (the commands in `review/STACK.md`), never against the default branch.
 - The checkout is detached at the top of the stack. Don't edit it, except for an experiment you revert straight after. Scripts and output go in `scratch/`.
 - Keep `review/NOTES.md` current as you go, with sections `Summary`, `Open questions`, `Verified`, and `Draft findings`. It is how the next session picks up.
