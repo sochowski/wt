@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# wt review — a workspace for reviewing a GitHub PR and the stack around it.
+#
+#   wt review URL|OWNER/REPO#N [--only]   create review-N, or refresh it
+#   wt review                             refresh the review workspace you're in
+#
+# Checks the PR's repo out detached, applies kit `review` (whose setup finds
+# the stack, moves the checkout to its top and writes review/), and prints the
+# workspace. --only reviews just that PR, without the PRs below and above it.
+set -euo pipefail
+
+# Prefer the wt this kit ships with, so a direct .wt/bin/wt-review run matches.
+wt="${WT_SELF:-}"
+[[ -n "$wt" ]] || { wt="$(dirname "$(readlink -f "$0")")/../../../bin/wt"; [[ -x "$wt" ]] || wt=wt; }
+die() { printf 'wt review: %s\n' "$*" >&2; exit 1; }
+
+case "${1:-}" in
+  -h|--help) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  "")
+    ws=$("$wt" root) || die "not in a workspace; pass a PR"
+    [[ -f "$ws/review/source" ]] || die "$ws is not a review workspace"
+    exec "$wt" kit --ws "$ws" review ;;
+esac
+
+target="$1" only=0
+[[ "${2:-}" == --only ]] && only=1
+if [[ "$target" =~ github\.com/([^/]+/[^/]+)/pull/([0-9]+) ]]; then
+  repo="${BASH_REMATCH[1]}" pr="${BASH_REMATCH[2]}"
+elif [[ "$target" =~ ^([^/#]+/[^/#]+)#([0-9]+)$ ]]; then
+  repo="${BASH_REMATCH[1]}" pr="${BASH_REMATCH[2]}"
+else
+  die "expected a PR URL or OWNER/REPO#N, got '$target'"
+fi
+
+ws="${WT_HOME:-$HOME/worktrees/.sessions}/review-$pr"
+[[ -d "$ws" ]] || "$wt" new "review-$pr" "${repo#*/}@pull/$pr/head" > /dev/null
+mkdir -p "$ws/review"
+printf 'repo=%s\npr=%s\nonly=%s\n' "$repo" "$pr" "$only" > "$ws/review/source"
+exec "$wt" kit --ws "$ws" review

@@ -3,13 +3,20 @@
 #
 #   wt search [QUERY]        fuzzy-find a workspace (enter) or one of its repos (tab)
 #   wt new [NAME] [REPO...]  create a workspace with a fresh worktree per repo
+#   wt add REPO...           add repos to the current workspace
+#   wt kit [KIT...]          prime the current workspace with kits (no args: list)
+#   wt root                  print the current workspace
+#   wt repos                 list the repos wt can check out
+#   wt CMD ...               run wt-CMD from a kit's bin/ or PATH (wt review, ...)
 #
 # A workspace is $WT_HOME/<name>/repos/<repo>, one git worktree per repo on
-# branch <name>, cut from each repo's default branch. Older layouts are found
-# too: repos/<repo> may be a symlink to a worktree elsewhere, and loose
-# worktrees at $WT_LEGACY/<repo>/<branch> show up as one-repo workspaces.
+# branch <name>, cut from each repo's default branch. REPO@REF checks out REF
+# (a branch, tag, sha or pull/N/head) detached instead; REPO@REF:DIR names the
+# checkout DIR. Older layouts are found too: repos/<repo> may be a symlink to a
+# worktree elsewhere, and loose worktrees at $WT_LEGACY/<repo>/<branch> show
+# up as one-repo workspaces.
 #
-# Both commands print the chosen directory on stdout and draw everything else
+# search, new and root print a directory on stdout and draw everything else
 # on stderr, so a shell function can cd into it (see README).
 
 set -euo pipefail
@@ -17,6 +24,9 @@ set -euo pipefail
 WT_HOME="${WT_HOME:-$HOME/worktrees/.sessions}"
 WT_LEGACY="${WT_LEGACY:-$HOME/worktrees}"
 WT_REPOS="${WT_REPOS:-$HOME/workspace}"
+WT_SELF=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)/$(basename "$(readlink -f "$0")")
+WT_KITS="${WT_KITS:-${WT_SELF%/bin/*}/kits:${XDG_CONFIG_HOME:-$HOME/.config}/wt/kits}"
+export WT_HOME WT_LEGACY WT_REPOS WT_KITS WT_SELF
 
 die() { printf 'wt: %s\n' "$*" >&2; exit 1; }
 say() { printf '%s\n' "$*" >&2; }
@@ -67,6 +77,12 @@ repo_state() {
   local r="$1" branch base ahead dirty out
   [[ -d "$r" ]] || { printf 'missing'; return; }
   branch=$(git -C "$r" rev-parse --abbrev-ref HEAD 2>/dev/null) || { printf 'not a git checkout'; return; }
+  if [[ "$branch" == HEAD ]]; then
+    branch="@$(git -C "$r" rev-parse --short HEAD)"
+    dirty=$(git -C "$r" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+    (( dirty > 0 )) && printf '%s  ●%s' "$branch" "$dirty" || printf '%s  detached' "$branch"
+    return
+  fi
   base=$(git -C "$r" symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null || echo origin/main)
   ahead=$(git -C "$r" rev-list --count "$base..HEAD" 2>/dev/null || echo 0)
   dirty=$(git -C "$r" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
@@ -152,7 +168,7 @@ cmd_search() {
   printf '%s\n' "$ws"
 }
 
-# ── new ──────────────────────────────────────────────────────────────────────
+# ── new / add ────────────────────────────────────────────────────────────────
 
 # Main checkouts (a .git directory, not a worktree's .git file) under $WT_REPOS.
 list_repos() {
@@ -164,6 +180,26 @@ list_repos() {
       [[ -d "$d/.git" ]] && printf '%s\n' "$d"
     done
   done
+}
+
+find_repo() {
+  local all
+  all=$(list_repos)
+  grep -im1 "/$1\$" <<< "$all" || die "no repo named '$1' in $WT_REPOS"
+}
+
+# The workspace containing $1 (default: the current directory).
+ws_of() {
+  local home d
+  home=$(cd "$WT_HOME" 2>/dev/null && pwd -P) || return 1
+  for d in "$(cd "${1:-.}" && pwd -L)" "$(cd "${1:-.}" && pwd -P)"; do
+    d="${d/#$WT_HOME/$home}"
+    while [[ "$d" == "$home"/* ]]; do
+      [[ "${d%/*}" == "$home" ]] && { printf '%s\n' "$WT_HOME/${d##*/}"; return 0; }
+      d="${d%/*}"
+    done
+  done
+  return 1
 }
 
 sync_files() {
@@ -183,6 +219,43 @@ sync_files() {
   done < "$src_repo/.wt/sync"
 }
 
+# Check out REPO, REPO@REF or REPO@REF:DIR into workspace $1. Without a ref
+# the worktree gets a branch named after the workspace; with one it's detached.
+add_repo() {
+  local ws="$1" spec="$2" dir="" ref="" r dst base rev branch="${1##*/}"
+  [[ "$spec" == *:* ]] && { dir="${spec##*:}"; spec="${spec%:*}"; }
+  [[ "$spec" == *@* ]] && ref="${spec#*@}"
+  r=$(find_repo "${spec%%@*}")
+  dst="$ws/repos/${dir:-${r##*/}}"
+  if [[ -e "$dst" ]]; then say "${dst##*/}: already here"; return 0; fi
+  say "${dst##*/}"
+  if [[ -n "$ref" ]]; then
+    say "    fetching ${ref}…"
+    rev="refs/wt/fetched/${ref//[^A-Za-z0-9._\/-]/_}"
+    git -C "$r" fetch --quiet --no-tags origin "+$ref:$rev" 2>/dev/null || {
+      rev="$ref"; say "    not on origin, using local $ref"; }
+    git -C "$r" rev-parse --verify --quiet "$rev^{commit}" >/dev/null || { say "    unknown ref $ref"; return 1; }
+    say "    checking out…"
+    git -C "$r" worktree add --quiet --detach "$dst" "$rev" || return 1
+    say "    detached at $(git -C "$dst" rev-parse --short HEAD)"
+  else
+    base=$(git -C "$r" symbolic-ref -q --short refs/remotes/origin/HEAD || echo origin/main)
+    # Only the base branch: fetching every branch of a busy repo takes minutes.
+    say "    fetching ${base}…"
+    git -C "$r" fetch --quiet --no-tags origin "+refs/heads/${base#origin/}:refs/remotes/$base" ||
+      say "    fetch failed, using local $base"
+    say "    checking out…"
+    if git -C "$r" show-ref --verify --quiet "refs/heads/$branch"; then
+      git -C "$r" worktree add --quiet "$dst" "$branch" || return 1
+      say "    existing branch $branch"
+    else
+      git -C "$r" worktree add --quiet --no-track -b "$branch" "$dst" "$base" || return 1
+      say "    branch $branch from $base"
+    fi
+  fi
+  sync_files "$r" "$dst"
+}
+
 cmd_new() {
   local name="${1:-}"
   (( $# )) && shift
@@ -193,54 +266,171 @@ cmd_new() {
   local ws="$WT_HOME/$name"
   [[ -e "$ws" ]] && die "$ws already exists"
 
-  local repos=() r match all FZF_UI
-  fzf_ui multi
-  all=$(list_repos)
-  if (( $# )); then
-    for r in "$@"; do
-      match=$(grep -m1 "/$r\$" <<< "$all") || die "no repo named '$r' in $WT_REPOS"
-      repos+=("$match")
-    done
-  else
-    while IFS= read -r r; do [[ -n "$r" ]] && repos+=("$r"); done < <(
-      awk -F/ '{print $0 "\t" $NF}' <<< "$all" |
+  local specs=("$@") r FZF_UI
+  if (( ! $# )); then
+    fzf_ui multi
+    while IFS= read -r r; do [[ -n "$r" ]] && specs+=("${r##*/}"); done < <(
+      list_repos | awk -F/ '{print $0 "\t" $NF}' |
         fzf "${FZF_UI[@]}" --multi --bind=space:toggle --no-preview \
           --header="$name · Space toggle · Enter create" | cut -f1 || true)
   fi
-  (( ${#repos[@]} )) || die "no repos chosen"
+  (( ${#specs[@]} )) || die "no repos chosen"
+  for r in "${specs[@]}"; do find_repo "${r%%[@:]*}" > /dev/null; done
 
   mkdir -p "$ws/repos"
-  local base dst failed=0
-  for r in "${repos[@]}"; do
-    dst="$ws/repos/${r##*/}"
-    say "${r##*/}"
-    base=$(git -C "$r" symbolic-ref -q --short refs/remotes/origin/HEAD || echo origin/main)
-    # Only the base branch: fetching every branch of a busy repo takes minutes.
-    say "    fetching ${base}…"
-    git -C "$r" fetch --quiet --no-tags origin "+refs/heads/${base#origin/}:refs/remotes/$base" ||
-      say "    fetch failed, using local $base"
-    say "    checking out…"
-    if git -C "$r" show-ref --verify --quiet "refs/heads/$name"; then
-      git -C "$r" worktree add --quiet "$dst" "$name" || { failed=1; continue; }
-      say "    existing branch $name"
-    else
-      git -C "$r" worktree add --quiet --no-track -b "$name" "$dst" "$base" || { failed=1; continue; }
-      say "    branch $name from $base"
-    fi
-    sync_files "$r" "$dst"
-  done
+  local failed=0
+  for r in "${specs[@]}"; do add_repo "$ws" "$r" || failed=1; done
   (( failed )) && say "some repos failed; see above"
   printf '%s\n' "$ws"
+}
+
+cmd_add() {
+  local ws r failed=0
+  if [[ "${1:-}" == --ws ]]; then ws=$(ws_of "$2") || die "$2 is not in a workspace"; shift 2
+  else ws=$(ws_of) || die "not in a workspace (try --ws DIR)"; fi
+  (( $# )) || die "usage: wt add [--ws DIR] REPO[@REF][:DIR]..."
+  for r; do add_repo "$ws" "$r" || failed=1; done
+  (( failed )) && die "some repos failed; see above"
+  printf '%s\n' "$ws"
+}
+
+# ── kits ─────────────────────────────────────────────────────────────────────
+
+# A kit primes a workspace for some kind of work. It's a directory named after
+# the kit in any layer: each of $WT_KITS (wt's own kits/, then
+# ~/.config/wt/kits), then each workspace repo's .wt/kits. Every layer that has
+# the kit contributes, in that order, so later layers refine earlier ones:
+#   AGENTS.md  appended to the workspace's AGENTS.md ({{ws}} is the root)
+#   skills/*   linked into .agents/skills; a later skill of the same name wins.
+#              .agents/skills/* counts too, so `runlayer skills add` and the
+#              like can install straight into a kit
+#   bin/*      linked into .wt/bin; bin/wt-CMD also becomes `wt CMD`
+#   setup      run from the workspace root with WT_WS and WT_KIT_DIR set
+kit_layers() {
+  local dirs d r
+  IFS=: read -ra dirs <<< "$WT_KITS"
+  for d in "${dirs[@]}"; do [[ -d "$d" ]] && printf '%s\n' "$d"; done
+  [[ -n "${1:-}" ]] || return 0
+  for r in "$1"/repos/*; do [[ -d "$r/.wt/kits" ]] && printf '%s\n' "$r/.wt/kits"; done
+  return 0
+}
+
+skill_description() {
+  awk '/^---/ { if (++n == 2) exit; next } n == 1 && sub(/^description:[[:space:]]*/, "") { print; exit }' "$1"
+}
+
+# Rebuild AGENTS.md, CLAUDE.md, .agents/skills and .wt/bin from the kits
+# recorded in .wt/kits. All four are generated; edit the kits instead.
+render_kits() {
+  local ws="$1" kits=() layers=() k l s b frags="" desc r state
+  mapfile -t kits < "$ws/.wt/kits"
+  mapfile -t layers < <(kit_layers "$ws")
+  rm -rf "$ws/.agents/skills" "$ws/.wt/bin"
+  mkdir -p "$ws/.agents/skills" "$ws/.wt/bin" "$ws/.claude" "$ws/scratch"
+  for k in "${kits[@]}"; do
+    for l in "${layers[@]}"; do
+      [[ -d "$l/$k" ]] || continue
+      for s in "$l/$k"/skills/*/ "$l/$k"/.agents/skills/*/; do
+        [[ -f "$s/SKILL.md" ]] && ln -sfn "${s%/}" "$ws/.agents/skills/"
+      done
+      for b in "$l/$k"/bin/*; do [[ -x "$b" ]] && ln -sfn "$b" "$ws/.wt/bin/"; done
+      [[ -f "$l/$k/AGENTS.md" ]] && frags+=$'\n'"$(< "$l/$k/AGENTS.md")"$'\n'
+    done
+  done
+  if [[ -L "$ws/.claude/skills" || ! -e "$ws/.claude/skills" ]]; then
+    ln -sfn ../.agents/skills "$ws/.claude/skills"
+  else
+    say "    .claude/skills is a real directory; left it alone"
+  fi
+  if [[ ! -e "$ws/CLAUDE.md" || "$(< "$ws/CLAUDE.md")" == "@AGENTS.md" ]]; then
+    printf '@AGENTS.md\n' > "$ws/CLAUDE.md"
+  fi
+
+  {
+    printf '# Workspace %s\n\n' "${ws##*/}"
+    printf '<!-- Generated by `wt kit` from kits: %s. Edit the kits and rerun `wt kit`, not this file. -->\n\n' "${kits[*]}"
+    printf 'The workspace root is `%s`. It is not a git repo; each directory under `repos/` is its own git worktree:\n\n' "$ws"
+    while IFS= read -r r; do
+      state=$(repo_state "$r")
+      state="${state%%  *}"
+      [[ "$state" == @* ]] && state="detached at \`${state#@}\`" || state="branch \`$state\`"
+      printf -- '- `repos/%s`: %s\n' "${r##*/}" "$state"
+    done < <(workspace_repos "$ws")
+    printf '\nEach repo has its own `AGENTS.md` or `CLAUDE.md` with its conventions. It is not loaded from here, so read it before working in that repo, and run its tools from inside it. Put scratch files in `scratch/`, never inside a repo.\n'
+    if compgen -G "$ws/.agents/skills/*" > /dev/null; then
+      printf '\n## Skills\n\nRead a skill'"'"'s SKILL.md before doing the work it describes:\n\n'
+      for s in "$ws"/.agents/skills/*; do
+        desc=$(skill_description "$s/SKILL.md")
+        printf -- '- `%s` (`.agents/skills/%s/SKILL.md`): %s\n' "${s##*/}" "${s##*/}" "${desc:-no description}"
+      done
+    fi
+    if compgen -G "$ws/.wt/bin/*" > /dev/null; then
+      printf '\n## Tools\n\nIn `.wt/bin/`; run any with `--help`: '
+      for b in "$ws"/.wt/bin/*; do printf '`%s` ' "${b##*/}"; done
+      printf '\n'
+    fi
+    printf '%s' "${frags//\{\{ws\}\}/$ws}"
+  } > "$ws/AGENTS.md"
+}
+
+cmd_kit() {
+  local ws k l found failed=0 layers=()
+  if [[ "${1:-}" == --ws ]]; then ws=$(ws_of "$2") || die "$2 is not in a workspace"; shift 2
+  else ws=$(ws_of) || die "not in a workspace (try --ws DIR)"; fi
+  mapfile -t layers < <(kit_layers "$ws")
+  if (( ! $# )); then
+    for l in "${layers[@]}"; do
+      for k in "$l"/*/; do k="${k%/}"; printf '%s\t%s\n' "${k##*/}" "$l"; done
+    done
+    [[ -f "$ws/.wt/kits" ]] && printf 'applied: %s\n' "$(paste -sd' ' "$ws/.wt/kits")"
+    return 0
+  fi
+  for k; do
+    found=0
+    for l in "${layers[@]}"; do [[ -d "$l/$k" ]] && found=1; done
+    (( found )) || die "no kit named '$k' (wt kit lists them)"
+  done
+  mkdir -p "$ws/.wt"
+  for k; do grep -qxF "$k" "$ws/.wt/kits" 2>/dev/null || printf '%s\n' "$k" >> "$ws/.wt/kits"; done
+  render_kits "$ws"
+  for k; do
+    for l in "${layers[@]}"; do
+      [[ -x "$l/$k/setup" ]] || continue
+      say "$k: setup (${l/#$HOME/~})"
+      (cd "$ws" && WT_WS="$ws" WT_KIT_DIR="$l/$k" "$l/$k/setup") >&2 || failed=1
+    done
+  done
+  # Setup may have changed the checkouts, so describe them again.
+  render_kits "$ws"
+  (( failed )) && die "a kit setup failed; see above"
+  printf '%s\n' "$ws"
+}
+
+# `wt CMD` runs the last wt-CMD found in a kit's bin/, else wt-CMD on PATH.
+run_external() {
+  local cmd="$1" ext="" l b
+  shift
+  while IFS= read -r l; do
+    for b in "$l"/*/bin/"wt-$cmd"; do [[ -x "$b" ]] && ext="$b"; done
+  done < <(kit_layers "$(ws_of 2>/dev/null || true)")
+  [[ -n "$ext" ]] || ext=$(command -v "wt-$cmd") ||
+    die "unknown command '$cmd' (try: wt search, wt new, wt add, wt kit, wt root, wt repos)"
+  exec "$ext" "$@"
 }
 
 case "${1:-search}" in
   search|new) command -v fzf >/dev/null || die "fzf is required" ;;
 esac
 
+shopt -s nullglob
 case "${1:-search}" in
   search)   (( $# )) && shift; cmd_search "$@" ;;
   new)      shift; cmd_new "$@" ;;
+  add)      shift; cmd_add "$@" ;;
+  kit)      shift; cmd_kit "$@" ;;
+  root)     ws_of "${2:-.}" || die "not in a workspace" ;;
+  repos)    list_repos ;;
   _preview) preview "$2" ;;
-  -h|--help|help) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//' ;;
-  *) die "unknown command '$1' (try: wt search, wt new)" ;;
+  -h|--help|help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *)        run_external "$@" ;;
 esac
