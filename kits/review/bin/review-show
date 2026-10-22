@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# review-show — put review material in an nvim panel beside the agent.
+#
+#   review-show slides FILE [N|last]   a markdown deck, slides split by --- lines
+#   review-show doc FILE [LINE]        any file, reloaded as it changes
+#   review-show code PATH[:LINE]       a file in a split beside the slides
+#   review-show diff PR                that PR's own changes, in diffview
+#   review-show close                  quit the panel (the next call opens a fresh one)
+#
+# Paths are relative to the workspace root (repos/<repo>/... or a path inside
+# a repo). The panel is one nvim per workspace, listening on a socket. In Rex
+# it opens as a split right of $REX_BLOCK; elsewhere this prints the command
+# to start it, and the files can be read as plain markdown.
+set -euo pipefail
+
+die() { printf 'review-show: %s\n' "$*" >&2; exit 1; }
+[[ "${1:-}" =~ ^(slides|doc|code|diff|close)$ ]] || { sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; [[ "${1:-}" =~ ^(-h|--help)$ ]]; exit; }
+
+kit=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)
+ws="$PWD"
+until [[ -d "$ws/.wt/kits" || -f "$ws/.wt/kits" ]]; do
+  [[ "$ws" == / ]] && die "not inside a wt workspace"
+  ws=$(dirname "$ws")
+done
+
+q() { local s="${1//\'/\'\'}"; printf "'%s'" "$s"; }
+cmd="$1"; shift
+sock="$ws/.wt/review.sock"
+(( ${#sock} < 100 )) || sock="${TMPDIR:-/tmp}/wt-review-$(printf %s "$ws" | cksum | cut -d' ' -f1).sock"
+# A blocked nvim (say, at a startup "Press ENTER") accepts the connection and
+# never answers, so every call to it gets a deadline.
+deadline() { perl -e 'alarm shift; exec @ARGV or exit 127' "$@"; }
+alive() { [[ -S "$sock" ]] && deadline 2 nvim --server "$sock" --remote-expr 1 > /dev/null 2>&1; }
+
+case "$cmd" in
+  close)  alive && deadline 2 nvim --server "$sock" --remote-send '<C-\><C-n>:qa!<CR>' > /dev/null 2>&1
+          rm -f "$sock"; exit 0 ;;
+  slides) [[ -n "${1:-}" ]] || die "usage: review-show slides FILE [N|last]"
+          call="luaeval('wt_review.slides(_A[1], _A[2])', [$(q "$1"), $(q "${2:-last}")])" ;;
+  doc)    [[ -n "${1:-}" ]] || die "usage: review-show doc FILE [LINE]"
+          call="luaeval('wt_review.doc(_A[1], _A[2])', [$(q "$1"), $(q "${2:-}")])" ;;
+  code)   [[ -n "${1:-}" ]] || die "usage: review-show code PATH[:LINE]"
+          path="${1%%:*}" line=""; [[ "$1" == *:* ]] && line="${1##*:}"
+          call="luaeval('wt_review.code(_A[1], _A[2])', [$(q "$path"), $(q "$line")])" ;;
+  diff)   [[ -n "${1:-}" ]] || die "usage: review-show diff PR"
+          row=$(awk -F'\t' -v n="${1#\#}" '$2 == n' "$ws/review/layers.tsv" 2>/dev/null) || true
+          [[ -n "$row" ]] || die "#${1#\#} is not in review/layers.tsv"
+          repo=$(awk -F'\t' '{ print $8 }' <<< "$row" | sed -E 's#https://github.com/([^/]+/[^/]+)/pull/.*#\1#')
+          co=""
+          for r in "$ws"/repos/*; do
+            u=$(git -C "$r" remote get-url origin 2>/dev/null) || continue; u="${u%.git}"
+            [[ "${u,,}" == *[/:]"${repo,,}" ]] && { co="repos/${r##*/}"; break; }
+          done
+          [[ -n "$co" ]] || die "no checkout of $repo"
+          call="luaeval('wt_review.diff(_A[1], _A[2])', [$(q "$co"), $(q "$(cut -f4 <<< "$row")..$(cut -f5 <<< "$row")")])" ;;
+esac
+
+if ! alive; then
+  rm -f "$sock"
+  # -i NONE: the panel needs no history, and a damaged ShaDa file would stop
+  # startup at a prompt.
+  start=(nvim -i NONE --listen "$sock" -c "lua _G.wt_review = dofile('$kit/nvim/review.lua')")
+  if [[ -n "${REX_SESSION:-}" && -n "${REX_BLOCK:-}" ]] && command -v rex > /dev/null; then
+    rex split -s "$REX_SESSION" -b "$REX_BLOCK" --split=right --ratio 50 --label review \
+      --focus=false -c "$ws" --json -- "${start[@]}" > /dev/null || die "rex split failed"
+    for _ in $(seq 50); do alive && break; sleep 0.1; done
+    alive || die "the panel didn't come up on $sock"
+  else
+    printf 'No Rex pane to open the panel in. To watch along, run:\n  cd %q && %q %q %q %q\n' \
+      "$ws" "${start[@]}" >&2
+    exit 0
+  fi
+fi
+deadline 5 nvim --server "$sock" --remote-expr "$call" > /dev/null ||
+  die "the panel on $sock didn't answer; is it waiting at a prompt?"

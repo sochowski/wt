@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+# Kit review: find the stack around review/source's PR, fetch every layer,
+# move the checkout to the top of the stack, and write review/:
+#   STACK.md            the stack, ranges, and what moved since the last refresh
+#   pr-<n>.md           each PR's metadata and description
+#   layers.tsv          order pr parent base_sha head_sha author title url
+#   prs.tsv numstat.tsv diffs/<n>.diff meta.env
+#                       the same layout as guided-pr-review's collect.sh
+#   history.tsv         date pr head_sha, one row per head seen
+set -euo pipefail
+cd "$WT_WS"
+say() { printf '    %s\n' "$*" >&2; }
+# shellcheck source=/dev/null
+source review/source
+
+# The checkout named after the repo, else any checkout of it (not, say, a
+# Runlayer-base added for before/after runs, which sorts after it).
+co=""
+for r in "repos/${repo#*/}" repos/*; do
+  [[ -d "$r" ]] || continue
+  url=$(git -C "$r" remote get-url origin 2>/dev/null) || continue
+  url="${url%.git}"
+  [[ "${url,,}" == *[/:]"${repo,,}" ]] && { co="$r"; break; }
+done
+[[ -n "$co" ]] || { say "no checkout of $repo under repos/"; exit 1; }
+
+fields=number,title,author,url,body,baseRefName,headRefName,headRefOid,state,isDraft
+default=$(gh repo view "$repo" --json defaultBranchRef -q .defaultBranchRef.name)
+say "resolving #$pr in ${repo}…"
+chain=("$(gh pr view "$pr" -R "$repo" --json "$fields" | jq -c .)")
+notes=()
+if (( ! only )); then
+  base=$(jq -r .baseRefName <<< "${chain[0]}")
+  while [[ "$base" != "$default" ]]; do
+    p=$(gh pr list -R "$repo" --head "$base" --state open --json "$fields" | jq -c '.[0] // empty')
+    [[ -n "$p" ]] || { notes+=("Branch \`$base\` under the stack has no open PR; it is treated as the base."); break; }
+    chain=("$p" "${chain[@]}")
+    base=$(jq -r .baseRefName <<< "$p")
+  done
+  head=$(jq -r .headRefName <<< "${chain[-1]}")
+  while :; do
+    kids=$(gh pr list -R "$repo" --base "$head" --state open --json "$fields")
+    n=$(jq length <<< "$kids")
+    (( n )) || break
+    (( n > 1 )) && notes+=("$n open PRs build on \`$head\` ($(jq -r 'map("#\(.number)") | join(", ")' <<< "$kids")); only the first is in the stack.")
+    chain+=("$(jq -c '.[0]' <<< "$kids")")
+    head=$(jq -r .headRefName <<< "${chain[-1]}")
+  done
+fi
+bottom=$(jq -r .baseRefName <<< "${chain[0]}")
+
+nums=() refspecs=("+refs/heads/$bottom:refs/remotes/origin/$bottom")
+for p in "${chain[@]}"; do
+  n=$(jq -r .number <<< "$p"); nums+=("$n")
+  refspecs+=("+refs/pull/$n/head:refs/wt/pr/$n")
+done
+say "fetching ${#nums[@]} PR(s): ${nums[*]/#/#}…"
+git -C "$co" fetch --quiet --no-tags origin "${refspecs[@]}"
+
+mkdir -p review/diffs
+rm -f review/diffs/*.diff review/pr-*.md
+touch review/history.tsv
+: > review/layers.tsv; : > review/prs.tsv; : > review/numstat.tsv
+rows="" moved="" lo="" parent=base
+for i in "${!chain[@]}"; do
+  p="${chain[$i]}" n="${nums[$i]}"
+  hi=$(git -C "$co" rev-parse "refs/wt/pr/$n")
+  [[ -n "$lo" ]] || lo=$(git -C "$co" merge-base "origin/$bottom" "$hi")
+  title=$(jq -r .title <<< "$p") author=$(jq -r .author.login <<< "$p") url=$(jq -r .url <<< "$p")
+  git -C "$co" diff "$lo" "$hi" > "review/diffs/$n.diff"
+  git -C "$co" diff --numstat "$lo" "$hi" | awk -v n="$n" -F'\t' '{ print n "\t" ($1 == "-" ? 0 : $1) "\t" ($2 == "-" ? 0 : $2) "\t" $3 }' >> review/numstat.tsv
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$((i + 1))" "$n" "$parent" "$lo" "$hi" "$author" "$title" "$url" >> review/layers.tsv
+  printf '%s\t%s\t%s\t%s\t%s\n' "$((i + 1))" "$n" "$parent" "${hi:0:7}" "$title" >> review/prs.tsv
+  stats=$(awk -F'\t' -v n="$n" '$1 == n { a += $2; d += $3; f++ } END { printf "+%d −%d, %d files", a, d, f }' review/numstat.tsv)
+  draft=$(jq -r 'if .isDraft then " (draft)" else "" end' <<< "$p")
+  rows+="| $((i + 1)) | [#$n]($url)$draft | ${title//|/\\|} | @$author | $stats | \`git diff ${lo:0:10} ${hi:0:10}\` |"$'\n'
+  prev=$(awk -F'\t' -v n="$n" '$2 == n { h = $3 } END { print h }' review/history.tsv)
+  if [[ "$prev" != "$hi" ]]; then
+    printf '%s\t%s\t%s\n' "$(date -u +%FT%TZ)" "$n" "$hi" >> review/history.tsv
+    [[ -n "$prev" ]] && moved+="- #$n moved \`${prev:0:10}\` → \`${hi:0:10}\`: \`git diff ${prev:0:10} ${hi:0:10}\`, or \`git range-diff ${prev:0:10}...${hi:0:10}\` if it was rebased."$'\n'
+  fi
+  jq -r '"# #\(.number): \(.title)\n\n- Author: @\(.author.login)\n- State: \(.state)\(if .isDraft then " (draft)" else "" end)\n- Branch: `\(.headRefName)` into `\(.baseRefName)`\n- URL: \(.url)\n\n## Description\n\n\(if (.body // "") == "" then "(none)" else .body end)"' <<< "$p" > "review/pr-$n.md"
+  lo="$hi" parent="$n"
+done
+top="$hi" top_n="${nums[-1]}"
+printf 'BASE=%s\nHEAD_PR=%s\nHEAD_SHA=%s\nLINEAR=1\n' \
+  "$(cut -f4 review/layers.tsv | head -1 | cut -c1-7)" "$top_n" "${top:0:7}" > review/meta.env
+
+cur=$(git -C "$co" rev-parse HEAD)
+if [[ "$cur" != "$top" ]]; then
+  if [[ -n "$(git -C "$co" status --porcelain)" ]]; then
+    notes+=("\`$co\` has local changes, so it was left at \`${cur:0:10}\` instead of moving to the top of the stack.")
+  elif ! git -C "$co" symbolic-ref -q HEAD > /dev/null; then
+    git -C "$co" checkout --quiet --detach "$top"
+    say "moved $co to ${top:0:10}"
+  else
+    notes+=("\`$co\` is on a branch, so it was left alone instead of moving to the top of the stack.")
+  fi
+fi
+
+{
+  if (( ${#chain[@]} > 1 )); then printf '# Review: #%s and its stack\n\n' "$pr"; else printf '# Review: #%s\n\n' "$pr"; fi
+  printf 'Refreshed %s. `%s` is checked out detached at `%s`, the top of the stack. ' "$(date '+%F %H:%M')" "$co" "${top:0:10}"
+  printf 'The bottom PR is compared with `%s` from where it branched off. Run diffs from inside `%s`.\n\n' "$bottom" "$co"
+  printf '| Layer | PR | Title | Author | Size | Its own changes |\n|---|---|---|---|---|---|\n%s\n' "$rows"
+  printf 'Review each PR against the layer below it, using the command in its row, never against `%s`. Each PR'"'"'s description is in `review/pr-<n>.md`, its diff in `review/diffs/<n>.diff`, its per-file counts in `review/numstat.tsv`.\n' "$default"
+  if [[ -n "$moved" ]]; then printf '\n## Changed since the last refresh\n\n%s' "$moved"; fi
+  if (( ${#notes[@]} )); then printf '\n## Notes\n\n'; printf -- '- %s\n' "${notes[@]}"; fi
+} > review/STACK.md
+say "${#nums[@]} layer(s); top #$top_n at ${top:0:10}; see review/STACK.md"

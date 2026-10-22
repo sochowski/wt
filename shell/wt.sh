@@ -1,8 +1,8 @@
-# Source from ~/.zshrc or ~/.bashrc. `wt search` and `wt new` print a
-# directory; this cds into it. Bare `wt` is `wt search`.
+# Source from ~/.zshrc or ~/.bashrc. `wt search`, `wt new`, `wt root` and
+# `wt review` print a directory; this cds into it. Bare `wt` is `wt search`.
 wt() {
   case "${1:-search}" in
-    search|new)
+    search|new|root|review)
       local dir
       dir=$(command wt "$@") && [ -d "$dir" ] && cd "$dir"
       ;;
