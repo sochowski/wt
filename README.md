@@ -111,6 +111,18 @@ echo "source $PWD/shell/wt.sh" >> ~/.zshrc
 
 The shell function is what lets `wt` change your directory.
 
+## Skills
+
+`skills/` holds skills for any harness, outside kits. `nvim-panel` steers
+agents to show you code, docs and diffs in one reused nvim pane beside them
+(Rex or tmux), with your own config and unified.nvim for diffs, instead of
+HTML pages or fresh panes. Install it for every session with:
+
+```sh
+ln -s "$PWD/skills/nvim-panel" ~/.agents/skills/nvim-panel
+ln -s ../../.agents/skills/nvim-panel ~/.claude/skills/nvim-panel
+```
+
 ## Configuration
 
 | Variable    | Default                   | Meaning                                    |
