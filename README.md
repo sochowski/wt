@@ -83,6 +83,15 @@ slide, `gf` opens the `path:line` under the cursor, and `g?` lists the rest.
 Personal or team review process goes in a layer of its own, e.g.
 `~/.config/wt/kits/review/` with an `AGENTS.md` and extra skills.
 
+## Subagents in tabs
+
+`wt kit subagents` makes an agent ask, before it hands substantial work to
+subagents, whether they should be its harness's built-in ephemeral ones or
+full agent sessions in their own Rex tabs, which you can switch to and steer.
+For tabs, its `subagent-tabs` skill opens each one with `rex window new`, in
+the current workspace or, for parallel edits, a fresh one from `wt new`. The
+brief and the result pass through `.wt/agents/<name>/`.
+
 ## Keys
 
 The pickers open in NORMAL mode, like the old wt:
