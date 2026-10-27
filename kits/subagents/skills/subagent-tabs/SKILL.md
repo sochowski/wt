@@ -31,7 +31,10 @@ Write `$parent/.wt/agents/<name>/brief.md` (with `parent=$(wt root)`, the worksp
 - the goal, and what done looks like;
 - what you've already found or ruled out, and the files worth reading;
 - the scope: which checkout to work in, what not to touch, and whether it may commit (never push unless the human said so);
-- this instruction, verbatim with the path filled in: "When you finish, or get stuck, write `<parent>/.wt/agents/<name>/result.md`: what you did, what you found, what's left, and the branch and commits if any. Keep working with the human in this tab afterwards if they ask."
+- what it may decide alone and what it must bring back. Local, reversible choices it makes and lists. Anything that sets a public contract, a security posture or a team convention, or crosses into another subagent's scope, it stops on and writes up. So does a flip-flop: a review asking it to undo what an earlier run asked for.
+- this instruction, verbatim with the path filled in: "When you finish, or get stuck, write `<parent>/.wt/agents/<name>/result.md`: what you did and why, decisions you made and why, what's left, and the branch and commits if any. End it with **Needs human decision**, each item with its background, the question, the options and what each would change, and your pick. Keep working with the human in this tab afterwards if they ask."
+
+When several subagents share context (the goal, links, a roster of who owns what, ground rules), put it once in `$parent/.wt/agents/_common.md` and have each brief point to it.
 
 ## 3. Open the tab
 
@@ -61,8 +64,17 @@ Open every tab in a batch before waiting on any of them.
   Run that in the background, or in your harness's own wait or monitor tool, with a time limit, not as a blocking foreground loop.
 - To see what a subagent is doing now: `rex capture -s "$REX_SESSION" -b <block> --trim`.
 - If the human is talking to a subagent in its tab, don't send it input yourself.
-- Report each result to the human in a few lines: what it did, where (workspace and branch), and anything that needs a decision. Merging a fresh workspace's branch is the human's call; ask first.
+- Report each result to the human in a few lines: what it did, and where (workspace and branch). Its **Needs human decision** items go to the human as asks: with the `drilldown` skill when it's available, otherwise in chat, each with its background. Merging a fresh workspace's branch is the human's call; ask first.
 
-## 5. Clean up
+## 5. Rounds
+
+When the human's answers change what running subagents should do, send them down as a round, not as one-off chat to each tab:
+
+- Append a `## Round N` section to `_common.md` (or write `_round<N>.md`). Open with "The human made these decisions; they override your brief where they conflict." List each decision under its ask ID, as an instruction. A change mid-round is a new lettered section (`Round 3b`) that says what it supersedes.
+- Then send each affected subagent a one-line pointer, and what it means for that one: `rex send -s "$REX_SESSION" -b <block> '<text>' && rex send-key -s "$REX_SESSION" -b <block> enter`. Capture the tab first; if the human is talking to it there, leave it to them.
+- A subagent that needs another round's work gets a new brief, `brief-2.md`, and writes `result-2.md`. Earlier files stay as they were.
+- When subagents depend on each other (a stack of branches, say), they coordinate through marker files: `.wt/agents/<name>/<marker>.txt` holding a single SHA or token, overwritten when it changes, e.g. `rebased.txt` for "on my parent's tip, tests pass" and `stack-ready.txt` for "my review loop is done". Dependents wait on the file, as with `result.md`.
+
+## 6. Clean up
 
 Leave the tabs open; the human closes them. Don't delete fresh workspaces either, since they hold the subagent's branch. List them at the end so the human can remove them when they're done.
