@@ -90,7 +90,20 @@ subagents, whether they should be its harness's built-in ephemeral ones or
 full agent sessions in their own Rex tabs, which you can switch to and steer.
 For tabs, its `subagent-tabs` skill opens each one with `rex window new`, in
 the current workspace or, for parallel edits, a fresh one from `wt new`. The
-brief and the result pass through `.wt/agents/<name>/`.
+brief and the result pass through `.wt/agents/<name>/`. A result ends with
+the decisions it needs from you, and when your answers change what running
+subagents should do, they go back down as a round in `.wt/agents/_common.md`.
+
+## Drilling down
+
+`wt kit drilldown` makes an agent bring decisions to you as asks, not as a
+wall of chat. Each ask gets a stable ID in `drilldown/asks.md`, and you read
+them in the review panel as slides: an index of what's open, then one slide
+per ask with its background, the options and what each would change, and the
+agent's pick. Answer in shorthand (`Q3a Q5b`) whenever you like; whatever you
+skip comes back in the next deck. Its `drilldown` skill also turns subagents'
+results into asks, so the kit pairs with `subagents`. It shares the review
+kit's panel, so `.wt/bin/review-show` is the same tool here.
 
 ## Keys
 
