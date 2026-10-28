@@ -401,6 +401,17 @@ func (p *ccParser) describeTool(s *Span, name string, input json.RawMessage) {
 	if what == "" && len(input) > 2 {
 		what = string(input)
 	}
+	if cmd := str(in["command"]); name == "Bash" && cmd != "" {
+		// Named from the whole command, which trace.command only keeps the
+		// start of. Just program names, so kept even without text.
+		s.Set("tool.command_name", commandName(cmd))
+		if reTests.MatchString(cmd) {
+			s.Set("tool.test_run", true)
+		}
+		if rePolling.MatchString(cmd) {
+			s.Set("tool.polling", true)
+		}
+	}
 	if b, _ := in["run_in_background"].(bool); b {
 		s.Set("tool.background", true)
 	}

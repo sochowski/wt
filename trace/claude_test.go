@@ -84,10 +84,17 @@ func TestNoText(t *testing.T) {
 
 func TestCommandName(t *testing.T) {
 	for cmd, want := range map[string]string{
-		"cd backend && uv run pytest -q":            "uv run pytest",
-		"timeout 590 flock /tmp/x.lock make test a": "flock … make test",
-		"FOO=1 BAR=2 git diff --stat":               "git diff",
-		"set -a; source ../.env; uv run mypy app":   "uv run mypy",
+		"cd backend && uv run pytest -q":                                      "uv run pytest",
+		"timeout 590 flock /tmp/x.lock make test a":                           "flock … make test",
+		"FOO=1 BAR=2 git diff --stat":                                         "git diff",
+		"set -a; source ../.env; uv run mypy app":                             "uv run mypy",
+		"sed -i 's/a/b/' x.py; flock /tmp/l make test app/tests":              "flock … make test",
+		"grep -n foo x.py; uv run --no-sync python - <<'EOF'\nimport os\nEOF": "uv run python",
+		"for t in a b; do make check-$t; done":                                "make check-$t",
+		"grep -rn foo app | head":                                             "grep",
+		`until grep -qE "passed|failed" out; do sleep 5; done`:                "sleep",
+		"python3 - <<'EOF'\nx='a; b'\nEOF\ncd backend && uv run pytest -q":    "uv run pytest",
+		`PYTEST_ADDOPTS="-p no:cacheprovider" uv run pytest -q`:               "uv run pytest",
 	} {
 		if got := commandName(cmd); got != want {
 			t.Errorf("commandName(%q) = %q, want %q", cmd, got, want)
