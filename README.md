@@ -73,12 +73,19 @@ order as slides, a chapter at a time) and `pr-verify` (local checks, including
 before/after against the base). They show their work with
 `.wt/bin/review-show`, which drives one nvim per workspace over a socket. In
 Rex the nvim opens as a split beside the agent. It shows markdown slides
-(split on `---`, reloaded as the agent writes them), docs, files, and a layer
-in diffview. Slides use render-markdown, so fenced code is highlighted by
+(split on `---`, reloaded as the agent writes them), docs, files, and a diff
+pane under the slides. A slide's `Diff: #<pr> path:line` line moves the pane
+there; `]p`/`[p`, `]f`/`[f`, `]c`/`[c` page it by PR, file and hunk; `gf` on a
+diff line opens the file at that side, `gd` opens it in a tab (unified.nvim's
+inline diff for the top PR, whose head is the checkout; diffview below it), `gs`
+moves the pane beside the slides, and `gu` lists changed files not opened yet
+(kept in `review/viewed.tsv`). The agent's notes in `review/annotations.tsv`
+show above the lines they're about. Slides use render-markdown, so fenced code is highlighted by
 treesitter (given the languages' parsers) and `mermaid` blocks render as box
 drawings (given render-markdown-mermaid and `bm`). On a slide, `j`/`k`/`gg`/`G`
-move as usual, `l`/`h` page (with a count), `L`/`H` jump to the last and first
-slide, `gf` opens the `path:line` under the cursor, and `g?` lists the rest.
+move as usual, `J`/`K` page (with a count), `L`/`H` jump to the last and first
+slide, `gf` opens the `path:line` under the cursor (in the diff when the stack
+changes it), and `g?` lists the rest.
 
 Personal or team review process goes in a layer of its own, e.g.
 `~/.config/wt/kits/review/` with an `AGENTS.md` and extra skills.

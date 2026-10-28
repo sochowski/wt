@@ -4,7 +4,10 @@
 #   review-show slides FILE [N|last]   a markdown deck, slides split by --- lines
 #   review-show doc FILE [LINE]        any file, reloaded as it changes
 #   review-show code PATH[:LINE]       a file in a split beside the slides
-#   review-show diff PR                that PR's own changes, in diffview
+#   review-show diff [PR] [PATH[:LINE]]
+#                                      a PR's own changes in the pane under the
+#                                      slides; with only a path, the top PR
+#                                      that changes it
 #   review-show close                  quit the panel (the next call opens a fresh one)
 #
 # Paths are relative to the workspace root (repos/<repo>/... or a path inside
@@ -14,7 +17,7 @@
 set -euo pipefail
 
 die() { printf 'review-show: %s\n' "$*" >&2; exit 1; }
-[[ "${1:-}" =~ ^(slides|doc|code|diff|close)$ ]] || { sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; [[ "${1:-}" =~ ^(-h|--help)$ ]]; exit; }
+[[ "${1:-}" =~ ^(slides|doc|code|diff|close)$ ]] || { sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; [[ "${1:-}" =~ ^(-h|--help)$ ]]; exit; }
 
 kit=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)
 ws="$PWD"
@@ -42,17 +45,15 @@ case "$cmd" in
   code)   [[ -n "${1:-}" ]] || die "usage: review-show code PATH[:LINE]"
           path="${1%%:*}" line=""; [[ "$1" == *:* ]] && line="${1##*:}"
           call="luaeval('wt_review.code(_A[1], _A[2])', [$(q "$path"), $(q "$line")])" ;;
-  diff)   [[ -n "${1:-}" ]] || die "usage: review-show diff PR"
-          row=$(awk -F'\t' -v n="${1#\#}" '$2 == n' "$ws/review/layers.tsv" 2>/dev/null) || true
-          [[ -n "$row" ]] || die "#${1#\#} is not in review/layers.tsv"
-          repo=$(awk -F'\t' '{ print $8 }' <<< "$row" | sed -E 's#https://github.com/([^/]+/[^/]+)/pull/.*#\1#')
-          co=""
-          for r in "$ws"/repos/*; do
-            u=$(git -C "$r" remote get-url origin 2>/dev/null) || continue; u="${u%.git}"
-            [[ "${u,,}" == *[/:]"${repo,,}" ]] && { co="repos/${r##*/}"; break; }
-          done
-          [[ -n "$co" ]] || die "no checkout of $repo"
-          call="luaeval('wt_review.diff(_A[1], _A[2])', [$(q "$co"), $(q "$(cut -f4 <<< "$row")..$(cut -f5 <<< "$row")")])" ;;
+  diff)   [[ -s "$ws/review/layers.tsv" ]] || die "no review/layers.tsv here; run wt review first"
+          pr="" path="" line=""
+          [[ "${1:-}" =~ ^#?([0-9]+)$ ]] && { pr="${BASH_REMATCH[1]}"; shift; }
+          if [[ -n "${1:-}" ]]; then
+            path="$1"; [[ "$1" =~ ^(.*):([0-9]+)$ ]] && { path="${BASH_REMATCH[1]}"; line="${BASH_REMATCH[2]}"; }
+          fi
+          [[ -z "$pr" ]] || awk -F'\t' -v n="$pr" '$2 == n { f = 1 } END { exit !f }' "$ws/review/layers.tsv" ||
+            die "#$pr is not in review/layers.tsv"
+          call="luaeval('wt_review.diff(_A[1], _A[2], _A[3])', [$(q "$pr"), $(q "$path"), $(q "$line")])" ;;
 esac
 
 if ! alive; then
@@ -71,5 +72,6 @@ if ! alive; then
     exit 0
   fi
 fi
-deadline 5 nvim --server "$sock" --remote-expr "$call" > /dev/null ||
+out=$(deadline 5 nvim --server "$sock" --remote-expr "$call") ||
   die "the panel on $sock didn't answer; is it waiting at a prompt?"
+[[ -z "$out" || "$out" == 0 ]] || die "$out"

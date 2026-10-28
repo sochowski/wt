@@ -71,6 +71,6 @@ Paths are absolute, or relative to `$root`. Inside the `execute('…')` string, 
 | A doc you keep editing | `panel "tabfirst \| edit docs/plan.md \| setlocal wrap linebreak autoread"`, then `panel "checktime"` after each write |
 | A second file beside it | `panel "tabfirst \| rightbelow vsplit +40 src/other.py"` |
 | The branch's changes | `panel "tabnew \| tcd $repo \| edit $repo/$first_changed_file \| Unified $base"` |
-| Close a diff | `panel "Unified reset \| tabclose"` |
+| Close a diff | `panel 'exe "Unified reset" \| tabclose'` (`:Unified` takes no `\|`, so it has to go through `exe`) |
 
 For diffs, `$base` is usually `git -C "$repo" merge-base origin/HEAD HEAD`, and `$first_changed_file` comes from `git -C "$repo" diff --name-only $base`. Unified shows the working tree against one ref, uncommitted edits included, with a file tree to step through the rest. A range `A..B` where `B` isn't the checkout's HEAD (a lower PR in a stack) is the one case for `DiffviewOpen -C$repo A..B`.
