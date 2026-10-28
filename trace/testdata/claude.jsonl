@@ -1,0 +1,13 @@
+{"type":"custom-title","customTitle":"fixture","sessionId":"s1"}
+{"type":"user","timestamp":"2026-10-28T10:00:00Z","cwd":"/home/u/worktrees/.sessions/demo-child/repos/x","origin":{"kind":"human"},"message":{"role":"user","content":"Read /home/u/worktrees/.sessions/demo/.wt/agents/child/brief.md and do it."}}
+{"type":"api-request","id":"r1","timestamp":"2026-10-28T10:00:01Z"}
+{"type":"assistant","requestRef":"r1","timestamp":"2026-10-28T10:00:05Z","message":{"model":"m","stop_reason":"tool_use","usage":{"input_tokens":1,"output_tokens":10,"cache_read_input_tokens":100,"cache_creation_input_tokens":5},"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"uv run pytest -q"}},{"type":"tool_use","id":"t2","name":"Bash","input":{"command":"make build","run_in_background":true}}]}}
+{"type":"user","timestamp":"2026-10-28T10:00:06Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t2","content":"started"}]},"toolUseResult":{"backgroundTaskId":"bg1"}}
+{"type":"user","timestamp":"2026-10-28T10:01:05Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"1 failed","is_error":true}]},"toolUseResult":{"stdout":"","timedOutAfterMs":0}}
+{"type":"api-request","id":"r2","timestamp":"2026-10-28T10:01:06Z"}
+{"type":"assistant","requestRef":"r2","timestamp":"2026-10-28T10:01:10Z","message":{"model":"m","stop_reason":"end_turn","content":[{"type":"text","text":"Done.\n\nShould I push?"}]}}
+{"type":"system","subtype":"turn_duration","durationMs":70000,"timestamp":"2026-10-28T10:01:10Z"}
+{"type":"queue-operation","operation":"enqueue","timestamp":"2026-10-28T10:03:00Z","content":"<task-notification>\n<task-id>bg1</task-id>\n<status>completed</status>"}
+{"type":"user","timestamp":"2026-10-28T10:05:00Z","origin":{"kind":"human"},"message":{"role":"user","content":"yes"}}
+{"type":"api-request","id":"r3","timestamp":"2026-10-28T10:05:01Z"}
+{"type":"assistant","requestRef":"r3","timestamp":"2026-10-28T10:05:03Z","message":{"model":"m","stop_reason":"end_turn","content":[{"type":"text","text":"Pushed."}]}}

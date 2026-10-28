@@ -145,6 +145,36 @@ ln -s "$PWD/skills/nvim-panel" ~/.agents/skills/nvim-panel
 ln -s ../../.agents/skills/nvim-panel ~/.claude/skills/nvim-panel
 ```
 
+## Profiling agents
+
+`wt trace` profiles agent conversations from the transcripts their harness
+already saves, so it needs no hooks. Claude Code is supported today; Codex, pi
+and opencode get adapters next.
+
+```sh
+wt trace convert                                  # new or changed transcripts → spans
+wt trace report --since 168h                      # where the time went, and the habits that waste it
+wt trace perfetto resource-apis-fanout-planning   # a flame view of one workspace's agents
+wt trace ls                                       # what's been converted
+```
+
+A query names a session id prefix, an agent, or a workspace. A workspace takes
+in the subagent tabs its coordinator briefed (`.wt/agents/<name>/brief.md`)
+and the built-in subagents each one launched.
+
+Spans live in `~/.local/state/wt-trace/spans/`, one OTLP JSON file per
+conversation, so an OpenTelemetry backend such as Braintrust can take them as
+they are. They keep the first 200 characters of prompts and commands, so the
+flame view is readable; `convert --no-text` keeps metadata only. The Perfetto
+file opens in [ui.perfetto.dev](https://ui.perfetto.dev), which reads it in the
+browser without uploading it.
+
+Building it needs Go 1.26 (`trace/mise.toml` pins it):
+
+```sh
+(cd trace && go build -o ../bin/wt-trace .) && ln -s "$PWD/bin/wt-trace" ~/.local/bin/wt-trace
+```
+
 ## Configuration
 
 | Variable    | Default                   | Meaning                                    |
