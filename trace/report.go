@@ -269,10 +269,10 @@ func detect(convs []*Conversation) []*finding {
 					lastFail[key] = true
 				}
 				if name == "Bash" {
-					if rePolling.MatchString(cmd) {
+					if s.Bool("tool.polling") || rePolling.MatchString(cmd) {
 						polling.add(c, s, s.Dur(), cmd)
 					}
-					if reTests.MatchString(cmd) && !s.Bool("tool.background") {
+					if (s.Bool("tool.test_run") || reTests.MatchString(cmd)) && !s.Bool("tool.background") {
 						tests.add(c, s, s.Dur(), cmd)
 					}
 				}
@@ -364,10 +364,105 @@ type toolTime struct {
 
 var reLeading = regexp.MustCompile(`^(\s*(cd\s+[^;&]+|set\s+-[a-z]+|source\s+\S+|\.\s+\S+|export\s+\S+|[A-Z_]+=\S*)\s*(&&|;)\s*)+`)
 
-// commandName is what a Bash command mostly ran: the first word after any
-// cd, env and source preamble, plus the subcommand for runners.
+// commandName is what a Bash command mostly spent its time on. A call often
+// chains a quick edit or grep with a test run, so it is named by its slowest-
+// looking part: a test run first, then a runner (make, uv, git…), and
+// otherwise the first command.
 func commandName(cmd string) string {
+	best, rank := "?", -1
+	for i, part := range splitShell(dropHeredocs(cmd)) {
+		name := segmentName(part)
+		if name == "?" {
+			continue
+		}
+		r := 0
+		switch {
+		case reTests.MatchString(part):
+			r = 3
+		case isRunner(strings.Fields(strings.TrimPrefix(name, "flock … "))[0]):
+			r = 2
+		case i == 0 || rank < 0:
+			r = 1
+		}
+		if r > rank {
+			best, rank = name, r
+		}
+	}
+	return best
+}
+
+var reEnv = regexp.MustCompile(`^\s*([A-Za-z_]\w*=("[^"]*"|'[^']*'|\S*)\s+)+`)
+
+// splitShell cuts a command line into its simple commands at ; & | and
+// newlines outside quotes, dropping the loop and if keywords before each.
+func splitShell(cmd string) []string {
+	var parts []string
+	var cur strings.Builder
+	var quote rune
+	flush := func() {
+		f := strings.Fields(cur.String())
+		for len(f) > 0 && reKeyword.MatchString(f[0]) {
+			f = f[1:]
+		}
+		if len(f) > 0 {
+			parts = append(parts, strings.Join(f, " "))
+		}
+		cur.Reset()
+	}
+	for _, r := range cmd {
+		switch {
+		case quote != 0:
+			if r == quote {
+				quote = 0
+			}
+		case r == '\'' || r == '"':
+			quote = r
+		case r == ';' || r == '&' || r == '|' || r == '\n':
+			flush()
+			continue
+		}
+		cur.WriteRune(r)
+	}
+	flush()
+	return parts
+}
+
+var reKeyword = regexp.MustCompile(`^(do|then|else|elif|while|until|if|!|\{|\(+)$`)
+
+// dropHeredocs removes heredoc bodies, which are data, not commands.
+func dropHeredocs(cmd string) string {
+	var out []string
+	end := ""
+	for _, line := range strings.Split(cmd, "\n") {
+		if end != "" {
+			if strings.TrimSpace(line) == end {
+				end = ""
+			}
+			continue
+		}
+		out = append(out, line)
+		if m := reHeredoc.FindStringSubmatch(line); m != nil {
+			end = m[1]
+		}
+	}
+	return strings.Join(out, "\n")
+}
+
+var reHeredoc = regexp.MustCompile(`<<-?\s*['"]?(\w+)['"]?`)
+
+func isRunner(s string) bool {
+	switch s {
+	case "uv", "go", "git", "make", "npm", "pnpm", "yarn", "bun", "gh", "rex", "docker", "wt", "cargo", "curl", "sleep":
+		return true
+	}
+	return false
+}
+
+// segmentName names one simple command: the first word after any env and
+// timeout prefix, plus the subcommand for runners.
+func segmentName(cmd string) string {
 	cmd = reLeading.ReplaceAllString(cmd, "")
+	cmd = reEnv.ReplaceAllString(cmd, "")
 	f := strings.Fields(cmd)
 	for len(f) > 0 && (strings.Contains(f[0], "=") || f[0] == "timeout" || f[0] == "time" || strings.HasPrefix(f[0], "-") || isNumber(f[0])) {
 		f = f[1:]
@@ -376,17 +471,28 @@ func commandName(cmd string) string {
 		return "?"
 	}
 	switch f[0] {
+	case "cd", "set", "source", ".", "export", "for", "done", "fi", "}", ")", "true", "echo", "printf":
+		return "?"
 	case "uv", "go", "git", "make", "npm", "pnpm", "yarn", "bun", "gh", "rex", "docker", "wt", "cargo":
 		if len(f) > 1 {
-			if f[0] == "uv" && f[1] == "run" && len(f) > 2 {
-				return "uv run " + f[2]
+			if f[0] == "uv" && f[1] == "run" {
+				if rest := dropDashes(f[2:]); len(rest) > 0 {
+					return "uv run " + rest[0]
+				}
 			}
 			return f[0] + " " + f[1]
 		}
 	case "flock":
-		return "flock … " + commandName(strings.Join(dropFlags(f[1:]), " "))
+		return "flock … " + segmentName(strings.Join(dropFlags(f[1:]), " "))
 	}
 	return f[0]
+}
+
+func dropDashes(f []string) []string {
+	for len(f) > 0 && strings.HasPrefix(f[0], "-") {
+		f = f[1:]
+	}
+	return f
 }
 
 func dropFlags(f []string) []string {
@@ -420,7 +526,9 @@ func slowest(convs []*Conversation) []toolTime {
 				continue
 			}
 			if name == "Bash" {
-				name = commandName(s.Str("trace.command"))
+				if name = s.Str("tool.command_name"); name == "" {
+					name = commandName(s.Str("trace.command"))
+				}
 			}
 			if i := strings.LastIndex(name, "__"); strings.HasPrefix(name, "mcp__") && i > 0 {
 				name = strings.TrimPrefix(name[:i], "mcp__")
