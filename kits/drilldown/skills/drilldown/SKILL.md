@@ -102,6 +102,15 @@ The human answers in shorthand, mixed with pushback and new ideas: `1. drop the 
 6. **Rapid fire**, when asked for: one ask per chat message, each still with a few lines of background. If the human asks for more context, go back to slides.
 7. Record each answer in the ledger, then wherever it's acted on: the round file subagents read (see `subagent-tabs`), a decision record, or the ticket once a conclusion is settled. Ask before editing tickets.
 
+### Answers on the slides
+
+The human can also answer in the deck itself. On a slide, `c` adds a comment and `a` then a letter adds a pick, as `> **<name>:** …` lines at the bottom of the slide in the deck file (their `$USER`, or `vim.g.wt_review_name`). `]n` / `[n` jump between slides still in discussion. `:send` types every comment not yet sent into your terminal as one chat message, so they can comment and send as often as they like.
+
+- **Make each deck sendable.** Its first line is `<!-- agent: $REX_BLOCK $REX_SESSION -->`, with the values expanded from your shell, so `:send` reaches you. The agent that will act on the answers owns the deck; a subagent presenting in its own tab uses its own block. The slides don't show this line.
+- **Reply under every comment** with `> **claude:** …`. A reply marks the comments above it as handled. When an ask is settled, the reply starts with `✅ Q15 → b`; `]n` skips slides with one.
+- **Never edit or delete the human's lines,** and reread the deck before every edit: they may have commented since you last read it.
+- **On a `:send` message,** reread the deck and take each comment by the rules above: read it back in chat, record picks in the ledger, rewrite slides they didn't follow in place (say so in the reply), and turn pushback into a new ask.
+
 ## Asks from subagents
 
 A subagent's `result.md` ends with a **Needs human decision** section, each item already in ask shape (background, the question, options with effects, its pick). Lift them into the ledger with new IDs, then onto slides.

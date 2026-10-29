@@ -74,6 +74,48 @@ local function split(lines)
   return slides, starts
 end
 
+-- Comments. c on a slide appends a `> **you:**` line to that slide in the
+-- deck file, named by vim.g.wt_review_name or $USER, and a then a letter
+-- appends a pick. :Send (or :send) types every
+-- comment not yet sent into the agent's terminal, which the deck names with an
+-- `<!-- agent: BLOCK [SESSION] -->` line, and ]n / [n jump between slides
+-- still in discussion. The agent answers under each one
+-- with `> **claude:**`; a comment with a reply below it counts as sent.
+local ME = '> **' .. (vim.g.wt_review_name or vim.env.USER or 'me') .. ':**'
+local AGENT = '> **claude:**'
+local sent = {} -- deck path -> { [heading .. '\0' .. text] = true }
+
+local function heading(slide, i)
+  for _, l in ipairs(slide) do
+    local h = l:match('^#+%s+(.+)')
+    if h then return (h:match('^(.-)%s+·') or h) end
+  end
+  return 'slide ' .. i
+end
+
+-- The comments on one slide: { text, key, unsent } for each of yours.
+local function comments(slide, i, path)
+  local out, h = {}, heading(slide, i)
+  for _, l in ipairs(slide) do
+    if l:sub(1, #ME) == ME then
+      local text = vim.trim(l:sub(#ME + 1))
+      table.insert(out, { text = text, key = h .. '\0' .. text, heading = h })
+    elseif l:sub(1, #AGENT) == AGENT then
+      for _, c in ipairs(out) do c.replied = true end
+    end
+  end
+  local done = sent[path] or {}
+  for _, c in ipairs(out) do c.unsent = not (c.replied or done[c.key]) end
+  return out
+end
+
+local function agent_target(lines)
+  for _, l in ipairs(lines) do
+    local block, session = l:match('<!%-%-%s*agent:%s*(%S+)%s*(%S*)%s*%-%->')
+    if block then return block, session ~= '' and session or nil end
+  end
+end
+
 local function main_win()
   if not valid(main) then
     for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
@@ -645,6 +687,17 @@ local function render()
   if #slides == 0 then slides = { { '_No slides yet in ' .. vim.fn.fnamemodify(deck.path, ':~:.') .. '._' } } end
   deck.starts = starts
   deck.count = #slides
+  deck.threads, deck.unsent = {}, 0
+  for i, s in ipairs(slides) do
+    local cs = comments(s, i, deck.path)
+    -- A slide the agent has marked ✅ is settled, and ]n / [n skip it.
+    local settled = false
+    for _, l in ipairs(s) do
+      if l:sub(1, #AGENT) == AGENT and l:find('✅', 1, true) then settled = true end
+    end
+    deck.threads[i] = settled and 0 or #cs
+    for _, c in ipairs(cs) do if c.unsent then deck.unsent = deck.unsent + 1 end end
+  end
   if deck.want == 'last' then deck.idx = deck.count
   elseif tonumber(deck.want) then deck.idx = tonumber(deck.want) end
   deck.want = nil
@@ -652,12 +705,15 @@ local function render()
 
   local buf = deck.buf
   vim.bo[buf].modifiable = true
-  vim.api.nvim_buf_set_lines(buf, 0, -1, false, slides[deck.idx])
+  -- The agent: line is for :Send, not for reading.
+  local shown = vim.tbl_filter(function(l) return not l:match('^%s*<!%-%-%s*agent:') end, slides[deck.idx])
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, shown)
   vim.bo[buf].modifiable = false
   vim.bo[buf].modified = false
   for _, win in ipairs(vim.fn.win_findbuf(buf)) do
     local name = vim.fn.fnamemodify(deck.path, ':t'):gsub('%%', '%%%%')
-    vim.wo[win].winbar = string.format(' %s  %d/%d%%=J/K slide · ]p ]f ]c diff · g? keys ', name, deck.idx, deck.count)
+    local pending = deck.unsent > 0 and string.format('  💬 %d unsent, :send', deck.unsent) or ''
+    vim.wo[win].winbar = string.format(' %s  %d/%d%s%%=J/K slide · c comment · ]p ]f ]c diff · g? keys ', name, deck.idx, deck.count, pending)
     vim.api.nvim_win_set_cursor(win, { 1, 0 })
   end
 
@@ -687,6 +743,84 @@ local function go(n)
   end
 end
 
+-- Append a comment to the end of the current slide in the deck file.
+local function add_comment(text)
+  text = text and vim.trim(text)
+  if not text or text == '' or not deck.starts[deck.idx] then return end
+  local lines = vim.fn.readfile(deck.path)
+  local last = deck.starts[deck.idx + 1] and deck.starts[deck.idx + 1] - 1 or #lines
+  while last > deck.starts[deck.idx] and (lines[last]:match('^%s*$') or lines[last]:match('^%-%-%-+%s*$')) do
+    last = last - 1
+  end
+  local new = { ME .. ' ' .. text }
+  if not lines[last]:match('^> %*%*') then table.insert(new, 1, '') end
+  for i, l in ipairs(new) do table.insert(lines, last + i, l) end
+  vim.fn.writefile(lines, deck.path)
+  deck.stamp = stamp(deck.path)
+  render()
+end
+
+local function comment()
+  vim.ui.input({ prompt = 'comment: ' }, add_comment)
+end
+
+local function pick()
+  vim.api.nvim_echo({ { 'pick: a / b / c …  (esc cancels)' } }, false, {})
+  local ok, ch = pcall(vim.fn.getcharstr)
+  vim.api.nvim_echo({ { '' } }, false, {})
+  if ok and ch:match('^%w$') then add_comment('pick ' .. ch) end
+end
+
+-- Next or previous unsettled slide that has comments on it.
+local function thread(d)
+  return function()
+    for n = 1, deck.count - 1 do
+      local i = (deck.idx - 1 + d * n) % deck.count + 1
+      if (deck.threads[i] or 0) > 0 then deck.idx = i; return render() end
+    end
+    vim.notify('no other unsettled slides with comments')
+  end
+end
+
+local function send()
+  local lines = vim.fn.readfile(deck.path)
+  local block, session = agent_target(lines)
+  if not block then
+    return vim.notify('this deck has no <!-- agent: BLOCK SESSION --> line, so there is nowhere to send', vim.log.levels.WARN)
+  end
+  local slides = split(lines)
+  local fresh, parts = {}, {}
+  for i, s in ipairs(slides) do
+    for _, c in ipairs(comments(s, i, deck.path)) do
+      if c.unsent then
+        table.insert(fresh, c.key)
+        table.insert(parts, string.format('%s: "%s"', c.heading, c.text))
+      end
+    end
+  end
+  if #fresh == 0 then return vim.notify('nothing new to send') end
+  local msg = string.format('New comments in %s, reply under each one in the deck: %s',
+    deck.path, table.concat(parts, ' · '))
+  local target = { '-b', block }
+  if session then target = { '-s', session, '-b', block } end
+  local function rex(args, cb)
+    vim.system(vim.list_extend({ 'rex' }, vim.list_extend(vim.deepcopy(args), target)), { text = true }, cb)
+  end
+  rex({ 'send', msg }, function(r)
+    if r.code ~= 0 then
+      return vim.schedule(function() vim.notify('send failed: ' .. (r.stderr or ''), vim.log.levels.ERROR) end)
+    end
+    rex({ 'send-key', 'enter' }, function()
+      vim.schedule(function()
+        sent[deck.path] = sent[deck.path] or {}
+        for _, k in ipairs(fresh) do sent[deck.path][k] = true end
+        render()
+        vim.notify(string.format('sent %d comment%s', #fresh, #fresh == 1 and '' or 's'))
+      end)
+    end)
+  end)
+end
+
 local keys_help = {
   'Slides',
   '  j k gg G ctrl-d ctrl-u   move within the slide',
@@ -695,6 +829,11 @@ local keys_help = {
   '  gf  or  <CR>             the path:line under the cursor: in the diff if it changed, else the file',
   '  gF                       the path:line under the cursor as a plain file',
   '  :Slide N  :SlideEdit     jump to slide N; edit the deck at this slide',
+  'Comments',
+  '  c                        comment on this slide',
+  '  a then a letter          pick an option (a b c …)',
+  '  ]n  /  [n                next / previous slide still in discussion',
+  '  :send                    send new comments to the agent (again whenever you add more)',
   'Diff pane (these work from the slides too)',
   '  ]p [p  ]f [f  ]c [c      next / previous PR, file, hunk (with a count)',
   '  gf  or  <CR>             open the file at this line (head side; base side on a - line)',
@@ -783,6 +922,14 @@ local function deck_buf()
   map(buf, { 'L' }, go('last'))
   map(buf, { 'gf', '<CR>' }, follow)
   map(buf, { 'gF' }, plain)
+  map(buf, { 'c' }, comment)
+  map(buf, { 'a' }, pick)
+  map(buf, { ']n' }, thread(1))
+  map(buf, { '[n' }, thread(-1))
+  vim.api.nvim_buf_create_user_command(buf, 'Send', send, {})
+  vim.api.nvim_buf_call(buf, function()
+    vim.cmd([[cnoreabbrev <buffer> <expr> send (getcmdtype() ==# ':' && getcmdline() ==# 'send') ? 'Send' : 'send']])
+  end)
   vim.api.nvim_buf_create_user_command(buf, 'Slide', function(o) go(tonumber(o.args) or 1)() end, { nargs = 1 })
   vim.api.nvim_buf_create_user_command(buf, 'SlideEdit', function()
     vim.cmd.edit(vim.fn.fnameescape(deck.path))
