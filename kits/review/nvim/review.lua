@@ -25,6 +25,8 @@
 -- gu lists the changed files not viewed yet.
 
 local M = {}
+-- The optional dependency lets delivery tests control discovery independently.
+local recipient = ... or dofile(vim.fn.fnamemodify(debug.getinfo(1, 'S').source:sub(2), ':h') .. '/recipient.lua')
 local uv = vim.uv or vim.loop
 local root = vim.fn.getcwd()
 local main = vim.api.nvim_get_current_win()
@@ -77,13 +79,58 @@ end
 -- Comments. c on a slide appends a `> **you:**` line to that slide in the
 -- deck file, named by vim.g.wt_review_name or $USER, and a then a letter
 -- appends a pick. S (or :Send, or :send) types every
--- comment not yet sent into the agent's terminal, which the deck names with an
--- `<!-- agent: BLOCK [SESSION] -->` line, and ]n / [n jump between slides
+-- comment not yet sent into the presenting agent's terminal (falling back to
+-- `<!-- agent: BLOCK [SESSION] -->` in the deck), and ]n / [n jump between slides
 -- still in discussion. The agent answers under each one
--- with `> **claude:**`; a comment with a reply below it counts as sent.
+-- with `> **agent:**` (or their name); a comment with a reply below it counts as sent.
 local ME = '> **' .. (vim.g.wt_review_name or vim.env.USER or 'me') .. ':**'
-local AGENT = '> **claude:**'
+local agent_names = { agent = true, claude = true, chatgpt = true, codex = true }
+local function agent_reply(line)
+  local name = line:match('^> %*%*([^:]+):%*%*')
+  return name and agent_names[name:lower()] and line:sub(1, #ME) ~= ME
+end
 local sent = {} -- deck path -> { [heading .. '\0' .. text] = true }
+local owners = {} -- deck path -> { block, session }, set by review-show
+-- One batch at a time. Keep a pasted batch on Enter failure so :send can
+-- retry submission without typing it twice. Callbacks always use this snapshot.
+local delivery = nil
+local attention = nil
+local last_status = nil
+local finding = false
+local recipient_error = nil
+
+local function activity(state, msg)
+  if not vim.env.REX_SESSION then return end
+  local report = 'state=' .. state .. ':id=wt-review:app=wt'
+  if state == 'blocked' then report = report .. ':kind=question' end
+  if msg then
+    msg = vim.fn.strcharpart(msg:gsub('%c', ' '):gsub('\194[\128-\159]', ' '), 0, 256)
+    report = report .. ':msg=' .. vim.base64.encode(msg)
+  end
+  if report == last_status then return end
+  last_status = report
+  io.stdout:write('\27]7501;' .. report .. '\27\\')
+  io.stdout:flush()
+end
+
+local function feedback_status()
+  if finding then return 'working', 'Finding an agent in this tab' end
+  if recipient_error then return 'blocked', recipient_error end
+  if delivery then
+    local name = vim.fn.fnamemodify(delivery.path, ':t')
+    if delivery.busy then return 'working', 'Sending comments: ' .. name end
+    return 'blocked', 'Send failed: ' .. name .. ' — :send to retry'
+  end
+  if (deck.unsent or 0) > 0 then
+    return 'blocked', string.format('%d comments unsent — :send', deck.unsent)
+  end
+  if attention then return 'blocked', attention.msg end
+  return 'clear'
+end
+
+local function update_activity()
+  activity(feedback_status())
+end
 
 local function heading(slide, i)
   for _, l in ipairs(slide) do
@@ -100,7 +147,7 @@ local function comments(slide, i, path)
     if l:sub(1, #ME) == ME then
       local text = vim.trim(l:sub(#ME + 1))
       table.insert(out, { text = text, key = h .. '\0' .. text, heading = h })
-    elseif l:sub(1, #AGENT) == AGENT then
+    elseif agent_reply(l) then
       for _, c in ipairs(out) do c.replied = true end
     end
   end
@@ -693,7 +740,7 @@ local function render()
     -- A slide the agent has marked ✅ is settled, and ]n / [n skip it.
     local settled = false
     for _, l in ipairs(s) do
-      if l:sub(1, #AGENT) == AGENT and l:find('✅', 1, true) then settled = true end
+      if agent_reply(l) and l:find('✅', 1, true) then settled = true end
     end
     deck.threads[i] = settled and 0 or #cs
     for _, c in ipairs(cs) do if c.unsent then deck.unsent = deck.unsent + 1 end end
@@ -702,6 +749,7 @@ local function render()
   elseif tonumber(deck.want) then deck.idx = tonumber(deck.want) end
   deck.want = nil
   deck.idx = math.max(1, math.min(deck.idx, deck.count))
+  update_activity()
 
   local buf = deck.buf
   vim.bo[buf].modifiable = true
@@ -713,6 +761,15 @@ local function render()
   for _, win in ipairs(vim.fn.win_findbuf(buf)) do
     local name = vim.fn.fnamemodify(deck.path, ':t'):gsub('%%', '%%%%')
     local pending = deck.unsent > 0 and string.format('  💬 %d unsent, S to send', deck.unsent) or ''
+    if finding then
+      pending = '  finding an agent in this tab…'
+    elseif recipient_error then
+      pending = '  reconnect needed, :Reconnect'
+    elseif delivery then
+      pending = delivery.busy and '  sending comments…' or '  send failed, :send to retry'
+    elseif attention then
+      pending = pending .. '  comments needed'
+    end
     vim.wo[win].winbar = string.format(' %s  %d/%d%s%%=J/K slide · c comment · ]p ]f ]c diff · g? keys ', name, deck.idx, deck.count, pending)
     vim.api.nvim_win_set_cursor(win, { 1, 0 })
   end
@@ -782,43 +839,105 @@ local function thread(d)
   end
 end
 
-local function send()
-  local lines = vim.fn.readfile(deck.path)
-  local block, session = agent_target(lines)
-  if not block then
-    return vim.notify('this deck has no <!-- agent: BLOCK SESSION --> line, so there is nowhere to send', vim.log.levels.WARN)
+local function deliver(force)
+  if delivery and delivery.busy then return vim.notify('comments are already being sent') end
+  if delivery and delivery.path ~= deck.path then
+    return vim.notify('retry :send in ' .. delivery.path .. ' first; its previous send is unfinished', vim.log.levels.WARN)
   end
-  local slides = split(lines)
-  local fresh, parts = {}, {}
-  for i, s in ipairs(slides) do
-    for _, c in ipairs(comments(s, i, deck.path)) do
-      if c.unsent then
-        table.insert(fresh, c.key)
-        table.insert(parts, string.format('%s: "%s"', c.heading, c.text))
+  -- Reuse a pasted batch and its target, even if the deck has been edited.
+  if not (delivery and delivery.pasted) then
+    local lines = vim.fn.readfile(deck.path)
+    local block, session = agent_target(lines)
+    if owners[deck.path] then block, session = unpack(owners[deck.path]) end
+    if not block then
+      return vim.notify('this deck has no <!-- agent: BLOCK SESSION --> line, so there is nowhere to send', vim.log.levels.WARN)
+    end
+    local slides = split(lines)
+    local fresh, parts = {}, {}
+    for i, s in ipairs(slides) do
+      for _, c in ipairs(comments(s, i, deck.path)) do
+        if c.unsent or (force and not c.replied) then
+          table.insert(fresh, c.key)
+          table.insert(parts, string.format('%s: "%s"', c.heading, c.text))
+        end
       end
     end
+    if #fresh == 0 then render(); return vim.notify('nothing new to send') end
+    local msg = string.format('New comments in %s, reply under each one in the deck: %s',
+      deck.path, table.concat(parts, ' · '))
+    local target = { '-b', block }
+    if session then target = { '-s', session, '-b', block } end
+    delivery = { path = deck.path, keys = fresh, target = target, msg = msg, pasted = false, attention = attention }
   end
-  if #fresh == 0 then return vim.notify('nothing new to send') end
-  local msg = string.format('New comments in %s, reply under each one in the deck: %s',
-    deck.path, table.concat(parts, ' · '))
-  local target = { '-b', block }
-  if session then target = { '-s', session, '-b', block } end
+  local batch = delivery
+  batch.busy = true
+  render()
+  local function failed(step, r)
+    batch.busy = false
+    render()
+    vim.notify(step .. ' failed: ' .. (r.stderr or '') .. '\n'
+      .. (batch.pasted and 'Text is already in the agent pane; :send retries Enter only.'
+        or 'Check the agent pane before :send retries; a failed request may have partially arrived.')
+      .. '\nIf the agent is gone, :send checks for another in this tab; :Reconnect lets you choose.', vim.log.levels.ERROR)
+  end
   local function rex(args, cb)
-    vim.system(vim.list_extend({ 'rex' }, vim.list_extend(vim.deepcopy(args), target)), { text = true }, cb)
-  end
-  rex({ 'send', msg }, function(r)
-    if r.code ~= 0 then
-      return vim.schedule(function() vim.notify('send failed: ' .. (r.stderr or ''), vim.log.levels.ERROR) end)
-    end
-    rex({ 'send-key', 'enter' }, function()
-      vim.schedule(function()
-        sent[deck.path] = sent[deck.path] or {}
-        for _, k in ipairs(fresh) do sent[deck.path][k] = true end
-        render()
-        vim.notify(string.format('sent %d comment%s', #fresh, #fresh == 1 and '' or 's'))
-      end)
+    local argv = vim.list_extend({ 'rex' }, vim.list_extend(vim.deepcopy(args), batch.target))
+    local ok, err = pcall(vim.system, argv, { text = true, timeout = 15000 }, function(r)
+      vim.schedule(function() cb(r) end)
     end)
+    if not ok then failed('rex', { stderr = tostring(err) }) end
+  end
+  local function submit()
+    rex({ 'send-key', 'enter' }, function(r)
+      if r.code ~= 0 then return failed('Enter', r) end
+      sent[batch.path] = sent[batch.path] or {}
+      for _, k in ipairs(batch.keys) do sent[batch.path][k] = true end
+      delivery = nil
+      -- A request for another deck may have appeared while this one was sending.
+      if attention == batch.attention then attention = nil end
+      render()
+      vim.notify(string.format('submitted %d comment%s to the agent pane', #batch.keys, #batch.keys == 1 and '' or 's'))
+    end)
+  end
+  if batch.pasted then return submit() end
+  rex({ 'send', batch.msg }, function(r)
+    if r.code ~= 0 then return failed('Send', r) end
+    batch.pasted = true
+    submit()
   end)
+end
+
+local function connect(then_send, choose)
+  if finding or (delivery and delivery.busy) then return vim.notify('a send or reconnect is already in progress') end
+  if delivery and delivery.path ~= deck.path then
+    return vim.notify('finish reconnecting ' .. delivery.path .. ' first', vim.log.levels.WARN)
+  end
+  local path, owner = deck.path, owners[deck.path]
+  local block, session = agent_target(vim.fn.readfile(path))
+  if owner then block, session = unpack(owner) end
+  local preferred = not choose and block and { block = block, session = session } or nil
+  finding, recipient_error = true, nil
+  render()
+  recipient.resolve(preferred, function(err, candidate)
+    if deck.path ~= path or owners[path] ~= owner then
+      finding = false
+      render()
+      return vim.notify('deck or recipient changed; run :send or :Reconnect again', vim.log.levels.WARN)
+    end
+    if not err then
+      local result = M.bind(path, candidate.block, candidate.session)
+      if result ~= 0 then err = result end
+    end
+    finding, recipient_error = false, err
+    if not err and then_send then return then_send() end
+    render()
+    if err then return vim.notify(err, vim.log.levels.WARN) end
+    vim.notify('comments connected to ' .. candidate.agent .. ' in this tab')
+  end)
+end
+
+local function send(force)
+  connect(function() deliver(force) end)
 end
 
 local keys_help = {
@@ -834,6 +953,8 @@ local keys_help = {
   '  a then a letter          pick an option (a b c …)',
   '  ]n  /  [n                next / previous slide still in discussion',
   '  S  or  :send             send new comments to the agent (again whenever you add more)',
+  '  :send!                   resend unreplied comments if the agent missed a submission',
+  '  :Reconnect               find an existing agent in this Rex tab; choose if several',
   'Diff pane (these work from the slides too)',
   '  ]p [p  ]f [f  ]c [c      next / previous PR, file, hunk (with a count)',
   '  gf  or  <CR>             open the file at this line (head side; base side on a - line)',
@@ -927,7 +1048,8 @@ local function deck_buf()
   map(buf, { 'S' }, send)
   map(buf, { ']n' }, thread(1))
   map(buf, { '[n' }, thread(-1))
-  vim.api.nvim_buf_create_user_command(buf, 'Send', send, {})
+  vim.api.nvim_buf_create_user_command(buf, 'Send', function(o) send(o.bang) end, { bang = true })
+  vim.api.nvim_buf_create_user_command(buf, 'Reconnect', function() connect(nil, true) end, {})
   vim.api.nvim_buf_call(buf, function()
     vim.cmd([[cnoreabbrev <buffer> <expr> send (getcmdtype() ==# ':' && getcmdline() ==# 'send') ? 'Send' : 'send']])
   end)
@@ -940,8 +1062,53 @@ local function deck_buf()
   return buf
 end
 
-function M.slides(path, n)
-  deck.path = resolve(path)
+-- A replacement agent explicitly claims the deck; never guess a recipient from
+-- focus or a pane label. Persist the recipient so a restarted panel can find it.
+function M.bind(path, block, session)
+  path = resolve(path)
+  if not block or block == '' or not session or session == '' then return 'bind needs a Rex block and session' end
+  local ok, lines = pcall(vim.fn.readfile, path)
+  if not ok then return 'cannot read deck: ' .. path end
+  local old_block, old_session = agent_target(lines)
+  if owners[path] then old_block, old_session = unpack(owners[path]) end
+  local changed = old_block ~= block or old_session ~= session
+  if changed and delivery and delivery.path == path and delivery.busy then
+    return 'comments are being sent; wait for the send to finish before reconnecting this deck'
+  end
+  local header = '<!-- agent: ' .. block .. ' ' .. session .. ' -->'
+  local found, dirty = false, false
+  for i, l in ipairs(lines) do
+    if l:match('^%s*<!%-%-%s*agent:') then
+      found, dirty = true, l ~= header
+      lines[i] = header
+      break
+    end
+  end
+  if not found then table.insert(lines, 1, header); dirty = true end
+  if dirty then
+    local wrote, result = pcall(vim.fn.writefile, lines, path)
+    if not wrote or result ~= 0 then return 'cannot save deck recipient: ' .. path end
+  end
+  owners[path] = { block, session }
+  recipient_error = nil
+  if changed then
+    -- An Enter retry belongs to the old pane. The replacement must receive
+    -- the whole batch, including submitted comments it never acknowledged.
+    if delivery and delivery.path == path then delivery = nil end
+    sent[path] = nil
+  end
+  if path == deck.path then deck.stamp = stamp(path); render() end
+  return 0
+end
+
+function M.slides(path, n, block, session)
+  path = resolve(path)
+  if block and block ~= '' then
+    local err = M.bind(path, block, session)
+    if err ~= 0 then return err end
+  end
+  if path ~= deck.path then attention, recipient_error = nil, nil end
+  deck.path = path
   deck.want = n or 'last'
   deck.stamp = stamp(deck.path)
   deck.anchored = nil
@@ -951,6 +1118,14 @@ function M.slides(path, n)
   vim.wo[win].wrap = true
   vim.wo[win].linebreak = true
   render()
+  return 0
+end
+
+-- Only an explicit ask raises attention; merely displaying a deck does not.
+function M.status(state, msg)
+  if state ~= 'waiting' and state ~= 'idle' then return 'status must be waiting or idle' end
+  attention = state == 'waiting' and { msg = msg and msg ~= '' and msg or 'Comments needed' } or nil
+  if deck.buf then render() else update_activity() end
   return 0
 end
 
@@ -995,6 +1170,7 @@ vim.api.nvim_create_user_command('DiffClose', function()
 end, {})
 
 vim.api.nvim_create_autocmd('VimResized', { callback = function() vim.schedule(fit) end })
+vim.api.nvim_create_autocmd('VimLeavePre', { callback = function() activity('clear') end })
 
 -- The agent rewrites files underneath us; poll rather than fs_event, which
 -- loses track of files replaced by rename.

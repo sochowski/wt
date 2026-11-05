@@ -87,6 +87,43 @@ move as usual, `J`/`K` page (with a count), `L`/`H` jump to the last and first
 slide, `gf` opens the `path:line` under the cursor (in the diff when the stack
 changes it), and `g?` lists the rest.
 
+`c` adds a comment, `a` then a letter picks an option, and `S` (or `:send`) submits
+new comments to the agent pane. `review-show slides` binds the deck to the
+presenting agent's Rex pane and saves `<!-- agent: BLOCK SESSION -->` in the
+deck, so the recipient survives restarting nvim.
+Only one send runs at a time. Failures stay visible; if the text was sent but
+Enter failed, `:send` retries Enter without pasting the batch again. Submission
+means Rex accepted the input; the agent's reply in the deck confirms it was
+handled. Send tracking lasts for the panel's lifetime; after restarting it,
+comments without a reply can be submitted again. If the pane accepted a send
+but the agent missed it, `:send!` explicitly resubmits comments without a reply.
+Replies can use `> **agent:**`, `> **ChatGPT:**`, `> **Codex:**`, or the older
+`> **claude:**` label.
+
+If the recipient's session or pane disappears, comments stay in the deck and
+the failed send stays visible. Before sending, the panel checks for existing
+agents in **the same Rex tab as nvim**. It keeps the saved recipient if that
+agent is still there, reconnects to the sole agent otherwise, or opens a picker
+when several agents are running. `:Reconnect` explicitly finds an agent in
+that tab and offers a choice when there are several. It detects Claude Code,
+Codex, OpenCode and pi from foreground process metadata; shell panes and
+agents in other tabs are excluded. If no agent is found, it keeps the comments
+and reports that a reconnect is needed. It never starts an agent.
+
+Reconnecting saves the new recipient and makes unreplied feedback available
+to `:send` again. A batch pasted into the old pane is resent in full to the
+new one. Reconnecting waits for any active send to finish. An agent can also
+explicitly claim a deck with `.wt/bin/review-show bind path/to/deck.md`, or
+present it again with `review-show slides`.
+
+When a response is needed, the agent runs
+`.wt/bin/review-show status waiting 'Comments needed: deployment options'`.
+The panel reports this through Rex's program status protocol (OSC 7501), on
+its own pane. Merely showing slides does not request attention. Unsent comments,
+sending, and send failures update that status; successful submission clears
+the request. `.wt/bin/review-show status idle` withdraws a request. Rex controls
+how activity appears and whether it produces notifications or sounds.
+
 Personal or team review process goes in a layer of its own, e.g.
 `~/.config/wt/kits/review/` with an `AGENTS.md` and extra skills.
 

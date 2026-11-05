@@ -47,6 +47,15 @@ The deck is `review/walkthrough.md`, slides separated by a line containing only 
 2. Stop and let the human ask questions or say go on. Then append the next chapter and run `review-show slides review/walkthrough.md last`.
 3. If they say to do the rest, write all the remaining slides at once and show slide 1 of them.
 
+When you explicitly need an answer or comments, run
+`.wt/bin/review-show status waiting 'Comments needed: <topic>'` after showing
+the slides. Use `review-show status idle` when they answer in chat or the
+request is withdrawn. Merely presenting a chapter does not need an alert.
+`review-show slides` remembers your Rex pane for the human's `:send` comments.
+When comments arrive, reread the deck and reply under each with
+`> **agent:** …` (or `ChatGPT`, `Codex`, or `claude` as the speaker); keep the human's lines intact. That reply acknowledges the
+comment, so restarting the panel does not make it appear unsent again.
+
 `review-show code repos/<repo>/<path>:<line>` opens a file beside the slides; `review-show diff [<pr>] [<path>[:<line>]]` moves the diff pane; `review-show close` quits the panel. When a `Diff:` anchor doesn't resolve, the panel warns about it: fix the line in the deck.
 
 The first time you show the deck, mention the keys once: `J`/`K` next and previous slide; `]p`/`[p`, `]f`/`[f`, `]c`/`[c` page the diff by PR, file and hunk; `gf` on a path opens it in the diff, or on a diff line opens the file there; `gd` opens the file in a tab, as unified.nvim's inline diff for the top PR and diffview for the ones below (`:DiffClose` closes it); `gu` lists files not viewed yet; `gs` puts the diff beside the slides instead of under them; `g?` lists the rest. If `review-show` says there is no panel, give the human the deck's path instead and keep going in chat.

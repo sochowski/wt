@@ -8,6 +8,9 @@
 #                                      a PR's own changes in the pane under the
 #                                      slides; with only a path, the top PR
 #                                      that changes it
+#   review-show status waiting [TEXT]  ask for a response in Rex's activity UI
+#   review-show status idle            withdraw the request
+#   review-show bind FILE              reconnect a deck to this agent's Rex pane
 #   review-show close                  quit the panel (the next call opens a fresh one)
 #
 # Paths are relative to the workspace root (repos/<repo>/... or a path inside
@@ -17,7 +20,7 @@
 set -euo pipefail
 
 die() { printf 'review-show: %s\n' "$*" >&2; exit 1; }
-[[ "${1:-}" =~ ^(slides|doc|code|diff|close)$ ]] || { sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; [[ "${1:-}" =~ ^(-h|--help)$ ]]; exit; }
+[[ "${1:-}" =~ ^(slides|doc|code|diff|status|bind|close)$ ]] || { sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; [[ "${1:-}" =~ ^(-h|--help)$ ]]; exit; }
 
 kit=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)
 ws="$PWD"
@@ -39,7 +42,11 @@ case "$cmd" in
   close)  alive && deadline 2 nvim --server "$sock" --remote-send '<C-\><C-n>:qa!<CR>' > /dev/null 2>&1
           rm -f "$sock"; exit 0 ;;
   slides) [[ -n "${1:-}" ]] || die "usage: review-show slides FILE [N|last]"
-          call="luaeval('wt_review.slides(_A[1], _A[2])', [$(q "$1"), $(q "${2:-last}")])" ;;
+          call="luaeval('wt_review.slides(_A[1], _A[2], _A[3], _A[4])', [$(q "$1"), $(q "${2:-last}"), $(q "${REX_BLOCK:-}"), $(q "${REX_SESSION:-}")])" ;;
+  bind)   [[ $# == 1 && -n "${REX_BLOCK:-}" && -n "${REX_SESSION:-}" ]] || die "usage: review-show bind FILE (from the receiving agent's Rex pane)"
+          call="luaeval('wt_review.bind(_A[1], _A[2], _A[3])', [$(q "$1"), $(q "$REX_BLOCK"), $(q "$REX_SESSION")])" ;;
+  status) [[ "${1:-}" =~ ^(waiting|idle)$ && $# -le 2 ]] || die "usage: review-show status waiting [TEXT] | idle"
+          call="luaeval('wt_review.status(_A[1], _A[2])', [$(q "$1"), $(q "${2:-}")])" ;;
   doc)    [[ -n "${1:-}" ]] || die "usage: review-show doc FILE [LINE]"
           call="luaeval('wt_review.doc(_A[1], _A[2])', [$(q "$1"), $(q "${2:-}")])" ;;
   code)   [[ -n "${1:-}" ]] || die "usage: review-show code PATH[:LINE]"
