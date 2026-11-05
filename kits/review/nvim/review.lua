@@ -76,7 +76,7 @@ end
 
 -- Comments. c on a slide appends a `> **you:**` line to that slide in the
 -- deck file, named by vim.g.wt_review_name or $USER, and a then a letter
--- appends a pick. :Send (or :send) types every
+-- appends a pick. S (or :Send, or :send) types every
 -- comment not yet sent into the agent's terminal, which the deck names with an
 -- `<!-- agent: BLOCK [SESSION] -->` line, and ]n / [n jump between slides
 -- still in discussion. The agent answers under each one
@@ -712,7 +712,7 @@ local function render()
   vim.bo[buf].modified = false
   for _, win in ipairs(vim.fn.win_findbuf(buf)) do
     local name = vim.fn.fnamemodify(deck.path, ':t'):gsub('%%', '%%%%')
-    local pending = deck.unsent > 0 and string.format('  💬 %d unsent, :send', deck.unsent) or ''
+    local pending = deck.unsent > 0 and string.format('  💬 %d unsent, S to send', deck.unsent) or ''
     vim.wo[win].winbar = string.format(' %s  %d/%d%s%%=J/K slide · c comment · ]p ]f ]c diff · g? keys ', name, deck.idx, deck.count, pending)
     vim.api.nvim_win_set_cursor(win, { 1, 0 })
   end
@@ -833,7 +833,7 @@ local keys_help = {
   '  c                        comment on this slide',
   '  a then a letter          pick an option (a b c …)',
   '  ]n  /  [n                next / previous slide still in discussion',
-  '  :send                    send new comments to the agent (again whenever you add more)',
+  '  S  or  :send             send new comments to the agent (again whenever you add more)',
   'Diff pane (these work from the slides too)',
   '  ]p [p  ]f [f  ]c [c      next / previous PR, file, hunk (with a count)',
   '  gf  or  <CR>             open the file at this line (head side; base side on a - line)',
@@ -924,6 +924,7 @@ local function deck_buf()
   map(buf, { 'gF' }, plain)
   map(buf, { 'c' }, comment)
   map(buf, { 'a' }, pick)
+  map(buf, { 'S' }, send)
   map(buf, { ']n' }, thread(1))
   map(buf, { '[n' }, thread(-1))
   vim.api.nvim_buf_create_user_command(buf, 'Send', send, {})

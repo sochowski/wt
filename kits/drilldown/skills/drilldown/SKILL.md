@@ -104,7 +104,7 @@ The human answers in shorthand, mixed with pushback and new ideas: `1. drop the 
 
 ### Answers on the slides
 
-The human can also answer in the deck itself. On a slide, `c` adds a comment and `a` then a letter adds a pick, as `> **<name>:** …` lines at the bottom of the slide in the deck file (their `$USER`, or `vim.g.wt_review_name`). `]n` / `[n` jump between slides still in discussion. `:send` types every comment not yet sent into your terminal as one chat message, so they can comment and send as often as they like.
+The human can also answer in the deck itself. On a slide, `c` adds a comment and `a` then a letter adds a pick, as `> **<name>:** …` lines at the bottom of the slide in the deck file (their `$USER`, or `vim.g.wt_review_name`). `]n` / `[n` jump between slides still in discussion. `S` (or `:send`) types every comment not yet sent into your terminal as one chat message, so they can comment and send as often as they like.
 
 - **Make each deck sendable.** Its first line is `<!-- agent: $REX_BLOCK $REX_SESSION -->`, with the values expanded from your shell, so `:send` reaches you. The agent that will act on the answers owns the deck; a subagent presenting in its own tab uses its own block. The slides don't show this line.
 - **Reply under every comment** with `> **claude:** …`. A reply marks the comments above it as handled. When an ask is settled, the reply starts with `✅ Q15 → b`; `]n` skips slides with one.
