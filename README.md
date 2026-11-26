@@ -213,7 +213,10 @@ backends (Rex against a fake `rex`, tmux against a server of its own).
 `skills/` holds skills for any harness, outside kits. `nvim-panel` steers
 agents to show you code, docs and diffs in one reused nvim pane beside them
 (Rex or tmux), with your own config and unified.nvim for diffs, instead of
-HTML pages or fresh panes. Install them for every session with:
+HTML pages or fresh panes. `rex-restore` rebuilds your Rex sessions and tabs
+after the server dies, from its journal and the Claude Code transcripts. It
+resumes each conversation where it ran, then reports which agents were cut off
+mid-task and which are waiting on you. Install them for every session with:
 
 ```sh
 wt skills link            # wt skills lists them and what's linked
