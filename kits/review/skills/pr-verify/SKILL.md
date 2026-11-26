@@ -29,13 +29,13 @@ Let them pick, then do one check at a time.
 
   Then run the same command in both checkouts. Run `wt kit review` afterwards so `AGENTS.md` lists the new checkout.
 - Env files the repo syncs through `.wt/sync` are already in the checkout. If something needs secrets or services that aren't there, say what's missing rather than working around it.
-- In Rex, run anything slow or noisy in its own pane, so the human can watch it and your context stays small:
+- In Rex or tmux, run anything slow or noisy in its own tab, so the human can watch it and your context stays small:
 
   ```sh
-  rex run -s "$REX_SESSION" -c "<checkout>" --label "<check>" --keep-open --focus=false --json -- <command>
+  ref=$(.wt/bin/wt-pane window "<check>" --cwd "<checkout>" --keep-open -- <command>)
   ```
 
-  Read it back with `rex capture -s "$REX_SESSION" -b <block> --trim`.
+  Read it back with `.wt/bin/wt-pane capture "$ref"`.
 
 ## 3. Run and record
 

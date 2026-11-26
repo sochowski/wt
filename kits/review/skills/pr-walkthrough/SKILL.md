@@ -51,7 +51,7 @@ When you explicitly need an answer or comments, run
 `.wt/bin/review-show status waiting 'Comments needed: <topic>'` after showing
 the slides. Use `review-show status idle` when they answer in chat or the
 request is withdrawn. Merely presenting a chapter does not need an alert.
-`review-show slides` remembers your Rex pane for the human's `:send` comments.
+`review-show slides` remembers your pane (Rex or tmux) for the human's `:send` comments.
 When comments arrive, reread the deck and reply under each with
 `> **agent:** …` (or `ChatGPT`, `Codex`, or `claude` as the speaker); keep the human's lines intact. That reply acknowledges the
 comment, so restarting the panel does not make it appear unsent again.

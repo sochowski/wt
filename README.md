@@ -1,7 +1,8 @@
 # wt
 
 Workspaces of git worktrees, and a fuzzy finder to jump into them. The core
-knows nothing about tmux, agents, or panes; kits add those per kind of work.
+knows nothing about agents; kits add those per kind of work, and `wt pane`
+gives them one way to drive panes in Rex or tmux.
 
 ```
 wt new fix-oauth Runlayer mcps-by-runlayer   # or just `wt new` to pick interactively
@@ -26,7 +27,9 @@ symlinks, and loose worktrees at `~/worktrees/<repo>/<branch>`.
 | `wt add REPO[@REF][:DIR]` | add a checkout to the workspace you're in, e.g. `wt add Runlayer@abc123:Runlayer-base` |
 | `wt kit [KIT...]` | prime the workspace you're in with kits; with no arguments, list them |
 | `wt root`, `wt repos` | print the current workspace; list the repos wt can check out |
-| `wt CMD` | run `wt-CMD` from a kit's `bin/`, or from `PATH` |
+| `wt pane` | open, find, type into and read panes in Rex or tmux, whichever you're in (see [Panes](#panes)) |
+| `wt skills` | link wt's own skills into `~/.agents/skills` and `~/.claude/skills` (see [Skills](#skills)) |
+| `wt CMD` | run `wt-CMD` from a kit's `bin/`, wt's own `bin/`, or `PATH` |
 
 ## Kits
 
@@ -72,7 +75,7 @@ The kit's skills are `pr-walkthrough` (motivation, then the code in reading
 order as slides, a chapter at a time) and `pr-verify` (local checks, including
 before/after against the base). They show their work with
 `.wt/bin/review-show`, which drives one nvim per workspace over a socket. In
-Rex the nvim opens as a split beside the agent. It shows markdown slides
+Rex or tmux the nvim opens as a split beside the agent. It shows markdown slides
 (split on `---`, reloaded as the agent writes them), docs, files, and a diff
 pane under the slides. A slide's `Diff: #<pr> path:line` line moves the pane
 there; `]p`/`[p`, `]f`/`[f`, `]c`/`[c` page it by PR, file and hunk; `gf` on a
@@ -89,11 +92,12 @@ changes it), and `g?` lists the rest.
 
 `c` adds a comment, `a` then a letter picks an option, and `S` (or `:send`) submits
 new comments to the agent pane. `review-show slides` binds the deck to the
-presenting agent's Rex pane and saves `<!-- agent: BLOCK SESSION -->` in the
-deck, so the recipient survives restarting nvim.
+presenting agent's pane and saves `<!-- agent: PANE -->` (a `wt pane` ref) in
+the deck, so the recipient survives restarting nvim. Decks saved with the older
+`<!-- agent: BLOCK SESSION -->` still work in Rex.
 Only one send runs at a time. Failures stay visible; if the text was sent but
 Enter failed, `:send` retries Enter without pasting the batch again. Submission
-means Rex accepted the input; the agent's reply in the deck confirms it was
+means the multiplexer accepted the input; the agent's reply in the deck confirms it was
 handled. Send tracking lasts for the panel's lifetime; after restarting it,
 comments without a reply can be submitted again. If the pane accepted a send
 but the agent missed it, `:send!` explicitly resubmits comments without a reply.
@@ -102,7 +106,7 @@ Replies can use `> **agent:**`, `> **ChatGPT:**`, `> **Codex:**`, or the older
 
 If the recipient's session or pane disappears, comments stay in the deck and
 the failed send stays visible. Before sending, the panel checks for existing
-agents in **the same Rex tab as nvim**. It keeps the saved recipient if that
+agents in **the same tab as nvim** (a Rex tab or a tmux window). It keeps the saved recipient if that
 agent is still there, reconnects to the sole agent otherwise, or opens a picker
 when several agents are running. `:Reconnect` explicitly finds an agent in
 that tab and offers a choice when there are several. It detects Claude Code,
@@ -118,11 +122,14 @@ present it again with `review-show slides`.
 
 When a response is needed, the agent runs
 `.wt/bin/review-show status waiting 'Comments needed: deployment options'`.
-The panel reports this through Rex's program status protocol (OSC 7501), on
-its own pane. Merely showing slides does not request attention. Unsent comments,
-sending, and send failures update that status; successful submission clears
-the request. `.wt/bin/review-show status idle` withdraws a request. Rex controls
-how activity appears and whether it produces notifications or sounds.
+In Rex the panel reports this through Rex's program status protocol (OSC
+7501), on its own pane, and Rex controls how activity appears and whether it
+produces notifications or sounds. In tmux it rings the bell once on becoming
+blocked, which flags the window in the status line, and puts the message in
+its pane title (`#{pane_title}`, shown with `pane-border-status`). Merely
+showing slides does not request attention. Unsent comments, sending, and send
+failures update that status; successful submission clears the request.
+`.wt/bin/review-show status idle` withdraws a request.
 
 Personal or team review process goes in a layer of its own, e.g.
 `~/.config/wt/kits/review/` with an `AGENTS.md` and extra skills.
@@ -131,8 +138,9 @@ Personal or team review process goes in a layer of its own, e.g.
 
 `wt kit subagents` makes an agent ask, before it hands substantial work to
 subagents, whether they should be its harness's built-in ephemeral ones or
-full agent sessions in their own Rex tabs, which you can switch to and steer.
-For tabs, its `subagent-tabs` skill opens each one with `rex window new`, in
+full agent sessions in their own tabs (Rex or tmux windows), which you can
+switch to and steer. For tabs, its `subagent-tabs` skill opens each one with
+`wt pane window`, in
 the current workspace or, for parallel edits, a fresh one from `wt new`. The
 brief and the result pass through `.wt/agents/<name>/`. A result ends with
 the decisions it needs from you, and when your answers change what running
@@ -168,7 +176,7 @@ The pickers open in NORMAL mode, like the old wt:
 ## Install
 
 Requires `git`, `fzf`, and bash 4 or newer (on macOS, `brew install bash`).
-The review kit also needs `gh`, `jq`, and `nvim`, with `rex` for the panel.
+The review kit also needs `gh`, `jq`, and `nvim`, with Rex or tmux for the panel.
 
 ```sh
 ln -s "$PWD/bin/wt" ~/bin/wt
@@ -177,17 +185,44 @@ echo "source $PWD/shell/wt.sh" >> ~/.zshrc
 
 The shell function is what lets `wt` change your directory.
 
+## Panes
+
+`wt pane` is the one place wt talks to a terminal multiplexer. Kits and skills
+use it instead of `rex` or `tmux` directly, so the panel, `:send` and subagent
+tabs work in either, and another multiplexer is one backend away.
+
+```
+wt pane here                                  # this pane's ref
+wt pane split --label nvim -- nvim -i NONE    # open a pane beside this one; prints its ref
+wt pane window api-tests -- claude "…"        # open a tab
+wt pane agents                                # coding agents in this tab, as JSON
+wt pane send REF 'text' && wt pane key REF enter
+wt pane capture REF
+```
+
+A ref names one pane from anywhere, so it can be saved and used later from any
+other pane: `rex:SESSION/BLOCK` or `tmux:%PANE@SOCKET`. Inside Rex
+(`REX_SESSION` set) the backend is Rex; inside tmux (`TMUX`), tmux. An agent is
+a pane whose foreground process is Claude Code, Codex, OpenCode or pi; in tmux
+that's read from the foreground process group of the pane's terminal. Kits
+that use it link it into `.wt/bin/wt-pane`. `tests/wt-pane.sh` checks both
+backends (Rex against a fake `rex`, tmux against a server of its own).
+
 ## Skills
 
 `skills/` holds skills for any harness, outside kits. `nvim-panel` steers
 agents to show you code, docs and diffs in one reused nvim pane beside them
 (Rex or tmux), with your own config and unified.nvim for diffs, instead of
-HTML pages or fresh panes. Install it for every session with:
+HTML pages or fresh panes. Install them for every session with:
 
 ```sh
-ln -s "$PWD/skills/nvim-panel" ~/.agents/skills/nvim-panel
-ln -s ../../.agents/skills/nvim-panel ~/.claude/skills/nvim-panel
+wt skills link            # wt skills lists them and what's linked
 ```
+
+That links each into `~/.agents/skills` (Codex, pi, opencode) and
+`~/.claude/skills` (Claude Code), pointing at this checkout. A copy already in
+the way stays put unless you pass `--force`, which moves it to
+`~/.local/state/wt/skills-aside/`.
 
 ## Profiling agents
 

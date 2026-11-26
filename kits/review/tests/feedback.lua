@@ -11,6 +11,7 @@ io.stdout = {
   flush = function() end,
 }
 vim.env.REX_SESSION = 'test-session'
+vim.g.wt_pane = 'wt-pane'
 vim.notify = function(msg) notices[#notices + 1] = msg end
 vim.system = function(argv, opts, cb)
   assert(opts.timeout == 15000)
@@ -32,7 +33,8 @@ end
 local function bar(text) contains(vim.wo.winbar, text) end
 local function target(i, block, session)
   local argv = calls[i].argv
-  eq({ unpack(argv, #argv - 3) }, { '-s', session, '-b', block })
+  eq(argv[1], 'wt-pane')
+  eq(argv[3], 'rex:' .. session .. '/' .. block)
 end
 local function write(name, lines)
   local path = tmp .. '/' .. name
@@ -41,7 +43,7 @@ local function write(name, lines)
 end
 
 local resolve_recipient = function(preferred, cb)
-  cb(nil, preferred or { block = 'fallback', session = 'test-session', agent = 'codex' })
+  cb(nil, { ref = preferred or 'rex:test-session/fallback', agent = 'codex' })
 end
 local ok, err = xpcall(function()
   local panel = assert(loadfile('kits/review/nvim/review.lua'))({
@@ -70,7 +72,7 @@ local ok, err = xpcall(function()
   vim.cmd('Send')
   eq(calls[2].argv[2], 'send') -- failed paste remains retryable
   reply(2)
-  eq(calls[3].argv[2], 'send-key')
+  eq(calls[3].argv[2], 'key')
   reply(3, 1)
   status('blocked', 'Send failed')
   bar('send failed') -- Enter failure must not mark comments sent
@@ -82,7 +84,7 @@ local ok, err = xpcall(function()
     '> **' .. vim.env.USER .. ':** second' }, a)
   panel.slides(a, 1, 'agent-a', 'session-a')
   vim.cmd('Send')
-  eq(calls[4].argv[2], 'send-key')
+  eq(calls[4].argv[2], 'key')
   target(4, 'agent-a', 'session-a')
   reply(4)
   bar('1 unsent')
@@ -90,8 +92,8 @@ local ok, err = xpcall(function()
 
   -- Changing decks during the async calls must not mark the new deck sent.
   vim.cmd('Send')
-  contains(calls[5].argv[3], 'second')
-  assert(not calls[5].argv[3]:find('"first"', 1, true))
+  contains(calls[5].argv[4], 'second')
+  assert(not calls[5].argv[4]:find('"first"', 1, true))
   local b = write('b.md', { '<!-- agent: old-agent old-session -->', '# Other',
     '> **' .. vim.env.USER .. ':** other' })
   panel.slides(b, 1, 'agent-b', 'session-b')
@@ -142,7 +144,7 @@ local ok, err = xpcall(function()
   -- Accepted input is not an acknowledgement from the agent. A deliberate
   -- resend is available, but already answered comments must never reappear.
   vim.cmd('Send!')
-  contains(calls[13].argv[3], 'third')
+  contains(calls[13].argv[4], 'third')
   reply(13)
   reply(14)
   vim.fn.writefile({ '# Choice', '> **' .. vim.env.USER .. ':** third',
@@ -173,7 +175,7 @@ local ok, err = xpcall(function()
   reply(#calls, 1)
   status('blocked', 'Send failed')
   eq(panel.bind(d, 'replacement', 'new-session'), 0)
-  eq(vim.fn.readfile(d)[1], '<!-- agent: replacement new-session -->')
+  eq(vim.fn.readfile(d)[1], '<!-- agent: rex:new-session/replacement -->')
   contains(table.concat(vim.fn.readfile(d), '\n'), 'keep this feedback')
   vim.cmd('Send')
   target(#calls, 'replacement', 'new-session')
@@ -187,7 +189,7 @@ local ok, err = xpcall(function()
   vim.cmd('Send')
   eq(calls[#calls].argv[2], 'send')
   target(#calls, 'replacement-2', 'new-session-2')
-  contains(calls[#calls].argv[3], 'keep this feedback')
+  contains(calls[#calls].argv[4], 'keep this feedback')
   local header = vim.fn.readfile(d)[1]
   local err = panel.bind(d, 'wrong-pane', 'wrong-session')
   contains(err, 'being sent')
@@ -230,8 +232,8 @@ local ok, err = xpcall(function()
   reply(#calls)
   reply(#calls, 1)
   resolve_recipient = function(preferred, cb)
-    eq(preferred, { block = 'old-pane', session = 'old-session' })
-    cb(nil, { block = 'existing-agent', session = 'same-tab-session', agent = 'codex' })
+    eq(preferred, 'rex:old-session/old-pane')
+    cb(nil, { ref = 'rex:same-tab-session/existing-agent', agent = 'codex' })
   end
   vim.cmd('Send')
   eq(calls[#calls].argv[2], 'send') -- full text, not Enter on the replacement
@@ -254,9 +256,32 @@ local ok, err = xpcall(function()
   resolve_recipient = function(_, cb) resolve_callback = cb end
   vim.cmd('Send!')
   panel.slides(a, 1)
-  resolve_callback(nil, { block = 'existing-agent', session = 'same-tab-session', agent = 'codex' })
+  resolve_callback(nil, { ref = 'rex:same-tab-session/existing-agent', agent = 'codex' })
   eq(#calls, before_reconnect)
   contains(notices[#notices], 'deck or recipient changed')
+
+  -- tmux: a ref passes through as it is, and attention is a bell (once, on
+  -- becoming blocked) plus the pane title.
+  vim.env.REX_SESSION, vim.env.TMUX = nil, '/tmp/tmux-test,1,0'
+  resolve_recipient = function(preferred, cb) cb(nil, { ref = preferred, agent = 'claude' }) end
+  local t = write('tmux.md', { '# Over tmux', '> **' .. vim.env.USER .. ':** via tmux' })
+  eq(panel.slides(t, 1, 'tmux:%7@/tmp/tmux-test'), 0)
+  eq(vim.fn.readfile(t)[1], '<!-- agent: tmux:%7@/tmp/tmux-test -->')
+  contains(reports[#reports], 'review: 1 comments unsent')
+  contains(reports[#reports], '\7')
+  local before_ask = #reports
+  panel.status('waiting', 'Comments needed: tmux')
+  eq(#reports, before_ask) -- unsent comments still take precedence; no second bell
+  vim.cmd('Send')
+  eq({ unpack(calls[#calls].argv, 1, 3) }, { 'wt-pane', 'send', 'tmux:%7@/tmp/tmux-test' })
+  contains(calls[#calls].argv[4], 'via tmux')
+  reply(#calls)
+  eq(calls[#calls].argv, { 'wt-pane', 'key', 'tmux:%7@/tmp/tmux-test', 'enter' })
+  reply(#calls)
+  contains(reports[#reports], '\27]2;review\27\\')
+  -- Outside Rex, a bare block can't be turned into a ref.
+  contains(panel.bind(t, 'some-block'), 'pane ref')
+  eq(vim.fn.readfile(t)[1], '<!-- agent: tmux:%7@/tmp/tmux-test -->')
 end, debug.traceback)
 
 io.stdout = stdout

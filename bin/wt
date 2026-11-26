@@ -7,7 +7,8 @@
 #   wt kit [KIT...]          prime the current workspace with kits (no args: list)
 #   wt root                  print the current workspace
 #   wt repos                 list the repos wt can check out
-#   wt CMD ...               run wt-CMD from a kit's bin/ or PATH (wt review, ...)
+#   wt pane ...              drive the Rex or tmux pane you're in (see wt pane --help)
+#   wt CMD ...               run wt-CMD from a kit's bin/, wt's bin/ or PATH (wt review, ...)
 #
 # A workspace is $WT_HOME/<name>/repos/<repo>, one git worktree per repo on
 # branch <name>, cut from each repo's default branch. REPO@REF checks out REF
@@ -413,6 +414,8 @@ run_external() {
   while IFS= read -r l; do
     for b in "$l"/*/bin/"wt-$cmd"; do [[ -x "$b" ]] && ext="$b"; done
   done < <(kit_layers "$(ws_of 2>/dev/null || true)")
+  # wt's own commands sit beside it, so they work without being on PATH.
+  [[ -n "$ext" || ! -x "${WT_SELF%/*}/wt-$cmd" ]] || ext="${WT_SELF%/*}/wt-$cmd"
   [[ -n "$ext" ]] || ext=$(command -v "wt-$cmd") ||
     die "unknown command '$cmd' (try: wt search, wt new, wt add, wt kit, wt root, wt repos)"
   exec "$ext" "$@"
@@ -431,6 +434,6 @@ case "${1:-search}" in
   root)     ws_of "${2:-.}" || die "not in a workspace" ;;
   repos)    list_repos ;;
   _preview) preview "$2" ;;
-  -h|--help|help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//' ;;
+  -h|--help|help) sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//' ;;
   *)        run_external "$@" ;;
 esac

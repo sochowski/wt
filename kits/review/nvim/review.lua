@@ -26,7 +26,10 @@
 
 local M = {}
 -- The optional dependency lets delivery tests control discovery independently.
-local recipient = ... or dofile(vim.fn.fnamemodify(debug.getinfo(1, 'S').source:sub(2), ':h') .. '/recipient.lua')
+local here = vim.fn.fnamemodify(debug.getinfo(1, 'S').source:sub(2), ':p:h')
+local recipient = ... or dofile(here .. '/recipient.lua')
+-- Panes are reached through wt's multiplexer adapter, so Rex and tmux work alike.
+local function wt_pane() return vim.g.wt_pane or vim.fn.fnamemodify(here .. '/../../../bin/wt-pane', ':p') end
 local uv = vim.uv or vim.loop
 local root = vim.fn.getcwd()
 local main = vim.api.nvim_get_current_win()
@@ -90,7 +93,7 @@ local function agent_reply(line)
   return name and agent_names[name:lower()] and line:sub(1, #ME) ~= ME
 end
 local sent = {} -- deck path -> { [heading .. '\0' .. text] = true }
-local owners = {} -- deck path -> { block, session }, set by review-show
+local owners = {} -- deck path -> pane ref (rex:SESSION/BLOCK or tmux:%PANE@SOCKET), set by review-show
 -- One batch at a time. Keep a pasted batch on Enter failure so :send can
 -- retry submission without typing it twice. Callbacks always use this snapshot.
 local delivery = nil
@@ -99,8 +102,24 @@ local last_status = nil
 local finding = false
 local recipient_error = nil
 
+-- tmux has no activity protocol: a bell flags the window in its status line,
+-- and the pane title carries the message.
+local function tmux_activity(state, msg)
+  local report = state .. ':' .. (msg or '')
+  if report == last_status then return end
+  local was_blocked = (last_status or ''):sub(1, 8) == 'blocked:'
+  last_status = report
+  local title = state == 'clear' and 'review' or ('review: ' .. (msg or state))
+  title = title:gsub('%c', ' ')
+  io.stdout:write('\27]2;' .. title .. '\27\\' .. ((state == 'blocked' and not was_blocked) and '\7' or ''))
+  io.stdout:flush()
+end
+
 local function activity(state, msg)
-  if not vim.env.REX_SESSION then return end
+  if not vim.env.REX_SESSION then
+    if vim.env.TMUX then tmux_activity(state, msg) end
+    return
+  end
   local report = 'state=' .. state .. ':id=wt-review:app=wt'
   if state == 'blocked' then report = report .. ':kind=question' end
   if msg then
@@ -156,10 +175,23 @@ local function comments(slide, i, path)
   return out
 end
 
+local function is_ref(s)
+  return type(s) == 'string' and (s:match('^rex:[^/]+/.+$') or s:match('^tmux:%%[^@]+@.+$')) ~= nil
+end
+
+-- A pane ref from review-show's arguments: a ref, or the older Rex BLOCK SESSION pair.
+local function as_ref(block, session)
+  if not block or block == '' then return nil end
+  if is_ref(block) then return block end
+  session = session ~= '' and session or vim.env.REX_SESSION
+  if session and session ~= '' then return 'rex:' .. session .. '/' .. block end
+end
+
+-- The deck's saved recipient: <!-- agent: REF -->, or <!-- agent: BLOCK SESSION --> from before refs.
 local function agent_target(lines)
   for _, l in ipairs(lines) do
-    local block, session = l:match('<!%-%-%s*agent:%s*(%S+)%s*(%S*)%s*%-%->')
-    if block then return block, session ~= '' and session or nil end
+    local a, b = l:match('<!%-%-%s*agent:%s*(%S+)%s*(%S*)%s*%-%->')
+    if a then return as_ref(a, b) end
   end
 end
 
@@ -847,10 +879,9 @@ local function deliver(force)
   -- Reuse a pasted batch and its target, even if the deck has been edited.
   if not (delivery and delivery.pasted) then
     local lines = vim.fn.readfile(deck.path)
-    local block, session = agent_target(lines)
-    if owners[deck.path] then block, session = unpack(owners[deck.path]) end
-    if not block then
-      return vim.notify('this deck has no <!-- agent: BLOCK SESSION --> line, so there is nowhere to send', vim.log.levels.WARN)
+    local ref = owners[deck.path] or agent_target(lines)
+    if not ref then
+      return vim.notify('this deck has no <!-- agent: PANE --> line, so there is nowhere to send', vim.log.levels.WARN)
     end
     local slides = split(lines)
     local fresh, parts = {}, {}
@@ -865,9 +896,7 @@ local function deliver(force)
     if #fresh == 0 then render(); return vim.notify('nothing new to send') end
     local msg = string.format('New comments in %s, reply under each one in the deck: %s',
       deck.path, table.concat(parts, ' · '))
-    local target = { '-b', block }
-    if session then target = { '-s', session, '-b', block } end
-    delivery = { path = deck.path, keys = fresh, target = target, msg = msg, pasted = false, attention = attention }
+    delivery = { path = deck.path, keys = fresh, target = ref, msg = msg, pasted = false, attention = attention }
   end
   local batch = delivery
   batch.busy = true
@@ -880,15 +909,15 @@ local function deliver(force)
         or 'Check the agent pane before :send retries; a failed request may have partially arrived.')
       .. '\nIf the agent is gone, :send checks for another in this tab; :Reconnect lets you choose.', vim.log.levels.ERROR)
   end
-  local function rex(args, cb)
-    local argv = vim.list_extend({ 'rex' }, vim.list_extend(vim.deepcopy(args), batch.target))
+  local function pane(verb, arg, cb)
+    local argv = { wt_pane(), verb, batch.target, arg }
     local ok, err = pcall(vim.system, argv, { text = true, timeout = 15000 }, function(r)
       vim.schedule(function() cb(r) end)
     end)
-    if not ok then failed('rex', { stderr = tostring(err) }) end
+    if not ok then failed('wt pane', { stderr = tostring(err) }) end
   end
   local function submit()
-    rex({ 'send-key', 'enter' }, function(r)
+    pane('key', 'enter', function(r)
       if r.code ~= 0 then return failed('Enter', r) end
       sent[batch.path] = sent[batch.path] or {}
       for _, k in ipairs(batch.keys) do sent[batch.path][k] = true end
@@ -900,7 +929,7 @@ local function deliver(force)
     end)
   end
   if batch.pasted then return submit() end
-  rex({ 'send', batch.msg }, function(r)
+  pane('send', batch.msg, function(r)
     if r.code ~= 0 then return failed('Send', r) end
     batch.pasted = true
     submit()
@@ -913,9 +942,8 @@ local function connect(then_send, choose)
     return vim.notify('finish reconnecting ' .. delivery.path .. ' first', vim.log.levels.WARN)
   end
   local path, owner = deck.path, owners[deck.path]
-  local block, session = agent_target(vim.fn.readfile(path))
-  if owner then block, session = unpack(owner) end
-  local preferred = not choose and block and { block = block, session = session } or nil
+  local saved = owner or agent_target(vim.fn.readfile(path))
+  local preferred = not choose and saved or nil
   finding, recipient_error = true, nil
   render()
   recipient.resolve(preferred, function(err, candidate)
@@ -925,7 +953,7 @@ local function connect(then_send, choose)
       return vim.notify('deck or recipient changed; run :send or :Reconnect again', vim.log.levels.WARN)
     end
     if not err then
-      local result = M.bind(path, candidate.block, candidate.session)
+      local result = M.bind(path, candidate.ref)
       if result ~= 0 then err = result end
     end
     finding, recipient_error = false, err
@@ -954,7 +982,7 @@ local keys_help = {
   '  ]n  /  [n                next / previous slide still in discussion',
   '  S  or  :send             send new comments to the agent (again whenever you add more)',
   '  :send!                   resend unreplied comments if the agent missed a submission',
-  '  :Reconnect               find an existing agent in this Rex tab; choose if several',
+  '  :Reconnect               find an existing agent in this tab; choose if several',
   'Diff pane (these work from the slides too)',
   '  ]p [p  ]f [f  ]c [c      next / previous PR, file, hunk (with a count)',
   '  gf  or  <CR>             open the file at this line (head side; base side on a - line)',
@@ -1066,16 +1094,16 @@ end
 -- focus or a pane label. Persist the recipient so a restarted panel can find it.
 function M.bind(path, block, session)
   path = resolve(path)
-  if not block or block == '' or not session or session == '' then return 'bind needs a Rex block and session' end
+  local ref = as_ref(block, session)
+  if not ref then return 'bind needs a pane ref (from wt pane here)' end
   local ok, lines = pcall(vim.fn.readfile, path)
   if not ok then return 'cannot read deck: ' .. path end
-  local old_block, old_session = agent_target(lines)
-  if owners[path] then old_block, old_session = unpack(owners[path]) end
-  local changed = old_block ~= block or old_session ~= session
+  local old = owners[path] or agent_target(lines)
+  local changed = old ~= ref
   if changed and delivery and delivery.path == path and delivery.busy then
     return 'comments are being sent; wait for the send to finish before reconnecting this deck'
   end
-  local header = '<!-- agent: ' .. block .. ' ' .. session .. ' -->'
+  local header = '<!-- agent: ' .. ref .. ' -->'
   local found, dirty = false, false
   for i, l in ipairs(lines) do
     if l:match('^%s*<!%-%-%s*agent:') then
@@ -1089,7 +1117,7 @@ function M.bind(path, block, session)
     local wrote, result = pcall(vim.fn.writefile, lines, path)
     if not wrote or result ~= 0 then return 'cannot save deck recipient: ' .. path end
   end
-  owners[path] = { block, session }
+  owners[path] = ref
   recipient_error = nil
   if changed then
     -- An Enter retry belongs to the old pane. The replacement must receive

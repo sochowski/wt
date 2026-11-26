@@ -13,13 +13,13 @@ The user reads code, docs and diffs in nvim, with their own config, in a termina
 - Always pass `-i NONE`. Their ShaDa file is damaged, and without it nvim stops at "Press ENTER".
 - Show diffs in **unified.nvim** (`:Unified <base>`). Don't use diffview, a `.diff` file or `git diff` output, unless it's a range unified can't show (see below).
 - Markdown, not HTML. Write docs and slides as `.md` files and open them in the panel. render-markdown renders them, including mermaid blocks.
-- Don't take focus. Open the pane without focusing it (`--focus=false` in Rex, `-d` in tmux), and never `:q` or `:qa` the panel; open over what's there.
+- Don't take focus (`wt pane split` doesn't, unless told to), and never `:q` or `:qa` the panel; open over what's there.
 - After showing something, say in one line what's up and where to look (`path:line`).
 - In a review workspace (`.wt/review.sock` exists), use `.wt/bin/review-show` for slides and docs instead. It drives the same kind of panel.
 
 ## The panel
 
-One nvim listening on a socket. Find it, or start it in a split of whichever multiplexer you're in, then send it commands. The socket is the same either way, so everything after the split doesn't depend on the multiplexer.
+One nvim listening on a socket. Find it, or start it beside you with `wt pane split`, which works in Rex and in tmux alike. The socket is the same either way, so nothing after the split depends on the multiplexer.
 
 ```bash
 root=$(command wt root 2>/dev/null || git rev-parse --show-toplevel 2>/dev/null || pwd)
@@ -30,15 +30,11 @@ alive() { [[ -S "$sock" ]] && perl -e 'alarm 2; exec @ARGV' nvim --server "$sock
 start=(nvim -i NONE --listen "$sock")
 if ! alive; then
   rm -f "$sock"
-  if [[ -n "${REX_SESSION:-}" && -n "${REX_BLOCK:-}" ]]; then        # Rex
-    rex split -s "$REX_SESSION" -b "$REX_BLOCK" --split=right --ratio 50 --label nvim \
-      --focus=false -c "$root" -- "${start[@]}" >/dev/null
-  elif [[ -n "${TMUX:-}" && -n "${TMUX_PANE:-}" ]]; then             # tmux
-    tmux split-window -h -d -l 50% -t "$TMUX_PANE" -c "$root" "${start[@]}"
+  if command wt pane split --label nvim --cwd "$root" -- "${start[@]}" > "$sock.pane"; then
+    for _ in $(seq 50); do alive && break; sleep 0.1; done
   else
     echo "No Rex or tmux pane to split. Ask the user to run: cd $root && ${start[*]}"
   fi
-  for _ in $(seq 50); do alive && break; sleep 0.1; done
 fi
 
 # Run Ex commands in it. execute() returns, so nothing hangs.
@@ -47,19 +43,11 @@ panel() { perl -e 'alarm 5; exec @ARGV' nvim --server "$sock" --remote-expr "exe
 
 Every Bash call is a new shell, so define these in the same call that uses them. If you're in neither multiplexer, ask the user to start the panel with the printed command, then carry on once `alive` succeeds. If the panel doesn't come up, or a call times out, tell the user. Don't fall back to another viewer.
 
-## Rex
+`$sock.pane` holds the panel's pane ref. Use it with `wt pane` (`wt pane --help` for the rest):
 
-- **Pane IDs:** `REX_SESSION` and `REX_BLOCK` are set in your shell; `REX_BLOCK` is your own pane, which the panel splits from. If a command can't find them, run `rex whoami --json` to see where you're connected.
-- **Label:** the panel is labelled `nvim`, so Rex commands can target it with `-b nvim` in your session.
-- **Stuck panel:** if a call times out, `rex capture -s "$REX_SESSION" -b nvim --trim` prints its screen. If nvim is at a prompt, tell the user what it says. Don't send keys to it unless they ask.
-- **Focus:** the panel opens with `--focus=false`. If the user asks to jump to it, run `rex focus -s "$REX_SESSION" nvim`.
-- **Placement:** the panel goes to the right of your pane at 50%. Only use `rex resize`, `rex move` or `rex zoom` on it when asked.
-- **More:** for anything beyond this, read the `rex` skill (or `rex skill show`).
-
-## tmux
-
-- **Pane ID:** `TMUX_PANE` is your own pane. `split-window -d` opens the panel to its right without focusing it.
-- **Stuck panel:** if a call times out, `tmux capture-pane -p -t <pane>` prints its screen. Get the pane ID from `tmux list-panes -F '#{pane_id} #{pane_current_command}'`.
+- **Stuck panel:** if a call times out, `wt pane capture "$(cat "$sock.pane")" | tail -30` shows its screen. If nvim is at a prompt, tell the user what it says. Don't send keys to it unless they ask.
+- **Focus:** if the user asks to jump to it, `wt pane focus "$(cat "$sock.pane")"`.
+- **Placement:** it opens right of your pane at 50%. Rearrange it only when asked, with the multiplexer's own commands (in Rex, read the `rex` skill).
 
 ## What to send
 
