@@ -1,0 +1,317 @@
+#!/usr/bin/env bash
+# wt pane — one interface to the terminal multiplexer you're running in.
+#
+#   wt pane backend                    rex, tmux or none
+#   wt pane here                       this pane's ref
+#   wt pane split [OPTS] [-- CMD...]   open a pane beside one; prints the new ref
+#        --from REF (default: here)  --dir right|below  --size PCT (default 50)
+#        --label TEXT  --cwd DIR  --focus  --keep-open
+#   wt pane window NAME [OPTS] [-- CMD...]
+#                                      open a window (a Rex or tmux tab); prints its ref
+#        --cwd DIR  --focus  --keep-open
+#   wt pane info REF                   JSON: ref, window, label, command, pid, cwd, agent
+#   wt pane agents [REF]               JSON array of coding-agent panes in REF's
+#                                      window (default: here), REF itself excluded
+#   wt pane send REF TEXT              type TEXT into the pane (no Enter)
+#   wt pane key REF KEY...             press keys: enter, escape, tab, ctrl+c, ...
+#   wt pane capture REF                print the pane's screen and scrollback
+#   wt pane alive REF                  exit 0 if the pane still exists
+#   wt pane focus REF                  bring the pane to the front
+#
+# A ref names one pane wherever it lives, so it can be saved and used from any
+# other pane: rex:SESSION/BLOCK or tmux:%PANE@SOCKET. In Rex (REX_SESSION or
+# REX_BLOCK set) the backend is Rex; in tmux (TMUX and TMUX_PANE), tmux. With neither, `here`,
+# `split` and `window` fail, and refs saved elsewhere still work.
+#
+# An agent is a pane whose foreground process is Claude Code, Codex, OpenCode or
+# pi. Only the foreground counts: an agent behind a shell isn't one.
+set -euo pipefail
+
+die() { printf 'wt pane: %s\n' "$*" >&2; exit 1; }
+usage() { sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; }
+
+# ── helpers ──────────────────────────────────────────────────────────────────
+
+json_str() {
+  local s="$1"
+  s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; s="${s//$'\n'/\\n}"; s="${s//$'\t'/\\t}"; s="${s//$'\r'/\\r}"
+  printf '"%s"' "$s"
+}
+json_num() { [[ "$1" =~ ^[0-9]+$ ]] && printf '%s' "$1" || printf null; }
+json_opt() { [[ -n "$1" ]] && json_str "$1" || printf null; }
+
+AGENTS="claude codex opencode pi"
+# The agent's name if any of these words (a path, a script, argv) is one.
+agent_of() {
+  local w b
+  for w in "$@"; do
+    b="${w##*/}"
+    [[ " $AGENTS " == *" $b "* ]] && { printf '%s' "$b"; return; }
+    case "$w" in
+      */@anthropic-ai/claude-code/*) printf claude; return ;;
+      */@openai/codex/*)             printf codex; return ;;
+      */pi-coding-agent/*)           printf pi; return ;;
+      */opencode-ai/*)               printf opencode; return ;;
+    esac
+  done
+}
+
+backend() {
+  if [[ -n "${REX_SESSION:-}${REX_BLOCK:-}" ]]; then echo rex
+  elif [[ -n "${TMUX:-}" && -n "${TMUX_PANE:-}" ]]; then echo tmux
+  else echo none
+  fi
+}
+
+# Split a ref into its backend and parts: sets KIND, A, B.
+parse() {
+  local ref="$1"
+  case "$ref" in
+    rex:*/*)  KIND=rex;  A="${ref#rex:}"; B="${A#*/}"; A="${A%%/*}" ;;   # A session, B block
+    tmux:%*@*) KIND=tmux; A="${ref#tmux:}"; B="${A#*@}"; A="${A%%@*}" ;; # A pane id, B socket
+    *) die "not a pane ref: '$ref' (want rex:SESSION/BLOCK or tmux:%PANE@SOCKET)" ;;
+  esac
+}
+
+# ── tmux ─────────────────────────────────────────────────────────────────────
+
+tsock() { printf '%s' "${TMUX%%,*}"; }
+tm() { local s="$1"; shift; tmux -S "$s" "$@"; }
+tref() { printf 'tmux:%s@%s' "$1" "$2"; }
+# `display -t` on a missing pane prints nothing and still succeeds, so ask the list.
+texists() { tm "$2" list-panes -a -F '#{pane_id}' 2> /dev/null | grep -qxF "$1"; }
+
+# The foreground process group's leader on a pane's terminal: "pid<TAB>comm<TAB>args".
+tmux_foreground() {
+  local pid="$1" tpgid
+  tpgid=$(ps -o tpgid= -p "$pid" 2>/dev/null | tr -d ' ') || return 0
+  [[ "$tpgid" =~ ^[0-9]+$ ]] || return 0
+  ps -A -o pid=,comm=,args= | awk -v g="$tpgid" '$1 == g {
+      pid = $1; comm = $2; $1 = ""; $2 = ""; sub(/^  */, ""); printf "%s\t%s\t%s\n", pid, comm, $0; exit }'
+}
+
+tmux_info() {
+  local id="$1" sock="$2" line win label cur ppid cwd fg pid="" comm="" args="" agent
+  texists "$id" "$sock" || die "no tmux pane $id"
+  line=$(tm "$sock" display -p -t "$id" \
+    $'#{window_id}\t#{pane_title}\t#{pane_current_command}\t#{pane_pid}\t#{pane_current_path}') ||
+    die "no tmux pane $id"
+  IFS=$'\t' read -r win label cur ppid cwd <<< "$line"
+  fg=$(tmux_foreground "$ppid")
+  [[ -n "$fg" ]] && IFS=$'\t' read -r pid comm args <<< "$fg"
+  # args are split on spaces, which is enough to see argv0 and a script path.
+  # shellcheck disable=SC2086
+  agent=$(agent_of "$comm" $args)
+  printf '{"ref":%s,"window":%s,"label":%s,"command":%s,"pid":%s,"cwd":%s,"agent":%s}\n' \
+    "$(json_str "$(tref "$id" "$sock")")" "$(json_str "$win")" "$(json_str "$label")" \
+    "$(json_str "${comm:-$cur}")" "$(json_num "${pid:-$ppid}")" "$(json_str "$cwd")" "$(json_opt "$agent")"
+}
+
+tmux_agents() {
+  local id="$1" sock="$2" win p info sep=""
+  texists "$id" "$sock" || die "no tmux pane $id"
+  win=$(tm "$sock" display -p -t "$id" '#{window_id}') || die "no tmux pane $id"
+  printf '['
+  for p in $(tm "$sock" list-panes -t "$win" -F '#{pane_id}'); do
+    [[ "$p" == "$id" ]] && continue
+    info=$(tmux_info "$p" "$sock") || die "could not inspect tmux pane $p"
+    [[ "$info" == *'"agent":null}' ]] && continue
+    printf '%s%s' "$sep" "$info"; sep=,
+  done
+  printf ']\n'
+}
+
+# ── rex ──────────────────────────────────────────────────────────────────────
+
+rref() { printf 'rex:%s/%s' "$1" "$2"; }
+need_jq() { command -v jq > /dev/null || die "the Rex backend needs jq"; }
+
+# A Rex process report → the agent's name, from the foreground process only.
+REX_AGENT='
+  def base: (. // "") | split("/") | last;
+  (.foreground // {}) as $p
+  | ([$p.name, $p.argv0, $p.path, $p.invoked_path, $p.script] | map(base)
+     | map(select(. == "claude" or . == "codex" or . == "opencode" or . == "pi")) | first)
+    // (($p.script // "") as $s
+        | if ($s | contains("/@anthropic-ai/claude-code/")) then "claude"
+          elif ($s | contains("/@openai/codex/")) then "codex"
+          elif ($s | contains("/pi-coding-agent/")) then "pi"
+          else null end)'
+
+rex_info_json() {  # session block window label → JSON
+  local s="$1" b="$2" win="$3" label="$4" proc
+  proc=$(rex block call -s "$s" -b "$b" process) || return 1
+  jq -ce --arg ref "$(rref "$s" "$b")" --arg win "$win" --arg label "$label" "
+    ($REX_AGENT) as \$agent | (.foreground // {}) as \$p
+    | {ref: \$ref, window: \$win, label: \$label, command: (\$p.name // null),
+       pid: (\$p.pid // null), cwd: (\$p.cwd // null), agent: \$agent}" <<< "$proc"
+}
+
+rex_info() {
+  local s="$1" b="$2" meta
+  need_jq
+  meta=$(rex block ls -s "$s" --json | jq -er --arg b "$b" \
+    '.blocks[] | select(.block_id == $b) | [.window_id, (.label // "")] | @tsv') || die "no Rex block $b in $s"
+  rex_info_json "$s" "$b" "${meta%%$'\t'*}" "${meta#*$'\t'}" || die "could not inspect Rex block $b"
+}
+
+rex_agents() {
+  local s="$1" b="$2" win list pane label out sep="" failed=""
+  need_jq
+  win=$(rex block ls -s "$s" --json | jq -er --arg b "$b" '.blocks[] | select(.block_id == $b) | .window_id') ||
+    die "no Rex block $b in $s"
+  list=$(rex block ls -s "$s" -w "$win" --json | jq -r --arg b "$b" --arg w "$win" '
+    .blocks[] | select(.block_id != $b and .window_id == $w and .creator_name == "com.superlogical.terminal")
+    | [.block_id, (.label // "")] | @tsv') || die "invalid pane list from Rex"
+  printf '['
+  while IFS=$'\t' read -r pane label; do
+    [[ -n "$pane" ]] || continue
+    if ! out=$(rex_info_json "$s" "$pane" "$win" "$label"); then failed="$pane"; continue; fi
+    [[ $(jq -r .agent <<< "$out") == null ]] && continue
+    printf '%s%s' "$sep" "$out"; sep=,
+  done <<< "$list"
+  printf ']\n'
+  # A pane that couldn't be inspected might be the agent: don't pretend to know.
+  [[ -z "$failed" ]] || die "could not inspect every pane in this tab (Rex block $failed)"
+}
+
+# ── commands ─────────────────────────────────────────────────────────────────
+
+cmd_here() {
+  case "$(backend)" in
+    rex)  # whoami resolves this process's pane, which a process started in a
+          # new pane may not have in its environment.
+          local me
+          if command -v jq > /dev/null && me=$(rex whoami --json 2> /dev/null) &&
+             me=$(jq -er '"\(.session_id)/\(.block_id)"' <<< "$me" 2> /dev/null) && [[ "$me" != null/* && "$me" != */null ]]; then
+            printf 'rex:%s\n' "$me"
+          elif [[ -n "${REX_SESSION:-}" && -n "${REX_BLOCK:-}" ]]; then
+            rref "$REX_SESSION" "$REX_BLOCK"; echo
+          else
+            die "can't tell which Rex pane this is"
+          fi ;;
+    tmux) tref "$TMUX_PANE" "$(tsock)"; echo ;;
+    *)    die "not in a Rex or tmux pane" ;;
+  esac
+}
+
+cmd_split() {
+  local from="" dir=right size=50 label="" cwd="$PWD" focus=0 keep=0 out id
+  while (( $# )); do
+    case "$1" in
+      --from) from="$2"; shift 2 ;;  --dir) dir="$2"; shift 2 ;;
+      --size) size="$2"; shift 2 ;;  --label) label="$2"; shift 2 ;;
+      --cwd) cwd="$2"; shift 2 ;;    --focus) focus=1; shift ;;
+      --keep-open) keep=1; shift ;;  --) shift; break ;;
+      *) die "split: unknown option $1" ;;
+    esac
+  done
+  [[ "$dir" =~ ^(right|below)$ ]] || die "split: --dir is right or below"
+  [[ -n "$from" ]] || from=$(cmd_here)
+  parse "$from"
+  if [[ $KIND == rex ]]; then
+    need_jq
+    local args=(split -s "$A" -b "$B" --split="$dir" --ratio "$size" --focus=$( ((focus)) && echo true || echo false) -c "$cwd" --json)
+    [[ -n "$label" ]] && args+=(--label "$label")
+    (( keep )) && args+=(--keep-open)
+    (( $# )) && args+=(-- "$@")
+    out=$(rex "${args[@]}") || die "rex split failed"
+    id=$(jq -er '.block_ids[0]' <<< "$out") || die "rex split returned no block"
+    rref "$A" "$id"; echo
+  else
+    local args=(split-window -t "$A" -l "$size%" -c "$cwd" -P -F '#{pane_id}')
+    [[ $dir == right ]] && args+=(-h) || args+=(-v)
+    (( focus )) || args+=(-d)
+    (( $# )) && args+=("$@")
+    id=$(tm "$B" "${args[@]}") || die "tmux split-window failed"
+    [[ -n "$label" ]] && tm "$B" select-pane -t "$id" -T "$label"
+    (( keep )) && tm "$B" set-option -p -t "$id" remain-on-exit on
+    tref "$id" "$B"; echo
+  fi
+}
+
+cmd_window() {
+  local name="${1:-}" cwd="$PWD" focus=0 keep=0 out id sess
+  [[ -n "$name" ]] || die "usage: wt pane window NAME [--cwd DIR] [--focus] [--keep-open] [-- CMD...]"
+  shift
+  while (( $# )); do
+    case "$1" in
+      --cwd) cwd="$2"; shift 2 ;;  --focus) focus=1; shift ;;
+      --keep-open) keep=1; shift ;; --) shift; break ;;
+      *) die "window: unknown option $1" ;;
+    esac
+  done
+  case "$(backend)" in
+    rex)
+      need_jq
+      local args=(window new -s "$REX_SESSION" "$name" --focus=$( ((focus)) && echo true || echo false) -c "$cwd" --json)
+      (( keep )) && args+=(--keep-open)
+      (( $# )) && args+=(-- "$@")
+      out=$(rex "${args[@]}") || die "rex window new failed"
+      id=$(jq -er '.block_ids[0]' <<< "$out") || die "rex window new returned no block"
+      rref "$REX_SESSION" "$id"; echo ;;
+    tmux)
+      sess=$(tmux display -p -t "$TMUX_PANE" '#{session_id}')
+      local args=(new-window -t "$sess:" -n "$name" -c "$cwd" -P -F '#{pane_id}')
+      (( focus )) || args+=(-d)
+      (( $# )) && args+=("$@")
+      id=$(tmux "${args[@]}") || die "tmux new-window failed"
+      (( keep )) && tmux set-option -p -t "$id" remain-on-exit on
+      tref "$id" "$(tsock)"; echo ;;
+    *) die "not in a Rex or tmux pane" ;;
+  esac
+}
+
+tmux_key() {
+  local k="${1,,}"
+  case "$k" in
+    enter|return) echo Enter ;;  escape|esc) echo Escape ;;  tab) echo Tab ;;
+    space) echo Space ;;  backspace) echo BSpace ;;  up|down|left|right) echo "${k^}" ;;
+    ctrl+?) echo "C-${k#ctrl+}" ;;
+    *) echo "$1" ;;
+  esac
+}
+
+cmd() {
+  local c="$1"; shift
+  case "$c" in
+    info|agents|send|key|capture|alive|focus) ;;
+    *) die "unknown command '$c'" ;;
+  esac
+  local ref="${1:-}"
+  if [[ -z "$ref" && "$c" == agents ]]; then ref=$(cmd_here); fi
+  [[ -n "$ref" ]] || die "usage: wt pane $c REF"
+  shift || true
+  parse "$ref"
+  case "$KIND.$c" in
+    tmux.info)    tmux_info "$A" "$B" ;;
+    tmux.agents)  tmux_agents "$A" "$B" ;;
+    tmux.send)    (( $# == 1 )) || die "usage: wt pane send REF TEXT"
+                  # A paste, not keystrokes, so the text arrives whole and a
+                  # newline in it doesn't submit early.
+                  printf '%s' "$1" | tm "$B" load-buffer -b wt-pane - &&
+                    tm "$B" paste-buffer -p -d -b wt-pane -t "$A" ;;
+    tmux.key)     local keys=() k; for k in "$@"; do keys+=("$(tmux_key "$k")"); done
+                  tm "$B" send-keys -t "$A" "${keys[@]}" ;;
+    tmux.capture) tm "$B" capture-pane -p -J -S - -t "$A" ;;
+    tmux.alive)   texists "$A" "$B" ;;
+    tmux.focus)   tm "$B" select-window -t "$A" && tm "$B" select-pane -t "$A" ;;
+    rex.info)     rex_info "$A" "$B" ;;
+    rex.agents)   rex_agents "$A" "$B" ;;
+    rex.send)     (( $# == 1 )) || die "usage: wt pane send REF TEXT"
+                  rex send -s "$A" -b "$B" "$1" ;;
+    rex.key)      local k; for k in "$@"; do rex send-key -s "$A" -b "$B" "$k"; done ;;
+    rex.capture)  rex capture -s "$A" -b "$B" --trim ;;
+    rex.alive)    rex block call -s "$A" -b "$B" process > /dev/null 2>&1 ;;
+    rex.focus)    rex focus -s "$A" "$B" ;;
+  esac
+}
+
+case "${1:-}" in
+  backend) backend ;;
+  here)    cmd_here ;;
+  split)   shift; cmd_split "$@" ;;
+  window)  shift; cmd_window "$@" ;;
+  ""|-h|--help|help) usage ;;
+  *)       cmd "$@" ;;
+esac

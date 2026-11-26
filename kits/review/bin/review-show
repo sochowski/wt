@@ -8,21 +8,24 @@
 #                                      a PR's own changes in the pane under the
 #                                      slides; with only a path, the top PR
 #                                      that changes it
-#   review-show status waiting [TEXT]  ask for a response in Rex's activity UI
+#   review-show status waiting [TEXT]  ask for a response (Rex's activity UI; a
+#                                      bell and the pane title in tmux)
 #   review-show status idle            withdraw the request
-#   review-show bind FILE              reconnect a deck to this agent's Rex pane
+#   review-show bind FILE              reconnect a deck to this agent's pane
 #   review-show close                  quit the panel (the next call opens a fresh one)
 #
 # Paths are relative to the workspace root (repos/<repo>/... or a path inside
 # a repo). The panel is one nvim per workspace, listening on a socket. In Rex
-# it opens as a split right of $REX_BLOCK; elsewhere this prints the command
-# to start it, and the files can be read as plain markdown.
+# or tmux it opens as a split right of this pane (see wt pane); elsewhere this
+# prints the command to start it, and the files can be read as plain markdown.
 set -euo pipefail
 
 die() { printf 'review-show: %s\n' "$*" >&2; exit 1; }
-[[ "${1:-}" =~ ^(slides|doc|code|diff|status|bind|close)$ ]] || { sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; [[ "${1:-}" =~ ^(-h|--help)$ ]]; exit; }
+[[ "${1:-}" =~ ^(slides|doc|code|diff|status|bind|close)$ ]] || { sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; [[ "${1:-}" =~ ^(-h|--help)$ ]]; exit; }
 
 kit=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)
+pane="$kit/../../bin/wt-pane"
+[[ -x "$pane" ]] || die "no wt pane at $pane"
 ws="$PWD"
 until [[ -d "$ws/.wt/kits" || -f "$ws/.wt/kits" ]]; do
   [[ "$ws" == / ]] && die "not inside a wt workspace"
@@ -42,9 +45,11 @@ case "$cmd" in
   close)  alive && deadline 2 nvim --server "$sock" --remote-send '<C-\><C-n>:qa!<CR>' > /dev/null 2>&1
           rm -f "$sock"; exit 0 ;;
   slides) [[ -n "${1:-}" ]] || die "usage: review-show slides FILE [N|last]"
-          call="luaeval('wt_review.slides(_A[1], _A[2], _A[3], _A[4])', [$(q "$1"), $(q "${2:-last}"), $(q "${REX_BLOCK:-}"), $(q "${REX_SESSION:-}")])" ;;
-  bind)   [[ $# == 1 && -n "${REX_BLOCK:-}" && -n "${REX_SESSION:-}" ]] || die "usage: review-show bind FILE (from the receiving agent's Rex pane)"
-          call="luaeval('wt_review.bind(_A[1], _A[2], _A[3])', [$(q "$1"), $(q "$REX_BLOCK"), $(q "$REX_SESSION")])" ;;
+          me=$("$pane" here 2> /dev/null || true)
+          call="luaeval('wt_review.slides(_A[1], _A[2], _A[3])', [$(q "$1"), $(q "${2:-last}"), $(q "$me")])" ;;
+  bind)   [[ $# == 1 ]] || die "usage: review-show bind FILE (from the receiving agent's pane)"
+          me=$("$pane" here) || die "bind runs in the receiving agent's Rex or tmux pane"
+          call="luaeval('wt_review.bind(_A[1], _A[2])', [$(q "$1"), $(q "$me")])" ;;
   status) [[ "${1:-}" =~ ^(waiting|idle)$ && $# -le 2 ]] || die "usage: review-show status waiting [TEXT] | idle"
           call="luaeval('wt_review.status(_A[1], _A[2])', [$(q "$1"), $(q "${2:-}")])" ;;
   doc)    [[ -n "${1:-}" ]] || die "usage: review-show doc FILE [LINE]"
@@ -68,13 +73,13 @@ if ! alive; then
   # -i NONE: the panel needs no history, and a damaged ShaDa file would stop
   # startup at a prompt.
   start=(nvim -i NONE --listen "$sock" -c "lua _G.wt_review = dofile('$kit/nvim/review.lua')")
-  if [[ -n "${REX_SESSION:-}" && -n "${REX_BLOCK:-}" ]] && command -v rex > /dev/null; then
-    rex split -s "$REX_SESSION" -b "$REX_BLOCK" --split=right --ratio 50 --label review \
-      --focus=false -c "$ws" --json -- "${start[@]}" > /dev/null || die "rex split failed"
+  if [[ $("$pane" backend) != none ]]; then
+    "$pane" split --dir right --size 50 --label review --cwd "$ws" -- "${start[@]}" > /dev/null ||
+      die "couldn't open a pane for the panel"
     for _ in $(seq 50); do alive && break; sleep 0.1; done
     alive || die "the panel didn't come up on $sock"
   else
-    printf 'No Rex pane to open the panel in. To watch along, run:\n  cd %q && %q %q %q %q\n' \
+    printf 'No Rex or tmux pane to open the panel in. To watch along, run:\n  cd %q && %q %q %q %q\n' \
       "$ws" "${start[@]}" >&2
     exit 0
   fi

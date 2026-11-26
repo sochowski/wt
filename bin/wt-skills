@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# wt skills — install wt's skills for every session, outside kits.
+#
+#   wt skills                    list them, and whether each is linked
+#   wt skills link [NAME...]     link them (all, with no names) into
+#                                ~/.agents/skills, which Codex, pi and opencode
+#                                read, and ~/.claude/skills for Claude Code
+#   wt skills link --force ...   move a copy that's in the way aside first,
+#                                to ~/.local/state/wt/skills-aside/
+#
+# Links point into this checkout, so a `git pull` here updates every session.
+set -euo pipefail
+
+die() { printf 'wt skills: %s\n' "$*" >&2; exit 1; }
+src=$(cd "$(dirname "$(readlink -f "$0")")/../skills" && pwd)
+agents="${WT_AGENTS_SKILLS:-$HOME/.agents/skills}"
+claude="${WT_CLAUDE_SKILLS:-$HOME/.claude/skills}"
+
+state() {  # dir name → linked | missing | elsewhere
+  local at="$1/$2"
+  if [[ ! -e "$at" && ! -L "$at" ]]; then echo missing
+  elif [[ $(readlink -f "$at") == "$src/$2" ]]; then echo linked
+  else echo elsewhere
+  fi
+}
+
+# Put a link at $1 pointing to $2, moving anything else there aside with --force.
+place() {
+  local at="$1" to="$2"
+  if [[ -e "$at" || -L "$at" ]]; then
+    (( force )) || { printf '  %s is in the way (not a link to wt); --force moves it aside\n' "$at" >&2; return 1; }
+    # Out of the skills directory, or harnesses would load it as a second copy.
+    local aside="${XDG_STATE_HOME:-$HOME/.local/state}/wt/skills-aside/$(date +%Y%m%d%H%M%S)/${at#/}"
+    mkdir -p "${aside%/*}"
+    mv "$at" "$aside"
+    printf '  moved %s to %s\n' "$at" "$aside" >&2
+  fi
+  ln -s "$to" "$at"
+}
+
+case "${1:-}" in
+  ""|ls|list)
+    for d in "$src"/*/; do
+      n=$(basename "$d")
+      printf '%-14s agents: %-9s claude: %s\n' "$n" "$(state "$agents" "$n")" "$(state "$claude" "$n")"
+    done ;;
+  link)
+    shift; force=0
+    [[ "${1:-}" == --force ]] && { force=1; shift; }
+    names=("$@")
+    if (( ! ${#names[@]} )); then for d in "$src"/*/; do names+=("$(basename "$d")"); done; fi
+    mkdir -p "$agents" "$claude"
+    failed=0
+    for n in "${names[@]}"; do
+      [[ -d "$src/$n" ]] || die "no skill $n in $src"
+      [[ $(state "$agents" "$n") == linked ]] || place "$agents/$n" "$src/$n" || { failed=1; continue; }
+      # Claude Code's link goes through ~/.agents/skills, so one place decides.
+      [[ $(state "$claude" "$n") == linked ]] || place "$claude/$n" "$agents/$n" || { failed=1; continue; }
+      printf '%s linked\n' "$n"
+    done
+    exit "$failed" ;;
+  -h|--help|help) sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *) die "unknown command '$1' (wt skills [link [--force] [NAME...]])" ;;
+esac
