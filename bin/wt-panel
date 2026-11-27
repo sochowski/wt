@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# wt panel — the user's nvim in a pane beside the agent, one per workspace.
+#
+#   wt panel ex CMD...   run an Ex command line in the panel, opening the panel
+#                        first if it isn't up; prints what the command printed
+#   wt panel open        open the panel if it isn't up; prints its socket
+#   wt panel sock        print the panel's socket, whether or not it's up
+#   wt panel pane        print the panel's pane ref (for wt pane capture, focus)
+#
+# The panel is nvim with the user's config (-i NONE, so a damaged ShaDa file
+# can't stop it at a prompt), listening on a socket, in a pane split right of
+# this one (wt pane split: Rex or tmux). It doesn't take focus. In a review
+# workspace with the review panel up, that panel is used instead.
+#
+# Showing something while the user is looking elsewhere asks for them: in Rex
+# the pane reports itself blocked (Rex's program status, OSC 7501), in tmux it
+# rings the bell and puts the message in its title. Looking at the pane takes
+# the ask back. See nvim/attention.lua.
+set -euo pipefail
+
+die() { printf 'wt panel: %s\n' "$*" >&2; exit 1; }
+self=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)
+pane="$self/bin/wt-pane"
+
+root=$("$self/bin/wt" root 2> /dev/null || git rev-parse --show-toplevel 2> /dev/null || pwd)
+sock="${TMPDIR:-/tmp}/nvim-panel-$(printf %s "$root" | cksum | cut -d' ' -f1).sock"
+# A blocked nvim (at a "Press ENTER", say) accepts the connection and never
+# answers, so every call to it gets a deadline.
+deadline() { perl -e 'alarm shift; exec @ARGV or exit 127' "$@"; }
+alive() { [[ -S "$1" ]] && deadline 2 nvim --server "$1" --remote-expr 1 > /dev/null 2>&1; }
+alive "$root/.wt/review.sock" && sock="$root/.wt/review.sock"
+
+open() {
+  alive "$sock" && return
+  rm -f "$sock"
+  local start=(nvim -i NONE --listen "$sock" -c "lua dofile('$self/nvim/attention.lua').panel()")
+  [[ $("$pane" backend) != none ]] ||
+    die "no Rex or tmux pane to open it beside. To start it yourself: cd $(printf %q "$root") && ${start[*]@Q}"
+  "$pane" split --dir right --size 50 --label nvim --cwd "$root" -- "${start[@]}" > "$sock.pane" ||
+    die "couldn't open a pane for the panel"
+  for _ in $(seq 50); do alive "$sock" && return; sleep 0.1; done
+  die "the panel didn't come up on $sock; wt pane capture $(cat "$sock.pane") shows its screen"
+}
+
+case "${1:-}" in
+  open) open; printf '%s\n' "$sock" ;;
+  sock) printf '%s\n' "$sock" ;;
+  pane) [[ -s "$sock.pane" ]] || die "no pane recorded for $sock"; cat "$sock.pane" ;;
+  ex)   shift; (( $# )) || die "usage: wt panel ex CMD..."
+        open
+        line="$*"
+        # An expression returns, where --remote-send would wait on a prompt.
+        lua='(function(c) local ok, r = pcall(vim.api.nvim_exec2, c, { output = true }) return ok and r.output or ("\1" .. tostring(r)) end)(_A)'
+        run="luaeval('$lua', '${line//\'/\'\'}')"
+        out=$(deadline 5 nvim --server "$sock" --remote-expr "$run") ||
+          die "the panel didn't answer; is it at a prompt? wt pane capture $(cat "$sock.pane" 2> /dev/null) shows it"
+        [[ "$out" != $'\1'* ]] || die "${out#$'\1'}"
+        [[ -z "$out" ]] || printf '%s\n' "$out" ;;
+  ""|-h|--help|help) sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *) die "unknown command '$1' (try wt panel --help)" ;;
+esac

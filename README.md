@@ -28,6 +28,7 @@ symlinks, and loose worktrees at `~/worktrees/<repo>/<branch>`.
 | `wt kit [KIT...]` | prime the workspace you're in with kits; with no arguments, list them |
 | `wt root`, `wt repos` | print the current workspace; list the repos wt can check out |
 | `wt pane` | open, find, type into and read panes in Rex or tmux, whichever you're in (see [Panes](#panes)) |
+| `wt panel ex CMD` | show something in your nvim in a pane beside the agent, opening it first (see [Panes](#panes)) |
 | `wt skills` | link wt's own skills into `~/.agents/skills` and `~/.claude/skills` (see [Skills](#skills)) |
 | `wt CMD` | run `wt-CMD` from a kit's `bin/`, wt's own `bin/`, or `PATH` |
 
@@ -120,16 +121,26 @@ new one. Reconnecting waits for any active send to finish. An agent can also
 explicitly claim a deck with `.wt/bin/review-show bind path/to/deck.md`, or
 present it again with `review-show slides`.
 
-When a response is needed, the agent runs
-`.wt/bin/review-show status waiting 'Comments needed: deployment options'`.
+The panel asks for you by itself. When the agent shows slides, a doc, code or
+a diff while you're looking elsewhere, the panel marks itself blocked with what
+to look at ("Look at the slides: walkthrough.md"); looking at it clears that.
+Looking means the pane has focus, or you typed, clicked or scrolled in it in
+the last few seconds (`vim.g.wt_panel_recent`, 5 by default), so nothing is
+raised while you're reading along. Unsent comments, sending, a failed send or
+a lost recipient take precedence and stay until they're dealt with; a
+successful submission clears them. An agent that needs an answer whether or
+not you've looked runs
+`.wt/bin/review-show status waiting 'Comments needed: deployment options'`,
+which holds until the comments are sent, and `review-show status idle`
+withdraws any ask, the automatic one included.
+
 In Rex the panel reports this through Rex's program status protocol (OSC
 7501), on its own pane, and Rex controls how activity appears and whether it
 produces notifications or sounds. In tmux it rings the bell once on becoming
 blocked, which flags the window in the status line, and puts the message in
-its pane title (`#{pane_title}`, shown with `pane-border-status`). Merely
-showing slides does not request attention. Unsent comments, sending, and send
-failures update that status; successful submission clears the request.
-`.wt/bin/review-show status idle` withdraws a request.
+its pane title (`#{pane_title}`, shown with `pane-border-status`). tmux passes
+focus to nvim only with `set -g focus-events on`; without it, typing in the
+pane is what clears the ask.
 
 Personal or team review process goes in a layer of its own, e.g.
 `~/.config/wt/kits/review/` with an `AGENTS.md` and extra skills.
@@ -207,6 +218,16 @@ a pane whose foreground process is Claude Code, Codex, OpenCode or pi; in tmux
 that's read from the foreground process group of the pane's terminal. Kits
 that use it link it into `.wt/bin/wt-pane`. `tests/wt-pane.sh` checks both
 backends (Rex against a fake `rex`, tmux against a server of its own).
+
+`wt panel` keeps one nvim per workspace in a pane beside the agent, with your
+own config, and runs Ex commands in it: `wt panel ex 'edit +120 src/app.py'`.
+It opens the pane with `wt pane split` the first time, without taking focus;
+`wt panel pane` prints its ref. Like the review panel, it asks for you by
+itself: a file shown, a tab opened or a file reloaded while you're looking
+elsewhere marks the pane blocked ("Look at src/app.py") in Rex, or rings the
+bell and sets its title in tmux, until you look at it (see
+[Reviewing a PR](#reviewing-a-pr) for what counts as looking). Both use
+`nvim/attention.lua`; `tests/attention.lua` checks it.
 
 ## Skills
 

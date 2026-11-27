@@ -10,7 +10,8 @@ io.stdout = {
   write = function(_, s) reports[#reports + 1] = s end,
   flush = function() end,
 }
-vim.env.REX_SESSION = 'test-session'
+vim.env.REX_SESSION, vim.env.REX_BLOCK, vim.env.TMUX = 'test-session', nil, nil
+vim.g.wt_panel_recent = 0.05
 vim.g.wt_pane = 'wt-pane'
 vim.notify = function(msg) notices[#notices + 1] = msg end
 vim.system = function(argv, opts, cb)
@@ -31,6 +32,7 @@ local function status(state, msg)
   if msg then contains(vim.base64.decode(report:match(':msg=([^\27]+)')), msg) end
 end
 local function bar(text) contains(vim.wo.winbar, text) end
+local function focus(on) vim.api.nvim_exec_autocmds(on and 'FocusGained' or 'FocusLost', {}) end
 local function target(i, block, session)
   local argv = calls[i].argv
   eq(argv[1], 'wt-pane')
@@ -49,6 +51,9 @@ local ok, err = xpcall(function()
   local panel = assert(loadfile('kits/review/nvim/review.lua'))({
     resolve = function(preferred, cb) resolve_recipient(preferred, cb) end,
   })
+  -- The user watches the panel through the feedback flow; presenting while
+  -- they look elsewhere is tested after it.
+  focus(true)
   local a = write('a.md', { '# Choice', '> **' .. vim.env.USER .. ':** first' })
   panel.slides(a, 1, 'agent-a', 'session-a')
   bar('1 unsent')
@@ -259,6 +264,49 @@ local ok, err = xpcall(function()
   resolve_callback(nil, { ref = 'rex:same-tab-session/existing-agent', agent = 'codex' })
   eq(#calls, before_reconnect)
   contains(notices[#notices], 'deck or recipient changed')
+
+  -- Presenting while the user looks elsewhere asks for them by itself, and
+  -- looking takes it back. Explicit asks and unsent comments outlast a look.
+  local auto = write('auto.md', { '# Nothing to send' })
+  panel.slides(auto, 1)
+  status('clear') -- presented while they look: nothing to ask
+  focus(false)
+  panel.slides(auto, 1)
+  status('blocked', 'Look at the slides: auto.md')
+  contains(reports[#reports], ':kind=question')
+  focus(true)
+  status('clear')
+  focus(false)
+  panel.doc(auto, 1)
+  status('blocked', 'Look at ' .. auto)
+  -- Typing, clicking or scrolling in the pane without focusing it counts as
+  -- looking, and a moment after it, presenting doesn't ask.
+  vim.api.nvim_feedkeys('j', 'xt', false)
+  vim.wait(30, function() return false end)
+  status('clear')
+  panel.code(auto, 1)
+  status('clear')
+  vim.wait(80, function() return false end)
+  panel.code(auto, 1)
+  status('blocked', 'Look at ' .. auto .. ':1')
+  -- The agent's own keys over the socket are not the user looking.
+  vim.cmd('normal! gg')
+  vim.wait(30, function() return false end)
+  status('blocked', 'Look at ' .. auto .. ':1')
+  -- idle withdraws the automatic ask as well as an explicit one.
+  panel.status('idle', '')
+  status('clear')
+  panel.status('waiting', 'Comments needed: auto')
+  focus(true)
+  status('blocked', 'Comments needed: auto') -- an explicit ask outlasts a look
+  panel.status('idle', '')
+  status('clear')
+  vim.fn.writefile({ '# Choice', '> **' .. vim.env.USER .. ':** unsent' }, auto)
+  focus(false)
+  panel.slides(auto, 1)
+  status('blocked', '1 comments unsent')
+  focus(true)
+  status('blocked', '1 comments unsent') -- looking doesn't send them
 
   -- tmux: a ref passes through as it is, and attention is a bell (once, on
   -- becoming blocked) plus the pane title.

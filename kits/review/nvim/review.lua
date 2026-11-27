@@ -30,6 +30,7 @@ local here = vim.fn.fnamemodify(debug.getinfo(1, 'S').source:sub(2), ':p:h')
 local recipient = ... or dofile(here .. '/recipient.lua')
 -- Panes are reached through wt's multiplexer adapter, so Rex and tmux work alike.
 local function wt_pane() return vim.g.wt_pane or vim.fn.fnamemodify(here .. '/../../../bin/wt-pane', ':p') end
+local panel_attention = dofile(vim.fn.fnamemodify(here .. '/../../../nvim/attention.lua', ':p'))
 local uv = vim.uv or vim.loop
 local root = vim.fn.getcwd()
 local main = vim.api.nvim_get_current_win()
@@ -97,40 +98,16 @@ local owners = {} -- deck path -> pane ref (rex:SESSION/BLOCK or tmux:%PANE@SOCK
 -- One batch at a time. Keep a pasted batch on Enter failure so :send can
 -- retry submission without typing it twice. Callbacks always use this snapshot.
 local delivery = nil
+-- An explicit ask from the agent (review-show status waiting), kept until
+-- answered or withdrawn.
 local attention = nil
-local last_status = nil
 local finding = false
 local recipient_error = nil
-
--- tmux has no activity protocol: a bell flags the window in its status line,
--- and the pane title carries the message.
-local function tmux_activity(state, msg)
-  local report = state .. ':' .. (msg or '')
-  if report == last_status then return end
-  local was_blocked = (last_status or ''):sub(1, 8) == 'blocked:'
-  last_status = report
-  local title = state == 'clear' and 'review' or ('review: ' .. (msg or state))
-  title = title:gsub('%c', ' ')
-  io.stdout:write('\27]2;' .. title .. '\27\\' .. ((state == 'blocked' and not was_blocked) and '\7' or ''))
-  io.stdout:flush()
-end
-
-local function activity(state, msg)
-  if not vim.env.REX_SESSION then
-    if vim.env.TMUX then tmux_activity(state, msg) end
-    return
-  end
-  local report = 'state=' .. state .. ':id=wt-review:app=wt'
-  if state == 'blocked' then report = report .. ':kind=question' end
-  if msg then
-    msg = vim.fn.strcharpart(msg:gsub('%c', ' '):gsub('\194[\128-\159]', ' '), 0, 256)
-    report = report .. ':msg=' .. vim.base64.encode(msg)
-  end
-  if report == last_status then return end
-  last_status = report
-  io.stdout:write('\27]7501;' .. report .. '\27\\')
-  io.stdout:flush()
-end
+local update_activity
+-- Showing something while the user looks elsewhere asks for them too, until
+-- they look (see nvim/attention.lua).
+local look = panel_attention.new({ id = 'wt-review', app = 'wt', title = 'review',
+  on_change = function() update_activity() end })
 
 local function feedback_status()
   if finding then return 'working', 'Finding an agent in this tab' end
@@ -144,11 +121,12 @@ local function feedback_status()
     return 'blocked', string.format('%d comments unsent — :send', deck.unsent)
   end
   if attention then return 'blocked', attention.msg end
+  if look.pending() then return 'blocked', look.pending() end
   return 'clear'
 end
 
-local function update_activity()
-  activity(feedback_status())
+function update_activity()
+  look.report(feedback_status())
 end
 
 local function heading(slide, i)
@@ -1145,16 +1123,30 @@ function M.slides(path, n, block, session)
   vim.api.nvim_win_set_buf(win, deck_buf())
   vim.wo[win].wrap = true
   vim.wo[win].linebreak = true
+  look.present('Look at the slides: ' .. vim.fn.fnamemodify(path, ':t'))
   render()
   return 0
 end
 
--- Only an explicit ask raises attention; merely displaying a deck does not.
+-- Presenting asks for the user by itself (see `look`). This is the explicit
+-- override: waiting asks until the comments are sent or withdrawn, whether or
+-- not they look; idle withdraws every ask, including the automatic one.
 function M.status(state, msg)
   if state ~= 'waiting' and state ~= 'idle' then return 'status must be waiting or idle' end
   attention = state == 'waiting' and { msg = msg and msg ~= '' and msg or 'Comments needed' } or nil
+  if state == 'idle' then look.dismiss() end
   if deck.buf then render() else update_activity() end
   return 0
+end
+
+-- What a path is called in a message: relative to the workspace.
+local function shown(path, line)
+  local rel = path:sub(1, #root + 1) == root .. '/' and path:sub(#root + 2) or vim.fn.fnamemodify(path, ':~')
+  return rel .. (tonumber(line) and (':' .. line) or '')
+end
+
+local function presented(msg)
+  if look.present(msg) then update_activity() end
 end
 
 function M.doc(path, line)
@@ -1171,6 +1163,7 @@ function M.doc(path, line)
     diff_keys(0)
   end
   if tonumber(line) then pcall(vim.api.nvim_win_set_cursor, win, { tonumber(line), 0 }) end
+  presented('Look at ' .. shown(resolve(path), line))
   return 0
 end
 
@@ -1180,12 +1173,18 @@ function M.code(path, line)
   vim.cmd.edit(vim.fn.fnameescape(resolve(path)))
   vim.bo.autoread = true
   jump(code_win, line)
+  presented('Look at ' .. shown(resolve(path), line))
   return 0
 end
 
 -- A layer's diff in the pane, at path:line when given.
 function M.diff(pr, path, line)
-  return show_diff(pr, path, line, true)
+  local err = show_diff(pr, path, line, true)
+  if err == 0 then
+    local where = path and path ~= '' and (' ' .. shown(resolve(path), line)) or ''
+    presented('Look at the diff' .. (pr and pr ~= '' and (': #' .. tostring(pr):gsub('^#', '')) or '') .. where)
+  end
+  return err
 end
 
 -- Close a gd tab, whichever viewer is in it. (:Unified takes no |, so
@@ -1198,7 +1197,6 @@ vim.api.nvim_create_user_command('DiffClose', function()
 end, {})
 
 vim.api.nvim_create_autocmd('VimResized', { callback = function() vim.schedule(fit) end })
-vim.api.nvim_create_autocmd('VimLeavePre', { callback = function() activity('clear') end })
 
 -- The agent rewrites files underneath us; poll rather than fs_event, which
 -- loses track of files replaced by rename.

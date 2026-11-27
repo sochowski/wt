@@ -8,9 +8,9 @@
 #                                      a PR's own changes in the pane under the
 #                                      slides; with only a path, the top PR
 #                                      that changes it
-#   review-show status waiting [TEXT]  ask for a response (Rex's activity UI; a
-#                                      bell and the pane title in tmux)
-#   review-show status idle            withdraw the request
+#   review-show status waiting [TEXT]  keep asking for a response until comments
+#                                      are sent, even once the user has looked
+#   review-show status idle            withdraw any ask, including the automatic one
 #   review-show bind FILE              reconnect a deck to this agent's pane
 #   review-show close                  quit the panel (the next call opens a fresh one)
 #
@@ -18,10 +18,15 @@
 # a repo). The panel is one nvim per workspace, listening on a socket. In Rex
 # or tmux it opens as a split right of this pane (see wt pane); elsewhere this
 # prints the command to start it, and the files can be read as plain markdown.
+#
+# You don't need to ask for attention: showing something while the user looks
+# elsewhere marks the panel blocked (Rex's activity UI; a bell and the pane
+# title in tmux) until they look at it. Unsent comments and failed sends keep
+# it blocked until they're dealt with.
 set -euo pipefail
 
 die() { printf 'review-show: %s\n' "$*" >&2; exit 1; }
-[[ "${1:-}" =~ ^(slides|doc|code|diff|status|bind|close)$ ]] || { sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; [[ "${1:-}" =~ ^(-h|--help)$ ]]; exit; }
+[[ "${1:-}" =~ ^(slides|doc|code|diff|status|bind|close)$ ]] || { sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; [[ "${1:-}" =~ ^(-h|--help)$ ]]; exit; }
 
 kit=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)
 pane="$kit/../../bin/wt-pane"
