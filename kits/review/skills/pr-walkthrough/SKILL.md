@@ -47,10 +47,13 @@ The deck is `review/walkthrough.md`, slides separated by a line containing only 
 2. Stop and let the human ask questions or say go on. Then append the next chapter and run `review-show slides review/walkthrough.md last`.
 3. If they say to do the rest, write all the remaining slides at once and show slide 1 of them.
 
-When you explicitly need an answer or comments, run
-`.wt/bin/review-show status waiting 'Comments needed: <topic>'` after showing
-the slides. Use `review-show status idle` when they answer in chat or the
-request is withdrawn. Merely presenting a chapter does not need an alert.
+You don't need to alert the human. Showing slides, a doc, code or a diff while
+they're looking elsewhere marks the panel as waiting for them, and it clears
+when they look. Only when an answer must not be missed even after they've
+glanced at the panel, run
+`.wt/bin/review-show status waiting 'Comments needed: <topic>'`; it holds until
+comments are sent. `review-show status idle` withdraws any ask, for instance
+when they answer in chat.
 `review-show slides` remembers your pane (Rex or tmux) for the human's `:send` comments.
 When comments arrive, reread the deck and reply under each with
 `> **agent:** …` (or `ChatGPT`, `Codex`, or `claude` as the speaker); keep the human's lines intact. That reply acknowledges the
