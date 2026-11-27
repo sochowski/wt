@@ -19,6 +19,10 @@
 --                            new tab, or a reload from disk is presenting.
 --   dofile(path).new(opts)   the pieces, for a panel with its own states
 --                            (the review kit): present(), pending(), report().
+--                            With sticky = true, what's presented waits for a
+--                            reply instead of a look: looking doesn't clear it,
+--                            and it's raised even while the user watches. The
+--                            panel clears it (dismiss) when the reply comes.
 
 local M = {}
 local uv = vim.uv or vim.loop
@@ -30,11 +34,13 @@ local function clean(msg)
   return vim.fn.strcharpart(msg:gsub('%c', ' '):gsub('\194[\128-\159]', ' '), 0, 256)
 end
 
--- opts: id and app (Rex's record), title (tmux pane title when clear), and
--- on_change, called when looking takes back what was presented.
+-- opts: id and app (Rex's record), title (tmux pane title when clear),
+-- sticky (above), and on_change, called when looking takes back what was
+-- presented.
 function M.new(opts)
   local a = { focused = false }
   local shown, last, input = nil, nil, nil
+  local count = 0
   local on_change = opts.on_change or function() end
 
   -- One state per call; repeats are dropped, so callers can report freely.
@@ -69,16 +75,22 @@ function M.new(opts)
   -- Something new is in front of the user. Returns whether it now waits for
   -- them; callers report the state themselves.
   function a.present(msg)
-    if a.looking() then return false end
-    shown = msg
+    if not opts.sticky and a.looking() then return false end
+    shown, count = msg, count + 1
     return true
   end
 
   function a.pending() return shown end
-  function a.dismiss() shown = nil end
+  -- Which presentation is pending, so a reply to an older one can't clear a
+  -- newer one: dismiss(a.which()) later clears only if nothing new came.
+  function a.which() return shown and count or nil end
+  function a.dismiss(which)
+    if which and which ~= count then return end
+    shown = nil
+  end
 
   local function seen()
-    if not shown then return end
+    if not shown or opts.sticky then return end
     shown = nil
     on_change()
   end

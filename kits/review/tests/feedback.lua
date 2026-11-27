@@ -47,9 +47,11 @@ end
 local resolve_recipient = function(preferred, cb)
   cb(nil, { ref = preferred or 'rex:test-session/fallback', agent = 'codex' })
 end
+local statuses = {} -- the panel asking for the agent pane's program status
 local ok, err = xpcall(function()
   local panel = assert(loadfile('kits/review/nvim/review.lua'))({
     resolve = function(preferred, cb) resolve_recipient(preferred, cb) end,
+    status = function(ref, cb) statuses[#statuses + 1] = { ref = ref, cb = cb } end,
   })
   -- The user watches the panel through the feedback flow; presenting while
   -- they look elsewhere is tested after it.
@@ -225,7 +227,7 @@ local ok, err = xpcall(function()
     local before_send = #calls
     vim.cmd('Send!')
     eq(#calls, before_send) -- every supported agent label acknowledges feedback
-    status('clear')
+    status('blocked', 'Look at the slides: ' .. name .. '.md') -- nothing unsent; just the ask
   end
 
   -- A :send preflight can discover an existing agent after the old pane dies,
@@ -265,48 +267,76 @@ local ok, err = xpcall(function()
   eq(#calls, before_reconnect)
   contains(notices[#notices], 'deck or recipient changed')
 
-  -- Presenting while the user looks elsewhere asks for them by itself, and
-  -- looking takes it back. Explicit asks and unsent comments outlast a look.
-  local auto = write('auto.md', { '# Nothing to send' })
-  panel.slides(auto, 1)
-  status('clear') -- presented while they look: nothing to ask
-  focus(false)
+  -- Presenting asks for a reply, whether or not the user is looking, and
+  -- looking doesn't take it back: replying does.
+  resolve_recipient = function(preferred, cb) cb(nil, { ref = preferred, agent = 'claude' }) end
+  local auto = write('auto.md', { '<!-- agent: rex:auto-session/auto-agent -->', '# Nothing to send' })
   panel.slides(auto, 1)
   status('blocked', 'Look at the slides: auto.md')
   contains(reports[#reports], ':kind=question')
-  focus(true)
-  status('clear')
+  bar('your turn')
   focus(false)
-  panel.doc(auto, 1)
-  status('blocked', 'Look at ' .. auto)
-  -- Typing, clicking or scrolling in the pane without focusing it counts as
-  -- looking, and a moment after it, presenting doesn't ask.
+  focus(true)
   vim.api.nvim_feedkeys('j', 'xt', false)
   vim.wait(30, function() return false end)
+  status('blocked', 'Look at the slides: auto.md') -- looking and scrolling aren't replies
+
+  -- C tells the agent to go on, which is a reply.
+  vim.api.nvim_feedkeys('C', 'x', false)
+  eq({ unpack(calls[#calls].argv, 1, 3) }, { 'wt-pane', 'send', 'rex:auto-session/auto-agent' })
+  contains(calls[#calls].argv[4], 'Go on (from the review panel: auto.md, slide 1/1)')
+  reply(#calls)
+  eq(calls[#calls].argv, { 'wt-pane', 'key', 'rex:auto-session/auto-agent', 'enter' })
+  status('blocked', 'Look at the slides') -- not until Enter went in
+  reply(#calls)
   status('clear')
-  panel.code(auto, 1)
-  status('clear')
-  vim.wait(80, function() return false end)
-  panel.code(auto, 1)
-  status('blocked', 'Look at ' .. auto .. ':1')
-  -- The agent's own keys over the socket are not the user looking.
-  vim.cmd('normal! gg')
-  vim.wait(30, function() return false end)
-  status('blocked', 'Look at ' .. auto .. ':1')
-  -- idle withdraws the automatic ask as well as an explicit one.
+
+  -- Something new replaces the ask; idle withdraws it.
+  panel.doc(auto, 1)
+  status('blocked', 'Look at ' .. auto)
   panel.status('idle', '')
   status('clear')
+
+  -- Code opens in a pane of its own below the slides, never a split here.
+  local wins = #vim.api.nvim_tabpage_list_wins(0)
+  panel.code(auto, 2)
+  eq({ unpack(calls[#calls].argv, 1, 4) }, { 'wt-pane', 'split', '--dir', 'below' })
+  contains(table.concat(calls[#calls].argv, ' '), '-- nvim -i NONE --listen ')
+  eq(#vim.api.nvim_tabpage_list_wins(0), wins)
+  status('blocked', 'Look at ' .. auto .. ':2')
+  reply(#calls, 1) -- no pane: says so, and nothing else breaks
+  contains(notices[#notices], 'No pane for files')
+
+  -- Answering the agent in its own pane is a reply too: its status goes back
+  -- to working after it had stopped. Working right after presenting isn't.
+  panel.slides(auto, 1)
+  local function agent_state(state)
+    local n = #statuses
+    assert(vim.wait(4000, function() return #statuses > n end, 20), 'the panel never asked for the agent status')
+    eq(statuses[#statuses].ref, 'rex:auto-session/auto-agent')
+    statuses[#statuses].cb(state)
+    vim.wait(20, function() return false end)
+  end
+  agent_state('working')
+  status('blocked', 'Look at the slides: auto.md')
+  agent_state('done')
+  status('blocked', 'Look at the slides: auto.md')
+  agent_state('working')
+  status('clear')
+
+  -- An explicit ask outlasts all of that until comments are sent; unsent
+  -- comments outlast everything, and C points at them instead of going on.
   panel.status('waiting', 'Comments needed: auto')
   focus(true)
-  status('blocked', 'Comments needed: auto') -- an explicit ask outlasts a look
+  status('blocked', 'Comments needed: auto')
   panel.status('idle', '')
-  status('clear')
   vim.fn.writefile({ '# Choice', '> **' .. vim.env.USER .. ':** unsent' }, auto)
-  focus(false)
   panel.slides(auto, 1)
   status('blocked', '1 comments unsent')
-  focus(true)
-  status('blocked', '1 comments unsent') -- looking doesn't send them
+  local before_c = #calls
+  vim.api.nvim_feedkeys('C', 'x', false)
+  eq(#calls, before_c)
+  contains(notices[#notices], 'S sends')
 
   -- tmux: a ref passes through as it is, and attention is a bell (once, on
   -- becoming blocked) plus the pane title.

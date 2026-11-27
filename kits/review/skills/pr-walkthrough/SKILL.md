@@ -29,12 +29,11 @@ Chapters are ideas, not files or PRs. Read every source diff first; skim tests o
 - 2 to 5 chapters for one PR, 4 to 8 for a stack. Every PR lands in at least one chapter.
 - Each chapter is one slide:
   - `# <title>`, then one line saying why it matters.
-  - A `Diff:` line naming the PR and the place to start reading, e.g. `Diff: #4512 repos/Runlayer/proxy/verdict.py:88`. When the human lands on the slide, the diff pane under it jumps there, so pick the hunk the chapter is about, at a line the PR adds or keeps, numbered as in that PR's head. `Diff: #4512` alone starts at the top of the PR. Leave it off the Why, Stack and closing slides.
   - 2 or 3 short paragraphs on the mechanism. Give numbers (limits, flags, sizes, timeouts) rather than adjectives.
-  - At most one excerpt: the 5 to 15 lines the human must read, copied verbatim, preceded by its location as `repos/<repo>/<path>:<line>` (`gf` on that location in the panel opens the file there). Tag the fence with its language (`python`, `tsx`, `sql`, ...) so it is highlighted. When what matters is what changed, show it as a `diff` block with the `+`/`-` lines instead.
+  - The code: one or two `Diff:` lines, each naming the PR, the file and the lines the human must read, e.g. `Diff: #4512 repos/Runlayer/proxy/verdict.py:80-95`. The panel replaces each with those lines of the PR's real change, highlighted, with additions marked and removals inline. Pick 5 to 25 lines the PR adds or changes, numbered as in that PR's head (`git show <head>:<path>`). A single line (`verdict.py:88`) shows the hunk around it; no line shows the file's hunks, so give a range. Never paste code from the diff into a slide yourself; it drifts from the PR, and loses the marks. Leave `Diff:` lines off the Why, Stack and closing slides.
   - A diagram when the shape matters more than the lines: a flow across services, a sequence of calls, a state machine, a schema change. Use a fenced `mermaid` block; the panel renders it as a box drawing. Keep it small enough for a split pane: `flowchart LR` or `TD` with about 8 nodes at most and short labels, or a `sequenceDiagram` with 4 participants at most. One diagram per slide, and leave out the excerpt if the slide has a diagram and runs long.
   - Up to 3 **Check:** questions the human should answer for themselves ("Does any caller pass `None` here?"). Never phrase one as "Confirm that ...".
-- **Notes on the diff.** For lines worth a word where they sit, append rows to `review/annotations.tsv`: `pr<TAB>path<TAB>line<TAB>note`, with the path as in the slides and the line on the PR's new side. The pane shows each note above its line. One sentence each, explanation rather than verdict ("retries reuse the request ID, so this is idempotent"), at most a handful per chapter. Anything that looks wrong goes to `Open questions`, not a note.
+- **Notes on the diff.** For lines worth a word where they sit, append rows to `review/annotations.tsv`: `pr<TAB>path<TAB>line<TAB>note`, with the path as in the slides and the line on the PR's new side. Excerpts show each note above its line, so put notes on lines your `Diff:` ranges include. One sentence each, explanation rather than verdict ("retries reuse the request ID, so this is idempotent"), at most a handful per chapter. Anything that looks wrong goes to `Open questions`, not a note.
 - End with a **Hotspots** slide: up to 6 decisions or risks across the change, each with a kind (Security, Data, Rollout, Scope, Perf, ...), a short title, and a sentence or two. Label what you inferred from the diff, since nothing has run.
 - Then a **Worth verifying** slide: 2 to 5 things the human could check locally, each with what it would show. This is where `pr-verify` takes over.
 - Last, a **Not covered** slide: the changed files (from `review/numstat.tsv`) that no chapter anchors or excerpts, with lines changed, largest first, each with a few words on what it is (tests, generated, plumbing). Then list the ones not in `review/viewed.tsv` (`pr<TAB>path` rows the panel appends as the human opens files in the pane), so they know what they haven't looked at. Skip the slide when nothing is left.
@@ -47,21 +46,20 @@ The deck is `review/walkthrough.md`, slides separated by a line containing only 
 2. Stop and let the human ask questions or say go on. Then append the next chapter and run `review-show slides review/walkthrough.md last`.
 3. If they say to do the rest, write all the remaining slides at once and show slide 1 of them.
 
-You don't need to alert the human. Showing slides, a doc, code or a diff while
-they're looking elsewhere marks the panel as waiting for them, and it clears
-when they look. Only when an answer must not be missed even after they've
-glanced at the panel, run
+You don't need to alert the human. Showing slides, a doc, code or a diff marks
+the panel as waiting for their reply; it clears when they send comments, press
+`C` (which types "Go on" into your pane), or answer you in chat. Only when you
+need comments specifically, run
 `.wt/bin/review-show status waiting 'Comments needed: <topic>'`; it holds until
-comments are sent. `review-show status idle` withdraws any ask, for instance
-when they answer in chat.
+comments are sent. `review-show status idle` withdraws any ask.
 `review-show slides` remembers your pane (Rex or tmux) for the human's `:send` comments.
 When comments arrive, reread the deck and reply under each with
 `> **agent:** …` (or `ChatGPT`, `Codex`, or `claude` as the speaker); keep the human's lines intact. That reply acknowledges the
 comment, so restarting the panel does not make it appear unsent again.
 
-`review-show code repos/<repo>/<path>:<line>` opens a file beside the slides; `review-show diff [<pr>] [<path>[:<line>]]` moves the diff pane; `review-show close` quits the panel. When a `Diff:` anchor doesn't resolve, the panel warns about it: fix the line in the deck.
+`review-show code repos/<repo>/<path>:<line>` opens a file in the pane below the slides; `review-show diff [<pr>] <path>[:<line>]` opens that file's change there in unified.nvim; `review-show close` quits the panel. When a `Diff:` line can't be shown, the slide says why and the panel warns you: fix the line in the deck.
 
-The first time you show the deck, mention the keys once: `J`/`K` next and previous slide; `]p`/`[p`, `]f`/`[f`, `]c`/`[c` page the diff by PR, file and hunk; `gf` on a path opens it in the diff, or on a diff line opens the file there; `gd` opens the file in a tab, as unified.nvim's inline diff for the top PR and diffview for the ones below (`:DiffClose` closes it); `gu` lists files not viewed yet; `gs` puts the diff beside the slides instead of under them; `g?` lists the rest. If `review-show` says there is no panel, give the human the deck's path instead and keep going in chat.
+The first time you show the deck, mention the keys once: `J`/`K` next and previous slide; on code in a slide (or a path), `gf` opens the file there and `gd` its change in unified.nvim (diffview for lower PRs), in a pane below; `gu` lists files not viewed yet; `S` sends comments, `C` tells you to go on; `g?` lists the rest. If `review-show` says there is no panel, give the human the deck's path instead and keep going in chat.
 
 Answer questions in chat, and add a slide only when an answer changes the picture. When the walkthrough is done, write the summary (motivation, chapters in one line each, hotspots) to `## Summary` in `review/NOTES.md`.
 
