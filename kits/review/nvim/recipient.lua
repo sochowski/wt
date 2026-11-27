@@ -73,4 +73,13 @@ function M.resolve(preferred, callback)
   end)
 end
 
+-- The program status of the pane at ref (working, done, ...), or nil when
+-- there's none to read (tmux, or an error).
+function M.status(ref, callback)
+  local ok = pcall(vim.system, { wt_pane(), 'status', ref }, { text = true, timeout = 5000 }, function(r)
+    vim.schedule(function() callback(r.code == 0 and vim.trim(r.stdout or '') or nil) end)
+  end)
+  if not ok then callback(nil) end
+end
+
 return M

@@ -3,13 +3,11 @@
 #
 #   review-show slides FILE [N|last]   a markdown deck, slides split by --- lines
 #   review-show doc FILE [LINE]        any file, reloaded as it changes
-#   review-show code PATH[:LINE]       a file in a split beside the slides
-#   review-show diff [PR] [PATH[:LINE]]
-#                                      a PR's own changes in the pane under the
-#                                      slides; with only a path, the top PR
-#                                      that changes it
-#   review-show status waiting [TEXT]  keep asking for a response until comments
-#                                      are sent, even once the user has looked
+#   review-show code PATH[:LINE]       a file in the pane below the slides
+#   review-show diff [PR] PATH[:LINE]  that file's change in unified.nvim, in
+#                                      the pane below the slides; without a PR,
+#                                      the top PR that changes it
+#   review-show status waiting [TEXT]  ask for comments specifically, until sent
 #   review-show status idle            withdraw any ask, including the automatic one
 #   review-show bind FILE              reconnect a deck to this agent's pane
 #   review-show close                  quit the panel (the next call opens a fresh one)
@@ -19,10 +17,12 @@
 # or tmux it opens as a split right of this pane (see wt pane); elsewhere this
 # prints the command to start it, and the files can be read as plain markdown.
 #
-# You don't need to ask for attention: showing something while the user looks
-# elsewhere marks the panel blocked (Rex's activity UI; a bell and the pane
-# title in tmux) until they look at it. Unsent comments and failed sends keep
-# it blocked until they're dealt with.
+# Code goes in slides as `Diff: #PR repos/<repo>/<path>:FROM-TO` lines, which
+# the panel draws from the PR's real diff.
+#
+# You don't need to ask for attention: showing something marks the panel
+# blocked (Rex's activity UI; a bell and the pane title in tmux) until the user
+# replies: sends comments, presses C to say go on, or answers you in your pane.
 set -euo pipefail
 
 die() { printf 'review-show: %s\n' "$*" >&2; exit 1; }

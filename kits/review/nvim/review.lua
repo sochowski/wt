@@ -1,5 +1,5 @@
 -- The review panel: markdown slides and docs that reload while an agent
--- writes them, and a diff pane under them that follows the slides. review-show
+-- writes them, with the code they're about drawn inside them. review-show
 -- starts nvim with this file and calls into it over the --listen socket; the
 -- functions return 0 (or an error message) so --remote-expr stays quiet.
 --
@@ -13,36 +13,36 @@
 -- g? lists the keys. :SlideEdit opens the deck at the current slide, and
 -- :Slide N jumps to slide N.
 --
--- The diff pane shows one layer of the stack (review/layers.tsv) at a time,
--- from review/diffs/<n>.diff. A slide with a line like
---   Diff: #4512 repos/Runlayer/proxy/verdict.py:88
--- moves the pane there when you land on the slide. In the pane, ]p / [p, ]f /
--- [f and ]c / [c page by PR, file and hunk; gf opens the file at the side of
--- the line under the cursor; gd opens the file in a tab, in unified.nvim
--- when the layer's head is the checkout, else diffview. Agent notes from
--- review/annotations.tsv (pr, path, line, note) show above the lines they're
--- about. Every file the cursor enters is appended to review/viewed.tsv, and
--- gu lists the changed files not viewed yet.
+-- A line in a slide like
+--   Diff: #4512 repos/Runlayer/proxy/verdict.py:80-120
+-- shows those lines of the PR's change in place (see excerpt.lua), from
+-- review/layers.tsv and review/diffs/<n>.diff, with the agent's notes from
+-- review/annotations.tsv (pr, path, line, note) above their lines. gf on a
+-- line of it opens the file there, gd opens the file's change in unified.nvim
+-- (diffview for a PR below the checkout's head), both in a pane of their own
+-- below the slides. Files shown or opened are appended to review/viewed.tsv,
+-- and gu lists the changed files not viewed yet.
 
 local M = {}
 -- The optional dependency lets delivery tests control discovery independently.
 local here = vim.fn.fnamemodify(debug.getinfo(1, 'S').source:sub(2), ':p:h')
 local recipient = ... or dofile(here .. '/recipient.lua')
+local excerpt = dofile(here .. '/excerpt.lua')
 -- Panes are reached through wt's multiplexer adapter, so Rex and tmux work alike.
 local function wt_pane() return vim.g.wt_pane or vim.fn.fnamemodify(here .. '/../../../bin/wt-pane', ':p') end
 local panel_attention = dofile(vim.fn.fnamemodify(here .. '/../../../nvim/attention.lua', ':p'))
 local uv = vim.uv or vim.loop
 local root = vim.fn.getcwd()
 local main = vim.api.nvim_get_current_win()
-local deck = { path = nil, idx = 1, want = nil, count = 0, starts = {}, buf = nil, stamp = nil, anchored = nil }
-local code_win = nil
+-- at: slide buffer row -> { l, path, line } for the excerpts on the slide.
+local deck = { path = nil, idx = 1, want = nil, count = 0, starts = {}, buf = nil, stamp = nil, at = {} }
 local ns = vim.api.nvim_create_namespace('wt_review')
-local pane = { win = nil, pr = nil, stacked = true }
 local stack = { stamp = nil, list = {} }
-local views = {} -- pr -> { buf, pr, stamp, files, info, cursor }
+local diffs = {} -- pr -> { stamp, lines }
+local warned = {} -- Diff: problems already reported, by deck, slide and message
 local notes = { stamp = nil, rows = {} }
 local seen = nil -- 'pr\tpath' -> true
-local blobs = {} -- 'rev:path' -> buf
+local blobs = {} -- 'rev:path' -> lines, or false when unreadable
 
 local function stamp(path)
   local st = path and uv.fs_stat(path)
@@ -104,9 +104,11 @@ local attention = nil
 local finding = false
 local recipient_error = nil
 local update_activity
--- Showing something while the user looks elsewhere asks for them too, until
--- they look (see nvim/attention.lua).
-local look = panel_attention.new({ id = 'wt-review', app = 'wt', title = 'review',
+-- Presenting something asks for a reply: the pane stays blocked until the
+-- user sends comments, says go on (C), or answers the agent in its own pane,
+-- or the agent presents something else. Looking alone doesn't clear it
+-- (nvim/attention.lua, sticky).
+local look = panel_attention.new({ id = 'wt-review', app = 'wt', title = 'review', sticky = true,
   on_change = function() update_activity() end })
 
 local function feedback_status()
@@ -174,12 +176,7 @@ local function agent_target(lines)
 end
 
 local function main_win()
-  if not valid(main) then
-    for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
-      if w ~= pane.win and w ~= code_win then main = w break end
-    end
-    if not valid(main) then main = vim.api.nvim_get_current_win() end
-  end
+  if not valid(main) then main = vim.api.nvim_get_current_win() end
   return main
 end
 
@@ -193,32 +190,15 @@ local function resolve(path)
   return root .. '/' .. path
 end
 
--- The window files open in, reused on the next call: beside the diff when
--- it is under the slides (the slides are short then), else beside the slides.
-local function code_window()
-  if not valid(code_win) then
-    vim.api.nvim_set_current_win((valid(pane.win) and pane.stacked) and pane.win or main_win())
-    vim.cmd('rightbelow vsplit')
-    code_win = vim.api.nvim_get_current_win()
-  end
-  vim.api.nvim_set_current_win(code_win)
-  return code_win
-end
-
-local function jump(win, line, how)
-  if not tonumber(line) then return end
-  pcall(vim.api.nvim_win_set_cursor, win, { tonumber(line), 0 })
-  vim.api.nvim_win_call(win, function() vim.cmd('normal! ' .. (how or 'zz')) end)
-end
-
 -- Stack and diffs ----------------------------------------------------------
 
 local function review_file(name) return root .. '/review/' .. name end
 
 local function read_tsv(path)
-  local ok, lines = pcall(vim.fn.readfile, path)
   local rows = {}
-  for _, l in ipairs(ok and lines or {}) do
+  local ok, lines = pcall(vim.fn.readfile, path)
+  if not ok then return rows end
+  for _, l in ipairs(lines) do
     if l ~= '' then table.insert(rows, vim.split(l, '\t', { plain = true })) end
   end
   return rows
@@ -270,82 +250,62 @@ local function checkout(l)
   return checkouts[slug] or nil
 end
 
+local function head_of(co) return vim.fn.systemlist({ 'git', '-C', co, 'rev-parse', 'HEAD' })[1] end
+
 -- Paths in slides and packages are repos/<repo>/<path> or repo-relative.
 local function norm(path)
   path = path:gsub('^' .. vim.pesc(root) .. '/', '')
   return (path:gsub('^repos/[^/]+/', ''))
 end
 
--- Index a unified diff: files with their header line, hunks and counts, and
--- for each buffer line its file, hunk and old/new line numbers.
-local function parse(lines)
-  local files, info = {}, {}
-  local f, old, new
-  for i, l in ipairs(lines) do
-    local b = l:match('^diff %-%-git a/.- b/(.*)$')
-    if b then
-      f = { path = b, start = i, hunks = {}, hunk_new = {}, add = 0, del = 0 }
-      table.insert(files, f)
-      old, new = nil, nil
-      info[i] = { file = #files }
-    elseif f then
-      local o, n = l:match('^@@ %-(%d+),?%d* %+(%d+),?%d* @@')
-      local h = #f.hunks
-      if o then
-        old, new = tonumber(o), tonumber(n)
-        table.insert(f.hunks, i)
-        table.insert(f.hunk_new, new)
-        info[i] = { file = #files, hunk = h + 1 }
-      elseif not new then
-        info[i] = { file = #files }
-      else
-        local c = l:sub(1, 1)
-        if c == '+' then
-          info[i] = { file = #files, hunk = h, new = new }
-          new, f.add = new + 1, f.add + 1
-        elseif c == '-' then
-          info[i] = { file = #files, hunk = h, old = old }
-          old, f.del = old + 1, f.del + 1
-        elseif c == ' ' or l == '' then
-          info[i] = { file = #files, hunk = h, new = new, old = old }
-          new, old = new + 1, old + 1
-        else
-          info[i] = { file = #files, hunk = h }
+-- A layer's diff: review/diffs/<pr>.diff, else from its checkout.
+local function diff_lines(l)
+  local path = review_file('diffs/' .. l.pr .. '.diff')
+  local s = stamp(path)
+  local c = diffs[l.pr]
+  if c and c.stamp == s and (s or c.lines) then return c.lines end
+  local lines = s and vim.fn.readfile(path) or nil
+  if not lines then
+    local co = checkout(l)
+    lines = co and vim.fn.systemlist({ 'git', '-C', co, 'diff', l.lo, l.hi }) or {}
+  end
+  diffs[l.pr] = { stamp = s, lines = lines }
+  return lines
+end
+
+-- The layer to show path[:line] in: the top layer whose diff has that line,
+-- else the top layer that touches the file. Line numbers at the top of the
+-- stack match that layer's head, since no layer above it changes the file.
+local function layer_for(path, line)
+  local ls, touch = layers(), nil
+  for i = #ls, 1, -1 do
+    local hunks = excerpt.file(diff_lines(ls[i]), path)
+    if hunks then
+      touch = touch or ls[i]
+      if not line then return touch end
+      for _, h in ipairs(hunks) do
+        for _, r in ipairs(h) do
+          if r.new == line then return ls[i] end
         end
       end
     end
   end
-  return files, info
+  return touch
 end
 
-local function file_at(v, lnum)
-  local inf = v.info[lnum]
-  if inf then return inf.file end
-  return (#v.files > 0 and lnum > v.files[#v.files].start) and #v.files or nil
-end
-
--- The buffer line for path (and line, on the new side) in a view: the line
--- itself, else the hunk around or before it, else the file's header.
-local function locate(v, path, line)
-  for fi, f in ipairs(v.files) do
-    if f.path == path then
-      if not line then return f.start end
-      local stop = (v.files[fi + 1] and v.files[fi + 1].start or #v.info + 1) - 1
-      for i = f.start, stop do
-        local inf = v.info[i]
-        if inf and inf.new == line and inf.old == nil then return i end
-      end
-      for i = f.start, stop do
-        local inf = v.info[i]
-        if inf and inf.new == line then return i end
-      end
-      local best = f.start
-      for h, n in ipairs(f.hunk_new) do
-        if n <= line then best = f.hunks[h] end
-      end
-      return best
-    end
+-- A file at one revision, as lines, or nil when there's no checkout to read
+-- it from.
+local function file_at(l, rev, path)
+  local key = rev .. ':' .. path
+  if blobs[key] ~= nil then return blobs[key] or nil end
+  local co = checkout(l)
+  local lines = false
+  if co then
+    local out = vim.fn.systemlist({ 'git', '-C', co, 'show', key })
+    if vim.v.shell_error == 0 then lines = out end
   end
+  blobs[key] = lines
+  return lines or nil
 end
 
 local function load_seen()
@@ -380,319 +340,160 @@ local function wrap(text, width)
 end
 
 -- annotations.tsv: pr path line note
-local function draw_notes(v)
-  vim.api.nvim_buf_clear_namespace(v.buf, ns, 0, -1)
-  local width = math.max(40, (valid(pane.win) and vim.api.nvim_win_get_width(pane.win) or 100) - 8)
-  for _, r in ipairs(notes.rows) do
-    if r[1] and r[1]:gsub('^#', '') == v.pr and r[4] then
-      local at = locate(v, norm(r[2]), tonumber(r[3]))
-      if at then
-        local virt = {}
-        for i, l in ipairs(wrap(table.concat(r, ' ', 4), width)) do
-          table.insert(virt, { { (i == 1 and '  ◆ ' or '    ') .. l, 'DiagnosticVirtualTextInfo' } })
-        end
-        vim.api.nvim_buf_set_extmark(v.buf, ns, at - 1, 0, { virt_lines = virt, virt_lines_above = true })
-      end
-    end
-  end
-end
-
--- Reload annotations.tsv when it changes and redraw every view's notes.
-local function refresh_notes()
+local function notes_for(pr, path)
   local s = stamp(review_file('annotations.tsv'))
-  if s == notes.stamp then return false end
-  notes.stamp, notes.rows = s, read_tsv(review_file('annotations.tsv'))
-  for _, v in pairs(views) do
-    if v.files and vim.api.nvim_buf_is_valid(v.buf) then draw_notes(v) end
-  end
-  return true
-end
-
-local pane_keys -- set up below, once the navigation exists
-
--- The view of one layer, rebuilt when its diff file changes.
-local function view(l)
-  local path = review_file('diffs/' .. l.pr .. '.diff')
-  local s = stamp(path)
-  local v = views[l.pr]
-  if v and v.files and vim.api.nvim_buf_is_valid(v.buf) and v.stamp == s then return v end
-  local lines = s and vim.fn.readfile(path) or {}
-  if not s then
-    local co = checkout(l)
-    if co then lines = vim.fn.systemlist({ 'git', '-C', co, 'diff', l.lo, l.hi }) end
-  end
-  if #lines == 0 then lines = { string.format('(no changes in #%s)', l.pr) } end
-  if not (v and vim.api.nvim_buf_is_valid(v.buf)) then
-    local buf = vim.api.nvim_create_buf(false, true)
-    vim.api.nvim_buf_set_name(buf, 'review://diff/#' .. l.pr)
-    vim.bo[buf].bufhidden = 'hide'
-    vim.bo[buf].filetype = 'diff'
-    pcall(vim.treesitter.start, buf, 'diff')
-    v = { buf = buf, pr = l.pr }
-    views[l.pr] = v
-    pane_keys(buf)
-  end
-  v.stamp = s
-  v.files, v.info = parse(lines)
-  vim.bo[v.buf].modifiable = true
-  vim.api.nvim_buf_set_lines(v.buf, 0, -1, false, lines)
-  vim.bo[v.buf].modifiable = false
-  vim.bo[v.buf].modified = false
-  if not refresh_notes() then draw_notes(v) end
-  return v
-end
-
--- The layer to show path[:line] in: the top layer whose diff has that line,
--- else the top layer that touches the file. Line numbers at the top of the
--- stack match that layer's head, since no layer above it changes the file.
-local function layer_for(path, line)
-  local ls, touch = layers(), nil
-  for i = #ls, 1, -1 do
-    local v = view(ls[i])
-    for fi, f in ipairs(v.files) do
-      if f.path == path then
-        touch = touch or ls[i]
-        if not line then return touch end
-        local stop = (v.files[fi + 1] and v.files[fi + 1].start or #v.info + 1) - 1
-        for j = f.start, stop do
-          if v.info[j] and v.info[j].new == line then return ls[i] end
-        end
-      end
+  if s ~= notes.stamp then notes.stamp, notes.rows = s, read_tsv(review_file('annotations.tsv')) end
+  local out = {}
+  for _, r in ipairs(notes.rows) do
+    if r[1] and r[1]:gsub('^#', '') == pr and r[2] and norm(r[2]) == path and tonumber(r[3]) and r[4] then
+      table.insert(out, { tonumber(r[3]), table.concat(r, ' ', 4) })
     end
   end
-  return touch
+  return out
 end
 
--- Size the slide above the pane to its text, up to 45% of the height.
-local function fit()
-  if not (valid(pane.win) and pane.stacked) then return end
-  local win = main_win()
-  if vim.api.nvim_win_get_buf(win) ~= deck.buf then return end
-  local total = vim.api.nvim_win_get_height(win) + vim.api.nvim_win_get_height(pane.win)
-  local ok, th = pcall(vim.api.nvim_win_text_height, win, {})
-  local want = ok and th.all + 1 or 12
-  vim.api.nvim_win_set_height(win, math.max(5, math.min(want, math.floor(total * 0.45))))
-end
+-- The file pane ----------------------------------------------------------
+--
+-- Files and full diffs open in a second nvim, in a pane of its own below the
+-- slides (wt pane split: Rex or tmux), never in a split of this one. The
+-- slides drive it over its socket. Closed, it opens again on the next use.
 
-local function current()
-  if not valid(pane.win) then return end
-  local v = views[pane.pr]
-  if not v or vim.api.nvim_win_get_buf(pane.win) ~= v.buf then return end
-  return v, vim.api.nvim_win_get_cursor(pane.win)[1]
-end
+local side = { sock = nil, ch = nil, ref = nil, starting = false, queue = {} }
 
-local function pane_bar()
-  local v, lnum = current()
-  if not v then return end
-  local l = layer(v.pr)
-  local parts = { string.format(' #%s (%d/%d) %s', v.pr, layer_index(v.pr) or 0, #layers(), l and l.title or '') }
-  local fi = file_at(v, lnum)
-  local f = fi and v.files[fi]
-  if f then
-    table.insert(parts, string.format('%s (%d/%d)', f.path, fi, #v.files))
-    local h = v.info[lnum] and v.info[lnum].hunk or 0
-    if #f.hunks > 0 and h > 0 then table.insert(parts, string.format('hunk %d/%d', h, #f.hunks)) end
-    table.insert(parts, string.format('+%d −%d', f.add, f.del))
-    mark_seen(v.pr, f.path)
+-- Runs in the file pane's nvim with one argument: what to show.
+local SHOW = [[
+local a = ...
+local ok, err = pcall(function()
+  local okd, ustate = pcall(require, 'unified.state')
+  if okd and ustate.is_active() then vim.cmd('Unified reset') end
+  if vim.t.diffview_view_initialized and vim.fn.exists(':DiffviewClose') == 2 then vim.cmd('DiffviewClose') end
+  if a.cwd then vim.cmd.tcd(vim.fn.fnameescape(a.cwd)) end
+  if a.range and vim.fn.exists(':DiffviewOpen') == 2 then
+    vim.cmd('DiffviewOpen ' .. a.range .. ' -- ' .. vim.fn.fnameescape(a.rel))
+    return
   end
-  v.cursor = lnum
-  vim.wo[pane.win].winbar = table.concat(parts, ' · '):gsub('%%', '%%%%') .. '%=]p ]f ]c page · g? keys '
-end
-
-local function open_pane(buf, focus)
-  local back = vim.api.nvim_get_current_win()
-  if not valid(pane.win) then
-    vim.api.nvim_set_current_win(main_win())
-    vim.cmd(pane.stacked and 'botright split' or 'botright vsplit')
-    pane.win = vim.api.nvim_get_current_win()
-    if not pane.stacked then vim.api.nvim_win_set_width(pane.win, math.floor(vim.o.columns * 0.6)) end
-  end
-  vim.api.nvim_win_set_buf(pane.win, buf)
-  for opt, val in pairs({ wrap = false, number = false, relativenumber = false, signcolumn = 'no',
-                          cursorline = true, foldenable = false, list = false }) do
-    vim.wo[pane.win][opt] = val
-  end
-  vim.api.nvim_set_current_win(focus and pane.win or (valid(back) and back or main_win()))
-  fit()
-end
-
--- Show layer pr (or the top layer touching path) at path:line. Returns an
--- error message, or 0.
-local function show_diff(pr, path, line, focus)
-  if #layers() == 0 then return 'no review/layers.tsv in ' .. root end
-  path = path and path ~= '' and norm(path) or nil
-  local l
-  if pr and pr ~= '' then
-    l = layer(pr)
-    if not l then return '#' .. tostring(pr):gsub('^#', '') .. ' is not in review/layers.tsv' end
-  elseif path then
-    l = layer_for(path, tonumber(line))
-    if not l then return path .. ' is not changed anywhere in the stack' end
-  else
-    l = layer(pane.pr) or layers()[1]
-  end
-  local v = view(l)
-  local at = path and locate(v, path, tonumber(line))
-  if path and not at then return path .. ' is not in the diff of #' .. l.pr end
-  if pane.pr and pane.pr ~= l.pr and views[pane.pr] and valid(pane.win) then
-    views[pane.pr].cursor = vim.api.nvim_win_get_cursor(pane.win)[1]
-  end
-  pane.pr = l.pr
-  open_pane(v.buf, focus)
-  jump(pane.win, at or v.cursor or 1, (at and not line) and 'zt' or 'zz')
-  pane_bar()
-  return 0
-end
-
--- Pane navigation ----------------------------------------------------------
-
-local function page_pr(d)
-  return function()
-    if not valid(pane.win) then return show_diff(pane.pr, nil, nil, false) end
-    local i = layer_index(pane.pr) or 1
-    local n = math.max(1, math.min(#layers(), i + d * vim.v.count1))
-    if n ~= i or not valid(pane.win) then show_diff(layers()[n].pr, nil, nil, vim.api.nvim_get_current_win() == pane.win) end
-  end
-end
-
-local function page_file(d)
-  return function()
-    if not current() then show_diff(nil, nil, nil, false) end
-    local v, lnum = current()
-    if not v or #v.files == 0 then return end
-    local fi = file_at(v, lnum)
-    local t
-    if not fi then t = d > 0 and 1 or nil
-    elseif d < 0 and lnum > v.files[fi].start then t = fi - (vim.v.count1 - 1)
-    else t = fi + d * vim.v.count1 end
-    if not t then return end
-    t = math.max(1, math.min(#v.files, t))
-    jump(pane.win, v.files[t].start, 'zt')
-    pane_bar()
-  end
-end
-
-local function page_hunk(d)
-  return function()
-    if not current() then show_diff(nil, nil, nil, false) end
-    local v, lnum = current()
-    if not v then return end
-    local all = {}
-    for _, f in ipairs(v.files) do vim.list_extend(all, f.hunks) end
-    local target = lnum
-    for _ = 1, vim.v.count1 do
-      local nxt
-      if d > 0 then
-        for _, h in ipairs(all) do if h > target then nxt = h break end end
-      else
-        for i = #all, 1, -1 do if all[i] < target then nxt = all[i] break end end
-      end
-      if not nxt then break end
-      target = nxt
-    end
-    if target ~= lnum then
-      jump(pane.win, target, 'zt')
-      pane_bar()
-    end
-  end
-end
-
--- A file at one revision, read-only: the working tree when that revision is
--- the checkout's HEAD (so LSP and friends work), else a scratch buffer.
-local function blob(l, rev, path)
-  local co = checkout(l)
-  if not co then return nil, 'no checkout of ' .. l.url end
-  local head = vim.fn.systemlist({ 'git', '-C', co, 'rev-parse', 'HEAD' })[1]
-  if head == rev and uv.fs_stat(co .. '/' .. path) then return co .. '/' .. path end
-  local key = rev .. ':' .. path
-  if blobs[key] and vim.api.nvim_buf_is_valid(blobs[key]) then return blobs[key] end
-  local lines = vim.fn.systemlist({ 'git', '-C', co, 'show', key })
-  if vim.v.shell_error ~= 0 then return nil, path .. ' does not exist at ' .. rev:sub(1, 7) end
-  local buf = vim.api.nvim_create_buf(false, true)
-  vim.api.nvim_buf_set_name(buf, 'review://' .. rev:sub(1, 7) .. '/' .. path)
-  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
-  vim.bo[buf].modifiable = false
-  vim.bo[buf].bufhidden = 'hide'
-  local ft = vim.filetype.match({ filename = path, buf = buf })
-  if ft then vim.bo[buf].filetype = ft end
-  blobs[key] = buf
-  return buf
-end
-
-local function show_blob(target, line)
-  local win = code_window()
-  if type(target) == 'string' then
-    vim.cmd.edit(vim.fn.fnameescape(target))
-    vim.bo.autoread = true
-  else
-    vim.api.nvim_win_set_buf(win, target)
-  end
-  jump(win, line)
-end
-
--- gf in the pane: the head side of + and context lines, the base side of -.
-local function open_side()
-  local v, lnum = current()
-  if not v then return end
-  local inf, fi = v.info[lnum], file_at(v, lnum)
-  if not fi then return end
-  local l, f = layer(v.pr), v.files[fi]
-  local rev, line = l.hi, inf and inf.new or 1
-  if inf and inf.old and not inf.new then rev, line = l.lo, inf.old end
-  if inf and inf.hunk and not inf.new and not inf.old then line = f.hunk_new[inf.hunk] or 1 end
-  local target, err = blob(l, rev, f.path)
-  if not target then return vim.notify(err) end
-  show_blob(target, line)
-end
-
--- gd: the current file in a tab of its own. For the top layer, whose head is
--- the checkout, that is unified.nvim: the inline diff in the real file, with
--- its tree of the layer's other files. Unified diffs the working tree against
--- one ref, so a lower layer gets diffview, or vim's own two-way diff.
-local function open_full()
-  local v, lnum = current()
-  local fi = v and file_at(v, lnum)
-  if not fi then return end
-  local l, f, inf = layer(v.pr), v.files[fi], v.info[lnum]
-  local co = checkout(l)
-  if not co then return vim.notify('no checkout of ' .. l.url) end
-  local line = inf and (inf.new or (inf.hunk and f.hunk_new[inf.hunk])) or nil
-  local head = vim.fn.systemlist({ 'git', '-C', co, 'rev-parse', 'HEAD' })[1]
-  vim.cmd('tabnew')
-  vim.cmd.tcd(vim.fn.fnameescape(co))
-  local ok, ustate = pcall(require, 'unified.state')
-  if ok and vim.fn.exists(':Unified') == 2 and head == l.hi and uv.fs_stat(co .. '/' .. f.path) then
-    -- Unified keeps one view at a time; it resolves the ref asynchronously and
-    -- then jumps to the first hunk, so wait for it before placing the cursor.
-    if ustate.is_active() then vim.cmd('Unified reset') end
-    vim.cmd.edit(vim.fn.fnameescape(co .. '/' .. f.path))
-    local win = vim.api.nvim_get_current_win()
-    vim.cmd('Unified ' .. l.lo)
+  vim.cmd.edit(vim.fn.fnameescape(a.file))
+  if a.readonly then vim.bo.readonly, vim.bo.modifiable = true, false end
+  local win = vim.api.nvim_get_current_win()
+  if a.base and okd and vim.fn.exists(':Unified') == 2 then
+    -- Unified resolves the ref asynchronously, then jumps to the first hunk.
+    vim.cmd('Unified ' .. a.base)
     vim.wait(2000, function() return ustate.is_active() end, 20)
-    if line and valid(win) then jump(win, line) end
-    vim.notify(':DiffClose closes this tab')
-    return
   end
-  if vim.fn.exists(':DiffviewOpen') == 2 then
-    vim.cmd('DiffviewOpen ' .. l.lo .. '..' .. l.hi .. ' -- ' .. vim.fn.fnameescape(f.path))
-    return
+  if a.line and vim.api.nvim_win_is_valid(win) then
+    pcall(vim.api.nvim_win_set_cursor, win, { a.line, 0 })
+    vim.cmd('normal! zz')
   end
-  local left = blob(l, l.lo, f.path) or vim.api.nvim_create_buf(false, true)
-  local right = blob(l, l.hi, f.path) or vim.api.nvim_create_buf(false, true)
-  local function put(t) if type(t) == 'string' then vim.cmd.edit(vim.fn.fnameescape(t)) else vim.api.nvim_win_set_buf(0, t) end end
-  put(left)
-  vim.cmd('diffthis | rightbelow vsplit')
-  put(right)
-  vim.cmd('diffthis')
+end)
+if not ok then vim.notify('review: ' .. tostring(err), vim.log.levels.ERROR) end
+]]
+
+local function side_sock()
+  local s = root .. '/.wt/review-files.sock'
+  if #s >= 100 then s = (vim.env.TMPDIR or '/tmp') .. '/wt-review-files-' .. vim.fn.sha256(root):sub(1, 12) .. '.sock' end
+  return s
 end
 
--- gu: changed files the cursor has never entered in the pane.
+local function side_connect()
+  if side.ch then
+    -- A closed channel has no info left. (No request: a file pane stuck at a
+    -- prompt would never answer it.)
+    if next(vim.api.nvim_get_chan_info(side.ch)) then return true end
+    side.ch = nil
+  end
+  if not uv.fs_stat(side.sock) then return false end
+  local ok, ch = pcall(vim.fn.sockconnect, 'pipe', side.sock, { rpc = true })
+  if ok and ch > 0 then side.ch = ch return true end
+  return false
+end
+
+local function side_flush()
+  local q = side.queue
+  side.queue = {}
+  for _, item in ipairs(q) do
+    vim.rpcnotify(side.ch, 'nvim_exec_lua', SHOW, { item.args })
+    if item.focus and side.ref then vim.system({ wt_pane(), 'focus', side.ref }) end
+  end
+end
+
+-- Show something in the file pane, opening the pane first if it isn't up.
+local function side_show(args, focus)
+  side.sock = side.sock or side_sock()
+  table.insert(side.queue, { args = args, focus = focus })
+  if side_connect() then return side_flush() end
+  if side.starting then return end
+  side.starting = true
+  pcall(vim.fn.delete, side.sock)
+  local argv = { wt_pane(), 'split', '--dir', 'below', '--size', '60', '--label', 'review files', '--cwd', root,
+    '--', 'nvim', '-i', 'NONE', '--listen', side.sock }
+  local ok, err = pcall(vim.system, argv, { text = true, timeout = 15000 }, function(r)
+    vim.schedule(function()
+      if r.code ~= 0 then
+        side.starting, side.queue = false, {}
+        return vim.notify('No pane for files: ' .. vim.trim(r.stderr or ''), vim.log.levels.WARN)
+      end
+      side.ref = vim.trim(r.stdout or '')
+      local tries = 0
+      local t = uv.new_timer()
+      t:start(100, 100, vim.schedule_wrap(function()
+        tries = tries + 1
+        if side_connect() then
+          t:stop(); t:close(); side.starting = false
+          side_flush()
+        elseif tries > 50 then
+          t:stop(); t:close(); side.starting, side.queue = false, {}
+          vim.notify('The file pane did not come up on ' .. side.sock, vim.log.levels.WARN)
+        end
+      end))
+    end)
+  end)
+  if not ok then side.starting, side.queue = false, {}; vim.notify(tostring(err), vim.log.levels.WARN) end
+end
+
+-- The file pane goes when the panel does (unless it has unsaved edits).
+vim.api.nvim_create_autocmd('VimLeavePre', { callback = function()
+  if side.ch and next(vim.api.nvim_get_chan_info(side.ch)) then pcall(vim.rpcnotify, side.ch, 'nvim_command', 'qa') end
+end })
+
+-- A layer's file at its head, for gf: the working file when the checkout is
+-- at that head (so LSP and friends work), else a read-only copy.
+local function open_file(l, path, line, focus)
+  local co = checkout(l)
+  if co and head_of(co) == l.hi and uv.fs_stat(co .. '/' .. path) then
+    side_show({ cwd = co, file = co .. '/' .. path, line = line }, focus)
+  else
+    local lines = file_at(l, l.hi, path)
+    if not lines then return vim.notify(path .. ' at ' .. l.hi:sub(1, 7) .. ': no checkout to read it from') end
+    local copy = review_file('.files/' .. l.hi:sub(1, 12) .. '/' .. path)
+    vim.fn.mkdir(vim.fn.fnamemodify(copy, ':h'), 'p')
+    vim.fn.writefile(lines, copy)
+    side_show({ cwd = co, file = copy, line = line, readonly = true }, focus)
+  end
+  mark_seen(l.pr, path)
+end
+
+-- gd: the file's change in unified.nvim, the inline diff in the real file.
+-- Unified diffs the working tree against one ref, so that needs the checkout
+-- at the layer's head; any other layer gets diffview.
+local function open_diff(l, path, line, focus)
+  local co = checkout(l)
+  if not co then return open_file(l, path, line, focus) end
+  if head_of(co) == l.hi and uv.fs_stat(co .. '/' .. path) then
+    side_show({ cwd = co, file = co .. '/' .. path, line = line, base = l.lo }, focus)
+  else
+    side_show({ cwd = co, rel = path, range = l.lo .. '..' .. l.hi, file = co .. '/' .. path, line = line }, focus)
+  end
+  mark_seen(l.pr, path)
+end
+
+-- gu: changed files not shown in an excerpt or opened yet.
 local function unviewed()
   local items = {}
   for _, l in ipairs(layers()) do
-    for _, f in ipairs(view(l).files) do
-      if not load_seen()[l.pr .. '\t' .. f.path] then
-        table.insert(items, { pr = l.pr, path = f.path, label = string.format('#%s  +%d −%d  %s', l.pr, f.add, f.del, f.path) })
+    for _, line in ipairs(diff_lines(l)) do
+      local f = line:match('^diff %-%-git a/.- b/(.*)$')
+      if f and not load_seen()[l.pr .. '\t' .. f] then
+        table.insert(items, { l = l, path = f, label = string.format('#%s  %s', l.pr, f) })
       end
     end
   end
@@ -701,37 +502,49 @@ local function unviewed()
     prompt = string.format('Not viewed yet (%d)', #items),
     format_item = function(it) return it.label end,
   }, function(it)
-    if it then show_diff(it.pr, it.path, nil, true) end
+    if it then open_diff(it.l, it.path, nil, true) end
   end)
-end
-
-local function toggle_layout()
-  if not valid(pane.win) then return end
-  pane.stacked = not pane.stacked
-  -- The file split belongs to whichever side the diff was on; drop it rather
-  -- than leave it stranded. The next gf opens it again.
-  if valid(code_win) then vim.api.nvim_win_close(code_win, false) end
-  vim.api.nvim_win_call(pane.win, function() vim.cmd(pane.stacked and 'wincmd J' or 'wincmd L') end)
-  if pane.stacked then fit() else vim.api.nvim_win_set_width(pane.win, math.floor(vim.o.columns * 0.6)) end
-  if current() then draw_notes(views[pane.pr]) end
 end
 
 -- Slides -------------------------------------------------------------------
 
--- `Diff: #4512 repos/Runlayer/path.py:88`, `Diff: #4512`, or `Diff: path:88`,
--- optionally bold or in backticks.
-local function anchor(lines)
-  for _, l in ipairs(lines) do
-    local d = l:match('^%s*[%*_]*Diff[%*_]*:[%*_]*%s+(.*)$')
-    if d then
-      d = d:gsub('[`%*]', '')
-      local pr, ref = d:match('^#(%d+)%s*(%S*)')
-      if not pr then pr, ref = d:match('^(%d+)%s+(%S*)') end
-      if not pr then pr, ref = d:match('^(%d+)%s*$'), '' end
-      if not pr then ref = d:match('^(%S+)') end
-      local path, ln = (ref or ''):match('^(.-):(%d+)$')
-      if not path then path = ref ~= '' and ref or nil end
-      return { pr = pr, path = path, line = tonumber(ln) }
+-- A Diff: line, expanded: the excerpt's lines and marks, or a warning line.
+local function expand(d)
+  local path = d.path and norm(d.path)
+  if not path then return nil, 'a Diff: line needs a path' end
+  local l = d.pr and layer(d.pr) or layer_for(path, d.from)
+  if not l then
+    return nil, d.pr and ('#' .. d.pr .. ' is not in review/layers.tsv') or (path .. ' is not changed anywhere in the stack')
+  end
+  local lang = vim.filetype.match({ filename = path }) or ''
+  local x, err = excerpt.build({ diff = diff_lines(l), path = path, from = d.from, to = d.to,
+    head = file_at(l, l.hi, path), notes = notes_for(l.pr, path), lang = lang })
+  if not x then return nil, err .. ' (#' .. l.pr .. ')' end
+  x.l, x.path = l, path
+  local range = x.from == x.to and tostring(x.from) or (x.from .. '-' .. x.to)
+  x.caption = string.format('*#%s · %s:%s*', l.pr, path, range)
+  return x
+end
+
+local function draw(buf, marks, width)
+  for _, m in ipairs(marks) do
+    if m.number then
+      vim.api.nvim_buf_set_extmark(buf, ns, m.row, 0, { virt_text = { { string.format('%4d ', m.number), 'LineNr' } },
+        virt_text_pos = 'inline', priority = 200 })
+    elseif m.add then
+      vim.api.nvim_buf_set_extmark(buf, ns, m.row, 0, { line_hl_group = 'DiffAdd', priority = 200 })
+    elseif m.removed then
+      local virt = {}
+      for _, t in ipairs(m.removed) do
+        table.insert(virt, { { '   - ', 'DiffDelete' }, { t, 'DiffDelete' } })
+      end
+      vim.api.nvim_buf_set_extmark(buf, ns, m.row, 0, { virt_lines = virt, virt_lines_above = not m.below })
+    elseif m.note then
+      local virt = {}
+      for i, t in ipairs(wrap(m.note, math.max(30, width - 10))) do
+        table.insert(virt, { { (i == 1 and '     ◆ ' or '       ') .. t, 'DiagnosticVirtualTextInfo' } })
+      end
+      vim.api.nvim_buf_set_extmark(buf, ns, m.row, 0, { virt_lines = virt, virt_lines_above = true })
     end
   end
 end
@@ -762,12 +575,41 @@ local function render()
   update_activity()
 
   local buf = deck.buf
+  -- The agent: line is for :Send, not for reading. Diff: lines become the
+  -- code they name.
+  local shown, marks, at = {}, {}, {}
+  local width = 80
+  for _, win in ipairs(vim.fn.win_findbuf(buf)) do width = vim.api.nvim_win_get_width(win) end
+  for _, l in ipairs(slides[deck.idx]) do
+    local d = not l:match('^%s*<!%-%-%s*agent:') and excerpt.directive(l)
+    if d and #layers() > 0 then
+      local x, err = expand(d)
+      if x then
+        table.insert(shown, x.caption)
+        local base = #shown
+        vim.list_extend(shown, x.lines)
+        for _, m in ipairs(x.marks) do table.insert(marks, vim.tbl_extend('force', m, { row = m.row + base })) end
+        for row, n in pairs(x.at) do at[row + base] = { l = x.l, path = x.path, line = n } end
+        mark_seen(x.l.pr, x.path)
+      else
+        table.insert(shown, '> ⚠ ' .. l:gsub('^%s+', '') .. ': ' .. err)
+        local key = deck.path .. '|' .. deck.idx .. '|' .. err
+        if not warned[key] then
+          warned[key] = true
+          vim.notify('Diff: ' .. err, vim.log.levels.WARN)
+        end
+      end
+    elseif not l:match('^%s*<!%-%-%s*agent:') then
+      table.insert(shown, l)
+    end
+  end
   vim.bo[buf].modifiable = true
-  -- The agent: line is for :Send, not for reading.
-  local shown = vim.tbl_filter(function(l) return not l:match('^%s*<!%-%-%s*agent:') end, slides[deck.idx])
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, shown)
   vim.bo[buf].modifiable = false
   vim.bo[buf].modified = false
+  vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
+  draw(buf, marks, width)
+  deck.at = at
   for _, win in ipairs(vim.fn.win_findbuf(buf)) do
     local name = vim.fn.fnamemodify(deck.path, ':t'):gsub('%%', '%%%%')
     local pending = deck.unsent > 0 and string.format('  💬 %d unsent, S to send', deck.unsent) or ''
@@ -779,21 +621,17 @@ local function render()
       pending = delivery.busy and '  sending comments…' or '  send failed, :send to retry'
     elseif attention then
       pending = pending .. '  comments needed'
+    elseif look.pending() and deck.unsent == 0 then
+      pending = '  your turn · C go on'
     end
-    vim.wo[win].winbar = string.format(' %s  %d/%d%s%%=J/K slide · c comment · ]p ]f ]c diff · g? keys ', name, deck.idx, deck.count, pending)
+    vim.wo[win].winbar = string.format(' %s  %d/%d%s%%=g? keys ', name, deck.idx, deck.count, pending)
     vim.api.nvim_win_set_cursor(win, { 1, 0 })
   end
-
-  -- Follow the slide's anchor when arriving on it, not on every rewrite, so
-  -- the agent appending slides doesn't yank the pane away from the human.
-  local a = anchor(slides[deck.idx])
-  local key = a and (deck.path .. '|' .. deck.idx .. '|' .. vim.inspect(a))
-  if a and key ~= deck.anchored and #layers() > 0 then
-    deck.anchored = key
-    local err = show_diff(a.pr, a.path, a.line, false)
-    if err ~= 0 then vim.notify('Diff anchor: ' .. err, vim.log.levels.WARN) end
-  end
-  fit()
+  -- Lines set from a remote call fire none of the events render-markdown
+  -- redraws on, so ask it directly (or nudge it, for other setups).
+  local okr, rm = pcall(require, 'render-markdown.api')
+  if okr and rm.render then pcall(rm.render, { buf = buf })
+  else pcall(vim.api.nvim_exec_autocmds, 'TextChanged', { buffer = buf }) end
 end
 
 local function step(d)
@@ -874,7 +712,8 @@ local function deliver(force)
     if #fresh == 0 then render(); return vim.notify('nothing new to send') end
     local msg = string.format('New comments in %s, reply under each one in the deck: %s',
       deck.path, table.concat(parts, ' · '))
-    delivery = { path = deck.path, keys = fresh, target = ref, msg = msg, pasted = false, attention = attention }
+    delivery = { path = deck.path, keys = fresh, target = ref, msg = msg, pasted = false, attention = attention,
+      which = look.which() }
   end
   local batch = delivery
   batch.busy = true
@@ -902,6 +741,8 @@ local function deliver(force)
       delivery = nil
       -- A request for another deck may have appeared while this one was sending.
       if attention == batch.attention then attention = nil end
+      -- Comments are a reply: the ask they answer is over. A newer one stays.
+      if batch.which then look.dismiss(batch.which) end
       render()
       vim.notify(string.format('submitted %d comment%s to the agent pane', #batch.keys, #batch.keys == 1 and '' or 's'))
     end)
@@ -946,30 +787,57 @@ local function send(force)
   connect(function() deliver(force) end)
 end
 
+-- C: tell the agent to go on, from the panel. A reply like comments are.
+local function go_on()
+  if (deck.unsent or 0) > 0 then
+    return vim.notify(string.format('%d comment%s unsent: S sends them', deck.unsent, deck.unsent == 1 and ' is' or 's are'))
+  end
+  if delivery and delivery.busy then return vim.notify('comments are being sent') end
+  local which, path, idx, count = look.which(), deck.path, deck.idx, deck.count
+  connect(function()
+    render()
+    local ref = owners[path]
+    local msg = string.format('Go on (from the review panel: %s, slide %d/%d).', vim.fn.fnamemodify(path, ':t'), idx, count)
+    local function call(argv, cb)
+      local ok, err = pcall(vim.system, argv, { text = true, timeout = 15000 }, function(r)
+        vim.schedule(function() cb(r) end)
+      end)
+      if not ok then vim.notify(tostring(err), vim.log.levels.ERROR) end
+    end
+    call({ wt_pane(), 'send', ref, msg }, function(r)
+      if r.code ~= 0 then return vim.notify('Go on failed: ' .. (r.stderr or ''), vim.log.levels.ERROR) end
+      call({ wt_pane(), 'key', ref, 'enter' }, function(r2)
+        if r2.code ~= 0 then return vim.notify('Go on failed at Enter: ' .. (r2.stderr or ''), vim.log.levels.ERROR) end
+        if which then look.dismiss(which) end
+        render()
+        vim.notify('told the agent to go on')
+      end)
+    end)
+  end)
+end
+
 local keys_help = {
   'Slides',
   '  j k gg G ctrl-d ctrl-u   move within the slide',
   '  J ]]  /  K [[            next / previous slide (with a count: 3J)',
   '  H  /  L                  first / last slide',
-  '  gf  or  <CR>             the path:line under the cursor: in the diff if it changed, else the file',
-  '  gF                       the path:line under the cursor as a plain file',
   '  :Slide N  :SlideEdit     jump to slide N; edit the deck at this slide',
-  'Comments',
+  'Code (in the pane below the slides, opened on first use)',
+  '  gf  or  <CR>             on code in a slide: the file at that line, at the PR\'s head;',
+  '                           on a path:line: that file',
+  '  gd                       the same file\'s change in unified.nvim (diffview for a PR',
+  '                           below the checkout\'s head)',
+  '  gF                       the path:line under the cursor as a plain file',
+  '  gu                       changed files not viewed yet',
+  'Replying',
   '  c                        comment on this slide',
   '  a then a letter          pick an option (a b c …)',
   '  ]n  /  [n                next / previous slide still in discussion',
   '  S  or  :send             send new comments to the agent (again whenever you add more)',
+  '  C                        tell the agent to go on',
   '  :send!                   resend unreplied comments if the agent missed a submission',
   '  :Reconnect               find an existing agent in this tab; choose if several',
-  'Diff pane (these work from the slides too)',
-  '  ]p [p  ]f [f  ]c [c      next / previous PR, file, hunk (with a count)',
-  '  gf  or  <CR>             open the file at this line (head side; base side on a - line)',
-  '  gd                       this file in a tab: unified.nvim for the top PR, else diffview;',
-  '                           :DiffClose closes the tab',
-  '  gu                       changed files not viewed yet',
-  '  gs                       diff under the slides / beside them',
-  '  J  K                     next / previous slide',
-  'q quits the panel (from the slides or the pane)',
+  'q quits the panel',
 }
 
 -- First path[:line] on the current line, preferring the one under the cursor.
@@ -984,52 +852,43 @@ local function ref_under_cursor()
   return best
 end
 
--- gf on a slide or doc: a Diff: anchor, or a path the stack changes, opens
--- in the pane; anything else opens as a file.
+-- gf on a slide or doc: on code from an excerpt, the file at that line;
+-- else the path:line under the cursor.
 local function follow()
-  local a = anchor({ vim.api.nvim_get_current_line() })
-  if a then
-    local err = show_diff(a.pr, a.path, a.line, true)
-    return err ~= 0 and vim.notify(err) or nil
-  end
+  local hit = vim.api.nvim_get_current_buf() == deck.buf and deck.at[vim.api.nvim_win_get_cursor(0)[1] - 1]
+  if hit then return open_file(hit.l, hit.path, hit.line, true) end
   local ref = ref_under_cursor()
-  if not ref then return vim.notify('no path under the cursor') end
-  if #layers() > 0 and layer_for(norm(ref.path)) and show_diff(nil, ref.path, ref.line, true) == 0 then return end
-  M.code(ref.path, ref.line)
+  if not ref then return vim.notify('no code or path under the cursor') end
+  local l = #layers() > 0 and layer_for(norm(ref.path), ref.line)
+  if l then return open_file(l, norm(ref.path), ref.line, true) end
+  side_show({ file = resolve(ref.path), line = ref.line }, true)
+end
+
+-- gd: the change to the file under the cursor, in unified.nvim.
+local function diff_here()
+  local hit = vim.api.nvim_get_current_buf() == deck.buf and deck.at[vim.api.nvim_win_get_cursor(0)[1] - 1]
+  if hit then return open_diff(hit.l, hit.path, hit.line, true) end
+  local ref = ref_under_cursor()
+  local l = ref and #layers() > 0 and layer_for(norm(ref.path), ref.line)
+  if not l then return vim.notify('no changed code or path under the cursor') end
+  open_diff(l, norm(ref.path), ref.line, true)
 end
 
 local function plain()
   local ref = ref_under_cursor()
-  if ref then M.code(ref.path, ref.line) else vim.notify('no path under the cursor') end
+  if ref then side_show({ file = resolve(ref.path), line = ref.line }, true) else vim.notify('no path under the cursor') end
 end
 
 local function map(buf, keys, fn)
   for _, k in ipairs(keys) do vim.keymap.set('n', k, fn, { buffer = buf, nowait = true, silent = true }) end
 end
 
-local function diff_keys(buf)
-  map(buf, { ']p' }, page_pr(1))
-  map(buf, { '[p' }, page_pr(-1))
-  map(buf, { ']f' }, page_file(1))
-  map(buf, { '[f' }, page_file(-1))
-  map(buf, { ']c' }, page_hunk(1))
-  map(buf, { '[c' }, page_hunk(-1))
+local function code_keys(buf)
+  map(buf, { 'gf', '<CR>' }, follow)
+  map(buf, { 'gd' }, diff_here)
+  map(buf, { 'gF' }, plain)
   map(buf, { 'gu' }, unviewed)
-  map(buf, { 'gs' }, toggle_layout)
   map(buf, { 'g?' }, function() vim.notify(table.concat(keys_help, '\n')) end)
-end
-
-pane_keys = function(buf)
-  diff_keys(buf)
-  map(buf, { 'q' }, function() vim.cmd('qall') end)
-  map(buf, { 'gf', '<CR>' }, open_side)
-  map(buf, { 'gd' }, open_full)
-  map(buf, { 'J' }, function() if deck.buf then step(1)() end end)
-  map(buf, { 'K' }, function() if deck.buf then step(-1)() end end)
-  vim.api.nvim_create_autocmd('CursorMoved', {
-    buffer = buf,
-    callback = function() if vim.api.nvim_get_current_win() == pane.win then pane_bar() end end,
-  })
 end
 
 local function deck_buf()
@@ -1041,17 +900,16 @@ local function deck_buf()
   -- Highlight fenced code through markdown's language injections. Needs the
   -- languages' parsers; without them the blocks just stay plain.
   pcall(vim.treesitter.start, buf, 'markdown')
-  diff_keys(buf)
+  code_keys(buf)
   map(buf, { 'q' }, function() vim.cmd('qall') end)
   map(buf, { 'J', ']]' }, step(1))
   map(buf, { 'K', '[[' }, step(-1))
   map(buf, { 'H' }, go(1))
   map(buf, { 'L' }, go('last'))
-  map(buf, { 'gf', '<CR>' }, follow)
-  map(buf, { 'gF' }, plain)
   map(buf, { 'c' }, comment)
   map(buf, { 'a' }, pick)
   map(buf, { 'S' }, send)
+  map(buf, { 'C' }, go_on)
   map(buf, { ']n' }, thread(1))
   map(buf, { '[n' }, thread(-1))
   vim.api.nvim_buf_create_user_command(buf, 'Send', function(o) send(o.bang) end, { bang = true })
@@ -1117,7 +975,6 @@ function M.slides(path, n, block, session)
   deck.path = path
   deck.want = n or 'last'
   deck.stamp = stamp(deck.path)
-  deck.anchored = nil
   local win = main_win()
   vim.api.nvim_set_current_win(win)
   vim.api.nvim_win_set_buf(win, deck_buf())
@@ -1156,61 +1013,76 @@ function M.doc(path, line)
   vim.bo.autoread = true
   vim.wo[win].wrap = true
   vim.wo[win].linebreak = true
-  -- Findings in a package or checkpoint cite path:LINE; open those in the diff.
-  if #layers() > 0 then
-    map(0, { 'gf', '<CR>' }, follow)
-    map(0, { 'gF' }, plain)
-    diff_keys(0)
-  end
+  -- Findings in a package or checkpoint cite path:LINE; gf and gd open those.
+  code_keys(0)
   if tonumber(line) then pcall(vim.api.nvim_win_set_cursor, win, { tonumber(line), 0 }) end
   presented('Look at ' .. shown(resolve(path), line))
   return 0
 end
 
--- Open a file in a split beside the slides, reusing it on the next call.
+-- A file in the pane below the slides.
 function M.code(path, line)
-  code_window()
-  vim.cmd.edit(vim.fn.fnameescape(resolve(path)))
-  vim.bo.autoread = true
-  jump(code_win, line)
+  side_show({ file = resolve(path), line = tonumber(line) }, false)
   presented('Look at ' .. shown(resolve(path), line))
   return 0
 end
 
--- A layer's diff in the pane, at path:line when given.
+-- A PR's change to one file, in unified.nvim in the pane below the slides.
 function M.diff(pr, path, line)
-  local err = show_diff(pr, path, line, true)
-  if err == 0 then
-    local where = path and path ~= '' and (' ' .. shown(resolve(path), line)) or ''
-    presented('Look at the diff' .. (pr and pr ~= '' and (': #' .. tostring(pr):gsub('^#', '')) or '') .. where)
+  if #layers() == 0 then return 'no review/layers.tsv in ' .. root end
+  if not path or path == '' then return 'diff needs a path (whole diffs go in slides, as Diff: lines)' end
+  local rel = norm(path)
+  local l
+  if pr and pr ~= '' then
+    l = layer(pr)
+    if not l then return '#' .. tostring(pr):gsub('^#', '') .. ' is not in review/layers.tsv' end
+    if not excerpt.file(diff_lines(l), rel) then return path .. ' is not in the diff of #' .. l.pr end
+  else
+    l = layer_for(rel, tonumber(line))
+    if not l then return path .. ' is not changed anywhere in the stack' end
   end
-  return err
+  open_diff(l, rel, tonumber(line), false)
+  presented('Look at the diff: #' .. l.pr .. ' ' .. shown(resolve(path), line))
+  return 0
 end
 
--- Close a gd tab, whichever viewer is in it. (:Unified takes no |, so
--- `Unified reset | tabclose` would hand the tabclose to it as a ref.)
-vim.api.nvim_create_user_command('DiffClose', function()
-  local ok, ustate = pcall(require, 'unified.state')
-  if ok and ustate.is_active() then vim.cmd('Unified reset') end
-  if vim.fn.exists(':DiffviewClose') == 2 and vim.t.diffview_view_initialized then vim.cmd('DiffviewClose') end
-  if vim.fn.tabpagenr('$') > 1 then vim.cmd('tabclose') end
-end, {})
-
-vim.api.nvim_create_autocmd('VimResized', { callback = function() vim.schedule(fit) end })
+-- The agent answering means the user replied to it in its own pane: its
+-- status goes back to working after it had stopped (Rex's program status;
+-- tmux has none, so there only the other replies count).
+local watch = { which = nil, armed = false, busy = false }
+local function check_reply()
+  local which = look.which()
+  if not which or not recipient.status or not deck.path or watch.busy then return end
+  if watch.which ~= which then watch.which, watch.armed = which, false end
+  local okr, lines = pcall(vim.fn.readfile, deck.path)
+  local ref = owners[deck.path] or (okr and agent_target(lines))
+  if not ref or not ref:match('^rex:') then return end
+  watch.busy = true
+  recipient.status(ref, function(state)
+    watch.busy = false
+    if watch.which ~= look.which() then return end
+    if state ~= 'working' then
+      watch.armed = true
+    elseif watch.armed then
+      look.dismiss(watch.which)
+      render()
+    end
+  end)
+end
 
 -- The agent rewrites files underneath us; poll rather than fs_event, which
 -- loses track of files replaced by rename.
+local ticks = 0
 local timer = uv.new_timer()
 timer:start(700, 700, vim.schedule_wrap(function()
+  ticks = ticks + 1
   local s = stamp(deck.path)
-  if s and s ~= deck.stamp then
-    deck.stamp = s
+  local n = stamp(review_file('annotations.tsv'))
+  if (s and s ~= deck.stamp) or n ~= notes.seen then
+    deck.stamp, notes.seen = s or deck.stamp, n
     if deck.buf and vim.api.nvim_buf_is_valid(deck.buf) then render() end
   end
-  if valid(pane.win) and layer(pane.pr) then
-    view(layer(pane.pr))
-    refresh_notes()
-  end
+  if ticks % 3 == 0 then check_reply() end
   vim.cmd('silent! checktime')
 end))
 

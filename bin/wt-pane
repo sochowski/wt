@@ -16,6 +16,9 @@
 #   wt pane key REF KEY...             press keys: enter, escape, tab, ctrl+c, ...
 #   wt pane capture REF                print the pane's screen and scrollback
 #   wt pane alive REF                  exit 0 if the pane still exists
+#   wt pane status REF                 the pane program's own status (Rex's program
+#                                      status: working, done, blocked, idle, ...),
+#                                      or none; tmux has no such thing (exit 3)
 #   wt pane focus REF                  bring the pane to the front
 #
 # A ref names one pane wherever it lives, so it can be saved and used from any
@@ -28,7 +31,7 @@
 set -euo pipefail
 
 die() { printf 'wt pane: %s\n' "$*" >&2; exit 1; }
-usage() { sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//'; }
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -275,7 +278,7 @@ tmux_key() {
 cmd() {
   local c="$1"; shift
   case "$c" in
-    info|agents|send|key|capture|alive|focus) ;;
+    info|agents|send|key|capture|alive|focus|status) ;;
     *) die "unknown command '$c'" ;;
   esac
   local ref="${1:-}"
@@ -296,6 +299,7 @@ cmd() {
     tmux.capture) tm "$B" capture-pane -p -J -S - -t "$A" ;;
     tmux.alive)   texists "$A" "$B" ;;
     tmux.focus)   tm "$B" select-window -t "$A" && tm "$B" select-pane -t "$A" ;;
+    tmux.status)  echo "wt pane: tmux has no program status" >&2; exit 3 ;;
     rex.info)     rex_info "$A" "$B" ;;
     rex.agents)   rex_agents "$A" "$B" ;;
     rex.send)     (( $# == 1 )) || die "usage: wt pane send REF TEXT"
@@ -304,6 +308,10 @@ cmd() {
     rex.capture)  rex capture -s "$A" -b "$B" --trim ;;
     rex.alive)    rex block call -s "$A" -b "$B" process > /dev/null 2>&1 ;;
     rex.focus)    rex focus -s "$A" "$B" ;;
+    rex.status)   need_jq
+                  # The root record is the program's own; ids are its children.
+                  rex block call -s "$A" -b "$B" program_status |
+                    jq -r '[.records[] | select(.id == null)][0].state // "none"' ;;
   esac
 }
 

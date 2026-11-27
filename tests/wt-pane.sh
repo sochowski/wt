@@ -81,6 +81,10 @@ rx send rex:s/agent 'hello "there"'; rx key rex:s/agent enter ctrl+c
 eq "rex: send and keys" "$(cat "$tmp/rex/calls")" $'send -s s -b agent hello "there"\nsend-key -s s -b agent enter\nsend-key -s s -b agent ctrl+c'
 rx alive rex:s/agent && ok "rex: alive" || bad "rex: alive"
 rx alive rex:s/gone 2> /dev/null && bad "rex: dead pane is alive" || ok "rex: dead pane isn't alive"
+echo '{"records":[{"id":"bg1","state":"working"},{"state":"done","app":"claude-code"}]}' > "$tmp/rex/status.json"
+eq "rex: status is the program's own record, not a child's" "$(rx status rex:s/status)" done
+echo '{"records":[]}' > "$tmp/rex/status.json"
+eq "rex: status without a record" "$(rx status rex:s/status)" none
 
 out=$(env -u TMUX -u TMUX_PANE -u REX_SESSION -u REX_BLOCK "$pane" here 2>&1); code=$?
 [[ $code != 0 ]] && has "none: here fails outside a multiplexer" "$out" "not in a Rex or tmux pane" || bad "none: here" "$out"
@@ -116,6 +120,7 @@ if ! command -v tmux > /dev/null; then echo "skip tmux: not installed"; else
   has "tmux: send pastes the text as it is, key presses Enter" "$(tx capture "$s")" "wt 42"
   tx alive "$a" && ok "tmux: alive" || bad "tmux: alive"
   tx alive "tmux:%999@$sock" && bad "tmux: dead pane is alive" || ok "tmux: dead pane isn't alive"
+  tx status "$a" > /dev/null 2>&1; eq "tmux: no program status" "$?" 3
   tmux -S "$sock" kill-server
 fi
 

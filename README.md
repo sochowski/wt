@@ -77,19 +77,23 @@ order as slides, a chapter at a time) and `pr-verify` (local checks, including
 before/after against the base). They show their work with
 `.wt/bin/review-show`, which drives one nvim per workspace over a socket. In
 Rex or tmux the nvim opens as a split beside the agent. It shows markdown slides
-(split on `---`, reloaded as the agent writes them), docs, files, and a diff
-pane under the slides. A slide's `Diff: #<pr> path:line` line moves the pane
-there; `]p`/`[p`, `]f`/`[f`, `]c`/`[c` page it by PR, file and hunk; `gf` on a
-diff line opens the file at that side, `gd` opens it in a tab (unified.nvim's
-inline diff for the top PR, whose head is the checkout; diffview below it), `gs`
-moves the pane beside the slides, and `gu` lists changed files not opened yet
-(kept in `review/viewed.tsv`). The agent's notes in `review/annotations.tsv`
-show above the lines they're about. Slides use render-markdown, so fenced code is highlighted by
-treesitter (given the languages' parsers) and `mermaid` blocks render as box
-drawings (given render-markdown-mermaid and `bm`). On a slide, `j`/`k`/`gg`/`G`
-move as usual, `J`/`K` page (with a count), `L`/`H` jump to the last and first
-slide, `gf` opens the `path:line` under the cursor (in the diff when the stack
-changes it), and `g?` lists the rest.
+(split on `---`, reloaded as the agent writes them) and docs, with the code they
+discuss drawn inside them: a slide line like
+`Diff: #<pr> repos/<repo>/<path>:<from>-<to>` becomes those lines of the PR's
+real change, built from `review/diffs/<pr>.diff` and the file at the PR's head.
+The code keeps its language's highlighting, added lines get an add background,
+removed ones sit inline where they were, and the agent's notes from
+`review/annotations.tsv` show above their lines. With one line instead of a
+range it shows the hunk around it, or the nearest hunk; with no line, the
+file's hunks. On that code, `gf` opens the file at the line and `gd` opens the
+file's change in unified.nvim (diffview for a PR below the checkout's head).
+Both open in a second nvim in a pane of its own below the slides, never in a
+split of the panel; it closes with the panel. `gu` lists changed files not shown
+or opened yet (kept in `review/viewed.tsv`). Slides use render-markdown, so
+fenced code is highlighted by treesitter (given the languages' parsers) and
+`mermaid` blocks render as box drawings (given render-markdown-mermaid and
+`bm`). On a slide, `j`/`k`/`gg`/`G` move as usual, `J`/`K` page (with a count),
+`L`/`H` jump to the last and first slide, and `g?` lists the rest.
 
 `c` adds a comment, `a` then a letter picks an option, and `S` (or `:send`) submits
 new comments to the agent pane. `review-show slides` binds the deck to the
@@ -121,26 +125,26 @@ new one. Reconnecting waits for any active send to finish. An agent can also
 explicitly claim a deck with `.wt/bin/review-show bind path/to/deck.md`, or
 present it again with `review-show slides`.
 
-The panel asks for you by itself. When the agent shows slides, a doc, code or
-a diff while you're looking elsewhere, the panel marks itself blocked with what
-to look at ("Look at the slides: walkthrough.md"); looking at it clears that.
-Looking means the pane has focus, or you typed, clicked or scrolled in it in
-the last few seconds (`vim.g.wt_panel_recent`, 5 by default), so nothing is
-raised while you're reading along. Unsent comments, sending, a failed send or
-a lost recipient take precedence and stay until they're dealt with; a
-successful submission clears them. An agent that needs an answer whether or
-not you've looked runs
+The panel asks for your reply by itself. When the agent shows slides, a doc,
+code or a diff, the panel marks itself blocked with what it showed ("Look at
+the slides: walkthrough.md") and the slides' bar says it's your turn. Looking,
+clicking or scrolling doesn't clear that; replying does: sending comments
+(`S`), `C` to tell the agent to go on, or answering the agent in its own pane
+(in Rex, the panel sees the agent's status go back to working after it had
+stopped). The agent showing something new replaces the ask. Unsent comments,
+sending, a failed send or a lost recipient take precedence and stay until
+they're dealt with. An agent that needs comments specifically runs
 `.wt/bin/review-show status waiting 'Comments needed: deployment options'`,
-which holds until the comments are sent, and `review-show status idle`
-withdraws any ask, the automatic one included.
+which holds until comments are sent, and `review-show status idle` withdraws
+any ask, the automatic one included.
 
 In Rex the panel reports this through Rex's program status protocol (OSC
 7501), on its own pane, and Rex controls how activity appears and whether it
 produces notifications or sounds. In tmux it rings the bell once on becoming
 blocked, which flags the window in the status line, and puts the message in
-its pane title (`#{pane_title}`, shown with `pane-border-status`). tmux passes
-focus to nvim only with `set -g focus-events on`; without it, typing in the
-pane is what clears the ask.
+its pane title (`#{pane_title}`, shown with `pane-border-status`). tmux has no
+program status to read, so there only `S`, `C` and the agent's next step
+clear it.
 
 Personal or team review process goes in a layer of its own, e.g.
 `~/.config/wt/kits/review/` with an `AGENTS.md` and extra skills.
@@ -222,11 +226,13 @@ backends (Rex against a fake `rex`, tmux against a server of its own).
 `wt panel` keeps one nvim per workspace in a pane beside the agent, with your
 own config, and runs Ex commands in it: `wt panel ex 'edit +120 src/app.py'`.
 It opens the pane with `wt pane split` the first time, without taking focus;
-`wt panel pane` prints its ref. Like the review panel, it asks for you by
-itself: a file shown, a tab opened or a file reloaded while you're looking
-elsewhere marks the pane blocked ("Look at src/app.py") in Rex, or rings the
-bell and sets its title in tmux, until you look at it (see
-[Reviewing a PR](#reviewing-a-pr) for what counts as looking). Both use
+`wt panel pane` prints its ref. It asks for you by itself: a file shown, a tab
+opened or a file reloaded while you're looking elsewhere marks the pane
+blocked ("Look at src/app.py") in Rex, or rings the bell and sets its title in
+tmux, until you look at it. Looking means the pane has focus (tmux passes focus
+on with `set -g focus-events on`), or you typed, clicked or scrolled in it in
+the last few seconds (`vim.g.wt_panel_recent`, 5 by default). Unlike the review
+panel's ask, nothing waits for a reply here, so a look is enough. Both use
 `nvim/attention.lua`; `tests/attention.lua` checks it.
 
 ## Skills
